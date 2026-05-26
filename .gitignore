@@ -1,5 +1,7 @@
 .DS_Store
 .venv/
+.cache/
+.mplconfig/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
@@ -10,3 +12,4 @@ results/
 qc/
 logs/
 figures/
+.data/

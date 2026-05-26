@@ -1,4 +1,4 @@
-# EEG–PPG correlation pipeline (no ICA)
+# EEG–PPG correlation pipeline
 
 This repository contains a **raw-to-features** pipeline to compute inter-subject correlations between EEG spectral/features and PPG/HRV features.
 
