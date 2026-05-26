@@ -1,0 +1,7 @@
+mne
+numpy
+scipy
+pandas
+statsmodels
+matplotlib
+pyyaml

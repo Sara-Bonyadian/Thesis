@@ -1,0 +1,33 @@
+dataset_id: hiit
+
+paths:
+  # Point these at *raw* data when you hook it up.
+  raw_root: ./data/raw
+  out_root: ./derivatives
+
+subjects: []
+conditions: []
+sessions: []
+
+eeg:
+  l_freq: 1.0
+  h_freq: 60.0
+  bad_channel_variance_z: 3.0
+  reference: average
+  psd:
+    fmin: 1.0
+    fmax: 60.0
+    n_fft: 2048
+
+ppg:
+  start_time_s: 175
+  end_time_s: 235
+  peak_min_distance_s: 0.4
+  peak_height: 0.3
+  ibi_min_ms: 400
+  ibi_max_ms: 1200
+
+correlation:
+  alpha: 0.05
+  min_n: 5
+  fdr_method: fdr_bh
