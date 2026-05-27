@@ -29,6 +29,16 @@ FRONTAL_MIDLINE_CHANNELS_DEFAULT: list[str] = [
     "Cz",
 ]
 
+# Standard frontal channels for frontal-beta.
+FRONTAL_BETA_CHANNELS_DEFAULT: list[str] = [
+    "F3",
+    "F4",
+    "F7",
+    "F8",
+    "Fz",
+    "FCz",
+]
+
 # Posterior montage used in prior Alpha_Analysis.ipynb PAF work.
 POSTERIOR_ELECTRODES: list[str] = [
     "CP1",
@@ -675,6 +685,257 @@ def fm_theta(
 def frontal_midline_theta(raw: mne.io.BaseRaw, **kwargs) -> float:
     """Convenience wrapper returning only the FM-theta value."""
     return fm_theta(raw, **kwargs).fm_theta
+
+
+@dataclass(frozen=True)
+class FrontalBetaResult:
+    """
+    Frontal beta result.
+
+    per_channel_power : {"<ch>": integrated beta power in µV²}
+                       (NaN for channels that are missing or invalid).
+    mean_beta_power   : mean beta power across channels with finite positive
+                       values (NaN if none).
+    frontal_beta      : final frontal-beta value. If log_transform=True,
+                       frontal_beta = ln(mean_beta_power); otherwise it equals
+                       mean_beta_power.
+    beta_band_used    : (lo_hz, hi_hz) used for integration.
+    missing_channels  : requested channels absent from `raw`.
+    """
+
+    per_channel_power: dict[str, float]
+    mean_beta_power: float
+    frontal_beta: float
+    beta_band_used: tuple[float, float]
+    missing_channels: list[str]
+
+
+def _beta_power_per_channel(
+    raw: mne.io.BaseRaw,
+    channels: list[str],
+    *,
+    beta_band: tuple[float, float],
+    psd_fmin: float,
+    psd_fmax: float,
+    n_fft: int,
+) -> dict[str, float]:
+    """
+    Welch PSD per channel (linear µV²/Hz), then integrate over `beta_band`
+    with the trapezoidal rule. Returns {channel_name: beta_power_uv2}.
+    Channels not present in `raw` are silently skipped.
+    """
+    present = [ch for ch in channels if ch in raw.ch_names]
+    if not present:
+        return {}
+
+    r = raw.copy().pick(present)
+    r.apply_function(lambda x: x * 1e6)  # V -> µV
+    psd = r.compute_psd(
+        method="welch",
+        fmin=psd_fmin,
+        fmax=psd_fmax,
+        n_fft=min(n_fft, r.n_times),
+        verbose=False,
+    )
+    psd_linear = psd.get_data()  # (n_channels, n_freqs)
+    freqs = psd.freqs
+
+    mask = (freqs >= beta_band[0]) & (freqs <= beta_band[1])
+    if not np.any(mask):
+        return {ch: float("nan") for ch in r.ch_names}
+
+    band_freqs = freqs[mask]
+    band_power = psd_linear[:, mask]
+    beta_power = np.trapz(band_power, x=band_freqs, axis=1)  # µV²
+    return {ch: float(p) for ch, p in zip(r.ch_names, beta_power)}
+
+
+def frontal_beta(
+    raw: mne.io.BaseRaw,
+    *,
+    channels: list[str] | None = None,
+    beta_band: tuple[float, float] = (13.0, 30.0),
+    log_transform: bool = True,
+    psd_fmin: float = 1.0,
+    psd_fmax: float = 30.0,
+    n_fft: int = 2048,
+) -> FrontalBetaResult:
+    """
+    Frontal beta.
+
+    Computes linear beta power (µV²) per selected frontal channel by
+    integrating Welch PSD over `beta_band`, then averages across valid
+    channels. Optionally applies a natural-log transform to the mean.
+
+    Parameters
+    ----------
+    raw : preprocessed EEG.
+    channels : frontal channels to include.
+        Defaults to FRONTAL_BETA_CHANNELS_DEFAULT.
+    beta_band : beta range in Hz (default 13-30).
+    log_transform : if True, return ln(mean_beta_power) as frontal_beta.
+    psd_fmin, psd_fmax, n_fft : Welch PSD settings.
+    """
+    requested = channels if channels is not None else FRONTAL_BETA_CHANNELS_DEFAULT
+
+    # Keep order stable while removing duplicates.
+    seen: set[str] = set()
+    unique_channels: list[str] = []
+    for ch in requested:
+        if ch not in seen:
+            seen.add(ch)
+            unique_channels.append(ch)
+
+    band_used = (float(beta_band[0]), float(beta_band[1]))
+    beta_per_ch = _beta_power_per_channel(
+        raw,
+        unique_channels,
+        beta_band=band_used,
+        psd_fmin=psd_fmin,
+        psd_fmax=psd_fmax,
+        n_fft=n_fft,
+    )
+
+    per_channel: dict[str, float] = {}
+    missing_channels: list[str] = []
+    for ch in unique_channels:
+        val = beta_per_ch.get(ch)
+        if val is None:
+            per_channel[ch] = float("nan")
+            missing_channels.append(ch)
+        else:
+            per_channel[ch] = float(val)
+
+    finite_positive_vals = [
+        v for v in per_channel.values() if np.isfinite(v) and v > 0.0
+    ]
+    mean_beta_power = (
+        float(np.mean(finite_positive_vals)) if finite_positive_vals else float("nan")
+    )
+
+    if log_transform:
+        frontal_beta_val = (
+            float(np.log(mean_beta_power))
+            if np.isfinite(mean_beta_power) and mean_beta_power > 0.0
+            else float("nan")
+        )
+    else:
+        frontal_beta_val = mean_beta_power
+
+    return FrontalBetaResult(
+        per_channel_power=per_channel,
+        mean_beta_power=mean_beta_power,
+        frontal_beta=frontal_beta_val,
+        beta_band_used=band_used,
+        missing_channels=missing_channels,
+    )
+
+
+def frontal_beta_value(raw: mne.io.BaseRaw, **kwargs) -> float:
+    """Convenience wrapper returning only the frontal-beta value."""
+    return frontal_beta(raw, **kwargs).frontal_beta
+
+
+@dataclass(frozen=True)
+class FrontalBetaPlotResult:
+    fig: Any
+    ax: Any
+    result: FrontalBetaResult
+
+
+def plot_frontal_beta(
+    raw: mne.io.BaseRaw,
+    *,
+    channels: list[str] | None = None,
+    beta_band: tuple[float, float] = (13.0, 30.0),
+    log_transform: bool = True,
+    psd_fmin: float = 1.0,
+    psd_fmax: float = 30.0,
+    n_fft: int = 2048,
+) -> FrontalBetaPlotResult:
+    """
+    Plot per-channel beta power (µV²) for frontal channels used in
+    frontal-beta, with a horizontal line for the mean beta power.
+    """
+    import os
+
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), ".mplconfig"))
+
+    import matplotlib.pyplot as plt
+
+    result = frontal_beta(
+        raw,
+        channels=channels,
+        beta_band=beta_band,
+        log_transform=log_transform,
+        psd_fmin=psd_fmin,
+        psd_fmax=psd_fmax,
+        n_fft=n_fft,
+    )
+
+    requested = channels if channels is not None else FRONTAL_BETA_CHANNELS_DEFAULT
+    # Keep order stable while removing duplicates.
+    seen: set[str] = set()
+    unique_channels: list[str] = []
+    for ch in requested:
+        if ch not in seen:
+            seen.add(ch)
+            unique_channels.append(ch)
+
+    x = np.arange(len(unique_channels), dtype=float)
+    y = np.array([result.per_channel_power.get(ch, float("nan")) for ch in unique_channels], dtype=float)
+    valid_mask = np.isfinite(y) & (y > 0.0)
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.0))
+
+    # Plot valid and missing/invalid channels separately to keep NaNs visible.
+    if np.any(valid_mask):
+        ax.bar(
+            x[valid_mask],
+            y[valid_mask],
+            color="tab:purple",
+            alpha=0.85,
+            label="Beta power (valid channels)",
+        )
+    if np.any(~valid_mask):
+        ax.bar(
+            x[~valid_mask],
+            np.zeros(np.sum(~valid_mask)),
+            color="lightgray",
+            edgecolor="gray",
+            hatch="//",
+            label="Missing/invalid channel",
+        )
+        for xi in x[~valid_mask]:
+            ax.text(xi, 0.0, "NaN", ha="center", va="bottom", fontsize=8, color="gray")
+
+    if np.isfinite(result.mean_beta_power):
+        ax.axhline(
+            result.mean_beta_power,
+            color="tab:red",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Mean beta power = {result.mean_beta_power:.4f} µV²",
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(unique_channels)
+    ax.set_ylabel("Beta power (µV²)")
+    ax.set_xlabel("Frontal channels")
+    ax.grid(True, axis="y", alpha=0.25)
+
+    fb_str = f"{result.frontal_beta:.4f}" if np.isfinite(result.frontal_beta) else "NaN"
+    transform_label = "log" if log_transform else "linear"
+    band = result.beta_band_used
+    ax.set_title(
+        f"Frontal beta ({transform_label}) = {fb_str}\n"
+        f"Beta band {band[0]:.1f}-{band[1]:.1f} Hz"
+    )
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+
+    return FrontalBetaPlotResult(fig=fig, ax=ax, result=result)
 
 
 @dataclass(frozen=True)
