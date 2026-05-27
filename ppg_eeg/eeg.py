@@ -16,6 +16,19 @@ EEG_BANDS: dict[str, tuple[float, float]] = {
     "beta": (13.0, 30.0),
 }
 
+# Standard frontal pairs for Frontal Alpha Asymmetry (left, right).
+FRONTAL_PAIRS_DEFAULT: list[tuple[str, str]] = [
+    ("F3", "F4"),
+    ("F7", "F8"),
+]
+
+# Standard frontal-midline channels for FM-theta.
+FRONTAL_MIDLINE_CHANNELS_DEFAULT: list[str] = [
+    "Fz",
+    "FCz",
+    "Cz",
+]
+
 # Posterior montage used in prior Alpha_Analysis.ipynb PAF work.
 POSTERIOR_ELECTRODES: list[str] = [
     "CP1",
@@ -339,4 +352,548 @@ def plot_alpha_peak(
     fig.tight_layout()
 
     return AlphaPeakPlotResult(fig=fig, ax=ax, peak_frequency_hz=peak_f, peak_power_uv2_hz=peak_p)
+
+
+@dataclass(frozen=True)
+class FaaResult:
+    """
+    Frontal Alpha Asymmetry result.
+
+    per_pair       : {"<right>-<left>": ln(P_alpha[right]) - ln(P_alpha[left])}
+                     NaN for pairs that could not be computed.
+    mean_faa       : mean across pairs with finite values (NaN if none).
+    alpha_band_used: (lo_hz, hi_hz) actually used for integration.
+    missing_pairs  : pairs skipped because one/both electrodes were absent
+                     from `raw` (e.g. dropped as bad during preprocessing).
+    """
+
+    per_pair: dict[str, float]
+    mean_faa: float
+    alpha_band_used: tuple[float, float]
+    missing_pairs: list[tuple[str, str]]
+
+
+def _alpha_power_per_channel(
+    raw: mne.io.BaseRaw,
+    channels: list[str],
+    *,
+    alpha_band: tuple[float, float],
+    psd_fmin: float,
+    psd_fmax: float,
+    n_fft: int,
+) -> dict[str, float]:
+    """
+    Welch PSD per channel (linear µV²/Hz), then integrate over `alpha_band`
+    with the trapezoidal rule. Returns {channel_name: alpha_power_uv2}.
+    Channels not present in `raw` are silently skipped.
+    """
+    present = [ch for ch in channels if ch in raw.ch_names]
+    if not present:
+        return {}
+
+    r = raw.copy().pick(present)
+    r.apply_function(lambda x: x * 1e6)  # V -> µV
+    psd = r.compute_psd(
+        method="welch",
+        fmin=psd_fmin,
+        fmax=psd_fmax,
+        n_fft=min(n_fft, r.n_times),
+        verbose=False,
+    )
+    psd_linear = psd.get_data()  # (n_channels, n_freqs)
+    freqs = psd.freqs
+
+    mask = (freqs >= alpha_band[0]) & (freqs <= alpha_band[1])
+    if not np.any(mask):
+        return {ch: float("nan") for ch in r.ch_names}
+
+    band_freqs = freqs[mask]
+    band_power = psd_linear[:, mask]
+    alpha_power = np.trapz(band_power, x=band_freqs, axis=1)  # µV²
+    return {ch: float(p) for ch, p in zip(r.ch_names, alpha_power)}
+
+
+def faa(
+    raw: mne.io.BaseRaw,
+    *,
+    pairs: list[tuple[str, str]] | None = None,
+    alpha_band: tuple[float, float] = (8.0, 13.0),
+    use_individual_alpha: bool = False,
+    iaf_half_width: float = 2.0,
+    psd_fmin: float = 1.0,
+    psd_fmax: float = 30.0,
+    n_fft: int = 2048,
+) -> FaaResult:
+    """
+    Frontal Alpha Asymmetry (FAA).
+
+    For each (left, right) pair, FAA is defined as
+
+        FAA = ln(P_alpha[right]) - ln(P_alpha[left])
+
+    where P_alpha is the alpha-band power (µV²) obtained by integrating the
+    Welch PSD (linear, µV²/Hz) over `alpha_band` via the trapezoidal rule.
+
+    Sign convention: positive FAA -> *less* alpha on the left frontal site
+    -> relatively greater left-frontal cortical activity -> typically
+    interpreted as approach motivation / positive affect. Negative FAA ->
+    withdrawal / negative affect.
+
+    Notes on reference: FAA depends on the EEG reference. This function
+    assumes `raw` has already been re-referenced (e.g. average reference via
+    `preprocess_eeg`). Switching references will change the FAA values.
+
+    Parameters
+    ----------
+    raw : preprocessed EEG.
+    pairs : list of (left, right) electrode names.
+        Defaults to FRONTAL_PAIRS_DEFAULT = [("F3","F4"), ("F7","F8")].
+    alpha_band : explicit alpha band in Hz (default 8-13).
+        Ignored if `use_individual_alpha` is True and PAF was found.
+    use_individual_alpha : if True, center the alpha band on the
+        participant's PAF (computed posteriorly) with total width
+        2 * iaf_half_width. Falls back to `alpha_band` if PAF is NaN.
+    iaf_half_width : half-width (Hz) for the individualized alpha band.
+    psd_fmin, psd_fmax, n_fft : Welch PSD settings.
+    """
+    if pairs is None:
+        pairs = list(FRONTAL_PAIRS_DEFAULT)
+
+    if use_individual_alpha:
+        paf = alpha_peak_frequency(
+            raw,
+            psd_fmin=psd_fmin,
+            psd_fmax=psd_fmax,
+            n_fft=n_fft,
+        )
+        if np.isfinite(paf):
+            band_used: tuple[float, float] = (
+                float(paf - iaf_half_width),
+                float(paf + iaf_half_width),
+            )
+        else:
+            band_used = (float(alpha_band[0]), float(alpha_band[1]))
+    else:
+        band_used = (float(alpha_band[0]), float(alpha_band[1]))
+
+    seen: set[str] = set()
+    unique_channels: list[str] = []
+    for L, R in pairs:
+        for ch in (L, R):
+            if ch not in seen:
+                seen.add(ch)
+                unique_channels.append(ch)
+
+    alpha_per_ch = _alpha_power_per_channel(
+        raw,
+        unique_channels,
+        alpha_band=band_used,
+        psd_fmin=psd_fmin,
+        psd_fmax=psd_fmax,
+        n_fft=n_fft,
+    )
+
+    per_pair: dict[str, float] = {}
+    missing: list[tuple[str, str]] = []
+    for L, R in pairs:
+        key = f"{R}-{L}"
+        p_l = alpha_per_ch.get(L)
+        p_r = alpha_per_ch.get(R)
+        if (
+            p_l is None
+            or p_r is None
+            or not np.isfinite(p_l)
+            or not np.isfinite(p_r)
+            or p_l <= 0.0
+            or p_r <= 0.0
+        ):
+            per_pair[key] = float("nan")
+            missing.append((L, R))
+            continue
+        per_pair[key] = float(np.log(p_r) - np.log(p_l))
+
+    finite_vals = [v for v in per_pair.values() if np.isfinite(v)]
+    mean_faa = float(np.mean(finite_vals)) if finite_vals else float("nan")
+
+    return FaaResult(
+        per_pair=per_pair,
+        mean_faa=mean_faa,
+        alpha_band_used=band_used,
+        missing_pairs=missing,
+    )
+
+
+def frontal_alpha_asymmetry(raw: mne.io.BaseRaw, **kwargs) -> float:
+    """Convenience wrapper returning only the mean FAA across pairs."""
+    return faa(raw, **kwargs).mean_faa
+
+
+@dataclass(frozen=True)
+class FmThetaResult:
+    """
+    Frontal-midline theta (FM-theta) result.
+
+    per_channel_power : {"<ch>": integrated theta power in µV²}
+                       (NaN for channels that are missing or invalid).
+    mean_theta_power  : mean theta power across channels with finite positive
+                       values (NaN if none).
+    fm_theta          : final FM-theta value. If log_transform=True,
+                       fm_theta = ln(mean_theta_power); otherwise it equals
+                       mean_theta_power.
+    theta_band_used   : (lo_hz, hi_hz) used for integration.
+    missing_channels  : requested channels absent from `raw`.
+    """
+
+    per_channel_power: dict[str, float]
+    mean_theta_power: float
+    fm_theta: float
+    theta_band_used: tuple[float, float]
+    missing_channels: list[str]
+
+
+def _theta_power_per_channel(
+    raw: mne.io.BaseRaw,
+    channels: list[str],
+    *,
+    theta_band: tuple[float, float],
+    psd_fmin: float,
+    psd_fmax: float,
+    n_fft: int,
+) -> dict[str, float]:
+    """
+    Welch PSD per channel (linear µV²/Hz), then integrate over `theta_band`
+    with the trapezoidal rule. Returns {channel_name: theta_power_uv2}.
+    Channels not present in `raw` are silently skipped.
+    """
+    present = [ch for ch in channels if ch in raw.ch_names]
+    if not present:
+        return {}
+
+    r = raw.copy().pick(present)
+    r.apply_function(lambda x: x * 1e6)  # V -> µV
+    psd = r.compute_psd(
+        method="welch",
+        fmin=psd_fmin,
+        fmax=psd_fmax,
+        n_fft=min(n_fft, r.n_times),
+        verbose=False,
+    )
+    psd_linear = psd.get_data()  # (n_channels, n_freqs)
+    freqs = psd.freqs
+
+    mask = (freqs >= theta_band[0]) & (freqs <= theta_band[1])
+    if not np.any(mask):
+        return {ch: float("nan") for ch in r.ch_names}
+
+    band_freqs = freqs[mask]
+    band_power = psd_linear[:, mask]
+    theta_power = np.trapz(band_power, x=band_freqs, axis=1)  # µV²
+    return {ch: float(p) for ch, p in zip(r.ch_names, theta_power)}
+
+
+def fm_theta(
+    raw: mne.io.BaseRaw,
+    *,
+    channels: list[str] | None = None,
+    theta_band: tuple[float, float] = (4.0, 7.0),
+    log_transform: bool = True,
+    psd_fmin: float = 1.0,
+    psd_fmax: float = 30.0,
+    n_fft: int = 2048,
+) -> FmThetaResult:
+    """
+    Frontal-midline theta (FM-theta).
+
+    Computes linear theta power (µV²) per selected frontal-midline channel by
+    integrating Welch PSD over `theta_band`, then averages across valid
+    channels. Optionally applies a natural-log transform to the mean.
+
+    Parameters
+    ----------
+    raw : preprocessed EEG.
+    channels : frontal-midline channels to include.
+        Defaults to FRONTAL_MIDLINE_CHANNELS_DEFAULT = ["Fz", "FCz", "Cz"].
+    theta_band : theta range in Hz (default 4-7).
+    log_transform : if True, return ln(mean_theta_power) as fm_theta.
+    psd_fmin, psd_fmax, n_fft : Welch PSD settings.
+    """
+    requested = channels if channels is not None else FRONTAL_MIDLINE_CHANNELS_DEFAULT
+
+    # Keep order stable while removing duplicates.
+    seen: set[str] = set()
+    unique_channels: list[str] = []
+    for ch in requested:
+        if ch not in seen:
+            seen.add(ch)
+            unique_channels.append(ch)
+
+    band_used = (float(theta_band[0]), float(theta_band[1]))
+    theta_per_ch = _theta_power_per_channel(
+        raw,
+        unique_channels,
+        theta_band=band_used,
+        psd_fmin=psd_fmin,
+        psd_fmax=psd_fmax,
+        n_fft=n_fft,
+    )
+
+    per_channel: dict[str, float] = {}
+    missing_channels: list[str] = []
+    for ch in unique_channels:
+        val = theta_per_ch.get(ch)
+        if val is None:
+            per_channel[ch] = float("nan")
+            missing_channels.append(ch)
+        else:
+            per_channel[ch] = float(val)
+
+    finite_positive_vals = [
+        v for v in per_channel.values() if np.isfinite(v) and v > 0.0
+    ]
+    mean_theta_power = (
+        float(np.mean(finite_positive_vals)) if finite_positive_vals else float("nan")
+    )
+
+    if log_transform:
+        fm_val = (
+            float(np.log(mean_theta_power))
+            if np.isfinite(mean_theta_power) and mean_theta_power > 0.0
+            else float("nan")
+        )
+    else:
+        fm_val = mean_theta_power
+
+    return FmThetaResult(
+        per_channel_power=per_channel,
+        mean_theta_power=mean_theta_power,
+        fm_theta=fm_val,
+        theta_band_used=band_used,
+        missing_channels=missing_channels,
+    )
+
+
+def frontal_midline_theta(raw: mne.io.BaseRaw, **kwargs) -> float:
+    """Convenience wrapper returning only the FM-theta value."""
+    return fm_theta(raw, **kwargs).fm_theta
+
+
+@dataclass(frozen=True)
+class FmThetaPlotResult:
+    fig: Any
+    ax: Any
+    result: FmThetaResult
+
+
+def plot_fm_theta(
+    raw: mne.io.BaseRaw,
+    *,
+    channels: list[str] | None = None,
+    theta_band: tuple[float, float] = (4.0, 7.0),
+    log_transform: bool = True,
+    psd_fmin: float = 1.0,
+    psd_fmax: float = 30.0,
+    n_fft: int = 2048,
+) -> FmThetaPlotResult:
+    """
+    Plot per-channel theta power (µV²) for frontal-midline channels used in
+    FM-theta, with a horizontal line for the mean theta power.
+    """
+    import os
+
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), ".mplconfig"))
+
+    import matplotlib.pyplot as plt
+
+    result = fm_theta(
+        raw,
+        channels=channels,
+        theta_band=theta_band,
+        log_transform=log_transform,
+        psd_fmin=psd_fmin,
+        psd_fmax=psd_fmax,
+        n_fft=n_fft,
+    )
+
+    requested = channels if channels is not None else FRONTAL_MIDLINE_CHANNELS_DEFAULT
+    # Keep order stable while removing duplicates.
+    seen: set[str] = set()
+    unique_channels: list[str] = []
+    for ch in requested:
+        if ch not in seen:
+            seen.add(ch)
+            unique_channels.append(ch)
+
+    x = np.arange(len(unique_channels), dtype=float)
+    y = np.array([result.per_channel_power.get(ch, float("nan")) for ch in unique_channels], dtype=float)
+    valid_mask = np.isfinite(y) & (y > 0.0)
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.0))
+
+    # Plot valid and missing/invalid channels separately to keep NaNs visible.
+    if np.any(valid_mask):
+        ax.bar(
+            x[valid_mask],
+            y[valid_mask],
+            color="tab:blue",
+            alpha=0.85,
+            label="Theta power (valid channels)",
+        )
+    if np.any(~valid_mask):
+        ax.bar(
+            x[~valid_mask],
+            np.zeros(np.sum(~valid_mask)),
+            color="lightgray",
+            edgecolor="gray",
+            hatch="//",
+            label="Missing/invalid channel",
+        )
+        for xi in x[~valid_mask]:
+            ax.text(xi, 0.0, "NaN", ha="center", va="bottom", fontsize=8, color="gray")
+
+    if np.isfinite(result.mean_theta_power):
+        ax.axhline(
+            result.mean_theta_power,
+            color="tab:red",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Mean theta power = {result.mean_theta_power:.4f} µV²",
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(unique_channels)
+    ax.set_ylabel("Theta power (µV²)")
+    ax.set_xlabel("Frontal-midline channels")
+    ax.grid(True, axis="y", alpha=0.25)
+
+    fm_str = f"{result.fm_theta:.4f}" if np.isfinite(result.fm_theta) else "NaN"
+    transform_label = "log" if log_transform else "linear"
+    band = result.theta_band_used
+    ax.set_title(
+        f"FM-theta ({transform_label}) = {fm_str}\n"
+        f"Theta band {band[0]:.1f}-{band[1]:.1f} Hz"
+    )
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+
+    return FmThetaPlotResult(fig=fig, ax=ax, result=result)
+
+
+@dataclass(frozen=True)
+class FaaPlotResult:
+    fig: Any
+    axes: Any  # list of matplotlib Axes, one per pair
+    result: FaaResult
+
+
+def plot_faa(
+    raw: mne.io.BaseRaw,
+    *,
+    pairs: list[tuple[str, str]] | None = None,
+    alpha_band: tuple[float, float] = (8.0, 13.0),
+    use_individual_alpha: bool = False,
+    iaf_half_width: float = 2.0,
+    psd_fmin: float = 1.0,
+    psd_fmax: float = 30.0,
+    n_fft: int = 2048,
+) -> FaaPlotResult:
+    """
+    Plot per-pair linear PSDs for the frontal electrodes used in FAA, with the
+    alpha integration band shaded and the per-pair FAA annotated. One subplot
+    per pair; figure suptitle reports the mean FAA and the alpha band used.
+    """
+    import os
+
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), ".mplconfig"))
+
+    import matplotlib.pyplot as plt
+
+    if pairs is None:
+        pairs = list(FRONTAL_PAIRS_DEFAULT)
+
+    result = faa(
+        raw,
+        pairs=pairs,
+        alpha_band=alpha_band,
+        use_individual_alpha=use_individual_alpha,
+        iaf_half_width=iaf_half_width,
+        psd_fmin=psd_fmin,
+        psd_fmax=psd_fmax,
+        n_fft=n_fft,
+    )
+    band_used = result.alpha_band_used
+
+    # One Welch PSD pass over all needed channels (those present in raw).
+    seen: set[str] = set()
+    needed: list[str] = []
+    for L, R in pairs:
+        for ch in (L, R):
+            if ch not in seen and ch in raw.ch_names:
+                seen.add(ch)
+                needed.append(ch)
+
+    if needed:
+        r = raw.copy().pick(needed)
+        r.apply_function(lambda x: x * 1e6)  # V -> µV
+        psd = r.compute_psd(
+            method="welch",
+            fmin=psd_fmin,
+            fmax=psd_fmax,
+            n_fft=min(n_fft, r.n_times),
+            verbose=False,
+        )
+        psd_linear = psd.get_data()
+        freqs = psd.freqs
+        psd_by_ch = {ch: psd_linear[i] for i, ch in enumerate(r.ch_names)}
+    else:
+        freqs = np.array([])
+        psd_by_ch = {}
+
+    n_pairs = len(pairs)
+    fig, axes = plt.subplots(
+        1, n_pairs, figsize=(5.0 * n_pairs, 4.0), squeeze=False, sharey=True
+    )
+    axes_flat = list(axes[0])
+
+    for ax, (L, R) in zip(axes_flat, pairs):
+        pair_key = f"{R}-{L}"
+        faa_val = result.per_pair.get(pair_key, float("nan"))
+        ax.axvspan(
+            band_used[0], band_used[1], color="orange", alpha=0.15, label=f"Alpha {band_used[0]:.1f}-{band_used[1]:.1f} Hz"
+        )
+        plotted_any = False
+        for ch, color, side in ((L, "tab:blue", "L"), (R, "tab:red", "R")):
+            if ch in psd_by_ch:
+                ax.plot(freqs, psd_by_ch[ch], color=color, linewidth=1.8, label=f"{ch} ({side})")
+                plotted_any = True
+            else:
+                ax.plot([], [], color=color, linewidth=1.8, label=f"{ch} ({side}) — missing")
+
+        title = f"{R} vs {L}"
+        if np.isfinite(faa_val):
+            title += f"\nFAA = {faa_val:+.3f}"
+        else:
+            title += "\nFAA = NaN"
+        ax.set_title(title)
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_xlim(psd_fmin, psd_fmax)
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best", fontsize=8)
+        if not plotted_any:
+            ax.text(
+                0.5, 0.5, "both electrodes missing",
+                transform=ax.transAxes, ha="center", va="center", color="gray",
+            )
+
+    axes_flat[0].set_ylabel("Power (µV²/Hz)")
+
+    mean_str = f"{result.mean_faa:+.3f}" if np.isfinite(result.mean_faa) else "NaN"
+    fig.suptitle(
+        f"Frontal Alpha Asymmetry — mean FAA = {mean_str}  "
+        f"(alpha band {band_used[0]:.1f}-{band_used[1]:.1f} Hz, sign: ln(R) − ln(L))"
+    )
+    fig.tight_layout()
+
+    return FaaPlotResult(fig=fig, axes=axes_flat, result=result)
 
