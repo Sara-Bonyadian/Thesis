@@ -1,17 +1,11 @@
 dataset_ids:
-  - hiit
-  - ds003838
   - ds006848
-
-# Backward-compatible single-dataset selector (optional).
-dataset_id: hiit
+dataset_id: ds006848
 
 paths:
-  # raw_root can point either to ./data/raw or directly to one dataset folder.
-  raw_root: ./data/raw
-  out_root: ./derivatives
+  raw_root: ./data/raw/ds006848
+  out_root: ./derivatives/run_ds006848
 
-# Optional global filters across adapters.
 subjects: []
 tasks: []
 conditions: []
@@ -28,14 +22,12 @@ eeg:
     n_fft: 2048
 
 ppg:
-  # If this range is out of bounds for a recording, the pipeline falls back
-  # to the full recording duration.
   start_time_s: 175.0
   end_time_s: 235.0
   peak_min_distance_s: 0.4
   peak_height: 0.3
-  ibi_min_ms: 400
-  ibi_max_ms: 1200
+  ibi_min_ms: 400.0
+  ibi_max_ms: 1200.0
 
 features:
   eeg:
