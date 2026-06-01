@@ -1,6 +1,8 @@
 mne
 numpy
 scipy
+h5py
+pymatreader
 pandas
 statsmodels
 matplotlib

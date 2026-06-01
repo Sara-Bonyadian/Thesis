@@ -9,7 +9,7 @@ import numpy as np
 
 from ppg_eeg.config import PathsConfig, PipelineConfig, PpgConfig
 from ppg_eeg.datasets.base import CanonicalObservation
-from ppg_eeg.features_core import CORE_EEG_FEATURES, CORE_PPG_FEATURES, extract_core_feature_tables
+from ppg_eeg.features_core import CORE_EEG_FEATURES, CORE_PPG_FEATURES, _read_raw, extract_core_feature_tables
 
 
 def _test_cfg() -> PipelineConfig:
@@ -50,6 +50,26 @@ def _synthetic_raw() -> mne.io.BaseRaw:
 
 
 class TestFeaturesCore(unittest.TestCase):
+    def test_read_raw_eeglab_v73_fallback(self) -> None:
+        fake_eeg = {
+            "data": np.array([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], dtype=float),
+            "srate": 1000.0,
+            "chanlocs": {"labels": ["PPG", "ECG"]},
+        }
+        with (
+            patch(
+                "ppg_eeg.features_core.mne.io.read_raw_eeglab",
+                side_effect=NotImplementedError("Please use HDF reader for matlab v7.3 files, e.g. h5py"),
+            ),
+            patch("pymatreader.read_mat", return_value={"EEG": fake_eeg}),
+        ):
+            raw = _read_raw(Path("/tmp/fake.set"), "eeglab")
+
+        self.assertEqual(raw.info["sfreq"], 1000.0)
+        self.assertEqual(raw.ch_names, ["PPG", "ECG"])
+        self.assertEqual(raw.get_channel_types(), ["misc", "ecg"])
+        np.testing.assert_allclose(raw.get_data()[0], np.array([1.0, 2.0, 3.0]) * 1e-6)
+
     def test_extract_core_feature_tables_shape(self) -> None:
         cfg = _test_cfg()
         obs = CanonicalObservation(

@@ -50,12 +50,68 @@ class FeatureExtractionResult:
     merged_features: pd.DataFrame
 
 
+def _infer_channel_type(ch_name: str) -> str:
+    low = ch_name.casefold()
+    if "ecg" in low:
+        return "ecg"
+    if any(token in low for token in ("ppg", "photo", "optic", "pleth", "pulse")):
+        return "misc"
+    return "eeg"
+
+
+def _extract_channel_names_from_eeglab(eeg_obj: dict[str, object], n_channels: int) -> list[str]:
+    chanlocs = eeg_obj.get("chanlocs")
+    if isinstance(chanlocs, dict):
+        labels = chanlocs.get("labels")
+        if isinstance(labels, str):
+            out = [labels]
+        elif isinstance(labels, (list, tuple, np.ndarray)):
+            out = [str(lbl) for lbl in labels]
+        else:
+            out = []
+        if len(out) == n_channels and all(name.strip() for name in out):
+            return out
+    return [f"EEG{idx + 1:03d}" for idx in range(n_channels)]
+
+
+def _read_raw_eeglab_v73(path: Path) -> mne.io.BaseRaw:
+    from pymatreader import read_mat
+
+    loaded = read_mat(str(path))
+    eeg_obj = loaded.get("EEG", loaded)
+    if not isinstance(eeg_obj, dict):
+        raise ValueError(f"Unexpected EEGLAB payload type in {path}: {type(eeg_obj)!r}")
+
+    data = np.asarray(eeg_obj.get("data"), dtype=float)
+    if data.ndim == 1:
+        data = data[np.newaxis, :]
+    if data.ndim != 2:
+        raise ValueError(f"Expected 2D EEGLAB data array in {path}, got shape {data.shape!r}")
+
+    sfreq = float(eeg_obj.get("srate", 1.0))
+    if sfreq <= 0:
+        raise ValueError(f"Invalid sampling rate in {path}: {sfreq!r}")
+
+    ch_names = _extract_channel_names_from_eeglab(eeg_obj, n_channels=data.shape[0])
+    ch_types = [_infer_channel_type(ch_name) for ch_name in ch_names]
+
+    # EEGLAB numeric arrays are typically stored in micro-units.
+    data = data * 1e-6
+    info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types=ch_types)
+    return mne.io.RawArray(data, info, verbose=False)
+
+
 def _read_raw(path: Path, data_format: str) -> mne.io.BaseRaw:
     fmt = data_format.casefold()
     if fmt == "brainvision":
         return mne.io.read_raw_brainvision(str(path), preload=True, verbose=False)
     if fmt == "eeglab":
-        return mne.io.read_raw_eeglab(str(path), preload=True, verbose=False)
+        try:
+            return mne.io.read_raw_eeglab(str(path), preload=True, verbose=False)
+        except NotImplementedError as exc:
+            if "matlab v7.3" in str(exc).lower() or "hdf reader" in str(exc).lower():
+                return _read_raw_eeglab_v73(path)
+            raise
     raise ValueError(f"Unsupported data format: {data_format!r}")
 
 

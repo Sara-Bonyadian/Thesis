@@ -10,6 +10,8 @@ from statsmodels.stats.multitest import multipletests
 
 from .config import PipelineConfig
 
+AUTO_NORMALITY_ALPHA = 0.05
+
 
 @dataclass(frozen=True)
 class CorrelationResult:
@@ -29,6 +31,34 @@ def _corr_pair(x: np.ndarray, y: np.ndarray, method: str) -> tuple[float, float]
     raise ValueError(f"Unsupported correlation method: {method!r}")
 
 
+def _shapiro_pvalue(values: np.ndarray) -> float:
+    try:
+        return float(stats.shapiro(values).pvalue)
+    except Exception:
+        return float("nan")
+
+
+def _corr_pair_with_auto_method(
+    x: np.ndarray,
+    y: np.ndarray,
+    method: str,
+) -> tuple[float, float, str, float, float]:
+    if method != "auto":
+        corr, p_value = _corr_pair(x, y, method)
+        return corr, p_value, method, float("nan"), float("nan")
+
+    x_shapiro_p = _shapiro_pvalue(x)
+    y_shapiro_p = _shapiro_pvalue(y)
+
+    if (x_shapiro_p > AUTO_NORMALITY_ALPHA) and (y_shapiro_p > AUTO_NORMALITY_ALPHA):
+        resolved_method = "pearson"
+    else:
+        resolved_method = "spearman"
+
+    corr, p_value = _corr_pair(x, y, resolved_method)
+    return corr, p_value, resolved_method, x_shapiro_p, y_shapiro_p
+
+
 def compute_pairwise_correlations(
     merged_features: pd.DataFrame,
     *,
@@ -44,11 +74,14 @@ def compute_pairwise_correlations(
             columns=[
                 "dataset_id",
                 "method",
+                "selected_method",
                 "eeg_feature",
                 "ppg_feature",
                 "n",
                 "correlation",
                 "p_value",
+                "x_shapiro_p",
+                "y_shapiro_p",
             ]
         )
 
@@ -66,22 +99,37 @@ def compute_pairwise_correlations(
 
                     corr = float("nan")
                     p_value = float("nan")
+                    selected_method = method
+                    x_shapiro_p = float("nan")
+                    y_shapiro_p = float("nan")
                     if n >= cfg.correlation.min_n:
                         try:
-                            corr, p_value = _corr_pair(x[valid], y[valid], method)
+                            corr, p_value, selected_method, x_shapiro_p, y_shapiro_p = _corr_pair_with_auto_method(
+                                x[valid],
+                                y[valid],
+                                method,
+                            )
                         except Exception:
                             corr = float("nan")
                             p_value = float("nan")
+                            selected_method = method
+                            x_shapiro_p = float("nan")
+                            y_shapiro_p = float("nan")
+                    elif method == "auto":
+                        selected_method = "too_few_data"
 
                     rows.append(
                         {
                             "dataset_id": str(dataset_id),
                             "method": method,
+                            "selected_method": selected_method,
                             "eeg_feature": eeg_feature,
                             "ppg_feature": ppg_feature,
                             "n": n,
                             "correlation": corr,
                             "p_value": p_value,
+                            "x_shapiro_p": x_shapiro_p,
+                            "y_shapiro_p": y_shapiro_p,
                         }
                     )
 
@@ -116,6 +164,186 @@ def apply_fdr(raw_correlations: pd.DataFrame, *, cfg: PipelineConfig) -> pd.Data
         out.loc[valid_indices, "reject_fdr"] = reject
 
     return out
+
+
+def _coerce_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def significance_symbol(*, q_value: Any, p_value: Any) -> str:
+    """Map q/p values to significance symbols for correlation heatmaps."""
+    q = _coerce_float(q_value)
+    p = _coerce_float(p_value)
+
+    if np.isfinite(q):
+        if q < 0.05:
+            return "***"
+        if q < 0.10:
+            return "**"
+        if q < 0.15:
+            return "*"
+    if np.isfinite(p) and p < 0.05:
+        return "+"
+    return ""
+
+
+def build_correlation_heatmap_tables(
+    correlations_fdr: pd.DataFrame,
+    *,
+    dataset_id: str | None = None,
+    method: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return correlation and significance tables indexed as EEG x PPG."""
+    required = {"eeg_feature", "ppg_feature", "correlation", "p_value"}
+    missing = required.difference(correlations_fdr.columns)
+    if missing:
+        needed = ", ".join(sorted(missing))
+        raise ValueError(f"Missing required columns for heatmap: {needed}")
+
+    focus = correlations_fdr.copy()
+
+    if dataset_id is not None:
+        if "dataset_id" not in focus.columns:
+            raise ValueError("dataset_id filter was provided but no 'dataset_id' column exists.")
+        focus = focus[focus["dataset_id"].astype(str) == str(dataset_id)]
+
+    if method is not None:
+        if "method" not in focus.columns:
+            raise ValueError("method filter was provided but no 'method' column exists.")
+        focus = focus[focus["method"].astype(str).str.casefold() == method.casefold()]
+
+    if focus.empty:
+        raise ValueError("No rows available to build a heatmap after filtering.")
+
+    corr_matrix = focus.pivot_table(
+        index="eeg_feature",
+        columns="ppg_feature",
+        values="correlation",
+        aggfunc="first",
+    )
+    p_matrix = focus.pivot_table(
+        index="eeg_feature",
+        columns="ppg_feature",
+        values="p_value",
+        aggfunc="first",
+    )
+
+    if "q_value" in focus.columns:
+        q_matrix = focus.pivot_table(
+            index="eeg_feature",
+            columns="ppg_feature",
+            values="q_value",
+            aggfunc="first",
+        )
+    else:
+        q_matrix = pd.DataFrame(np.nan, index=corr_matrix.index, columns=corr_matrix.columns)
+
+    p_matrix = p_matrix.reindex(index=corr_matrix.index, columns=corr_matrix.columns)
+    q_matrix = q_matrix.reindex(index=corr_matrix.index, columns=corr_matrix.columns)
+
+    symbol_matrix = pd.DataFrame("", index=corr_matrix.index, columns=corr_matrix.columns)
+    for row_idx, eeg_feature in enumerate(corr_matrix.index):
+        for col_idx, ppg_feature in enumerate(corr_matrix.columns):
+            symbol_matrix.iat[row_idx, col_idx] = significance_symbol(
+                q_value=q_matrix.at[eeg_feature, ppg_feature],
+                p_value=p_matrix.at[eeg_feature, ppg_feature],
+            )
+
+    return corr_matrix, symbol_matrix
+
+
+def plot_correlation_heatmap(
+    correlations_fdr: pd.DataFrame,
+    *,
+    dataset_id: str | None = None,
+    method: str | None = None,
+    show_values: bool = True,
+    decimals: int = 2,
+    cmap: str = "coolwarm",
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+    figsize: tuple[float, float] = (9.0, 6.0),
+    title: str | None = None,
+    ax: Any | None = None,
+) -> tuple[Any, Any]:
+    """
+    Plot EEG x PPG correlation heatmap with significance markers.
+
+    Marker legend:
+    - ***: FDR q < 0.05
+    - ** : FDR q < 0.10
+    - *  : FDR q < 0.15
+    - +  : p-value < 0.05 (only when none of the FDR thresholds is met)
+    """
+    corr_matrix, symbol_matrix = build_correlation_heatmap_tables(
+        correlations_fdr,
+        dataset_id=dataset_id,
+        method=method,
+    )
+
+    import matplotlib.pyplot as plt
+
+    created_figure = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_figure = True
+    else:
+        fig = ax.figure
+
+    image = ax.imshow(corr_matrix.to_numpy(dtype=float), cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="Correlation")
+
+    ax.set_xticks(np.arange(corr_matrix.shape[1]))
+    ax.set_yticks(np.arange(corr_matrix.shape[0]))
+    ax.set_xticklabels(corr_matrix.columns.tolist(), rotation=45, ha="right")
+    ax.set_yticklabels(corr_matrix.index.tolist())
+    ax.set_xlabel("PPG feature")
+    ax.set_ylabel("EEG feature")
+
+    if title is None:
+        parts = ["Correlation heatmap"]
+        if dataset_id is not None:
+            parts.append(f"dataset={dataset_id}")
+        if method is not None:
+            parts.append(f"method={method}")
+        title = " | ".join(parts)
+    ax.set_title(title)
+
+    values = corr_matrix.to_numpy(dtype=float)
+    for row_idx in range(corr_matrix.shape[0]):
+        for col_idx in range(corr_matrix.shape[1]):
+            corr_value = values[row_idx, col_idx]
+            marker = str(symbol_matrix.iat[row_idx, col_idx])
+            if show_values and np.isfinite(corr_value):
+                label = f"{corr_value:.{decimals}f}{marker}"
+            else:
+                label = marker
+            if not label:
+                continue
+            text_color = "white" if np.isfinite(corr_value) and abs(corr_value) >= 0.5 else "black"
+            ax.text(col_idx, row_idx, label, ha="center", va="center", color=text_color, fontsize=10)
+
+    ax.set_xticks(np.arange(-0.5, corr_matrix.shape[1], 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, corr_matrix.shape[0], 1), minor=True)
+    ax.grid(which="minor", color="white", linewidth=0.7)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    ax.text(
+        0.0,
+        -0.16,
+        "*** q<0.05   ** q<0.10   * q<0.15   + p<0.05",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=9,
+    )
+
+    if created_figure:
+        fig.tight_layout()
+    return fig, ax
 
 
 def compute_trend_agreement(
