@@ -20,6 +20,9 @@ CORE_EEG_FEATURES: list[str] = [
     "eeg_faa",
     "eeg_global_alpha_db",
     "eeg_global_beta_db",
+    "power_theta",
+    "power_alpha",
+    "power_beta",
 ]
 
 CORE_PPG_FEATURES: list[str] = [
@@ -41,6 +44,33 @@ OBSERVATION_KEY_COLUMNS: list[str] = [
     "timepoint",
     "state",
 ]
+
+def base_eeg_power_columns(kind: str = "export") -> list[str]:
+    power_feature_columns = [
+        "power_theta",
+        "power_alpha",
+        "power_beta",
+    ]
+
+    normalized = kind.casefold()
+    if normalized in {"feature", "features"}:
+        return list(power_feature_columns)
+    if normalized == "export":
+        return [
+            "dataset_id",
+            "observation_id",
+            "subject_id",
+            "task_label",
+            "modality",
+            "state",
+            "eeg_format",
+            "eeg_path",
+            "n_bad_channels",
+            "eeg_error",
+            "channel",
+            *power_feature_columns,
+        ]
+    raise ValueError(f"Unsupported base EEG column kind: {kind!r}")
 
 
 @dataclass(frozen=True)
@@ -222,7 +252,20 @@ def _eeg_feature_values(preprocessed_raw: mne.io.BaseRaw, cfg: PipelineConfig) -
         n_fft=cfg.eeg.psd.n_fft,
     )
 
+    band_power_values = {
+        "power_theta": _safe_eval(
+            lambda: global_band_value(preprocessed_raw, "theta", psd_fmin=cfg.eeg.psd.fmin, psd_fmax=cfg.eeg.psd.fmax)
+        ),
+        "power_alpha": _safe_eval(
+            lambda: global_band_value(preprocessed_raw, "alpha", psd_fmin=cfg.eeg.psd.fmin, psd_fmax=cfg.eeg.psd.fmax)
+        ),
+        "power_beta": _safe_eval(
+            lambda: global_band_value(preprocessed_raw, "beta", psd_fmin=cfg.eeg.psd.fmin, psd_fmax=cfg.eeg.psd.fmax)
+        ),
+    }
+
     return {
+        **band_power_values,
         "eeg_fm_theta": _safe_eval(lambda: frontal_midline_theta(preprocessed_raw, **psd_kwargs)),
         "eeg_frontal_beta": _safe_eval(lambda: frontal_beta_value(preprocessed_raw, **psd_kwargs)),
         "eeg_faa": _safe_eval(lambda: frontal_alpha_asymmetry(preprocessed_raw, **psd_kwargs)),
@@ -258,15 +301,69 @@ def _ppg_feature_values(raw: mne.io.BaseRaw, cfg: PipelineConfig) -> tuple[dict[
     return values, qc
 
 
+def _build_feature_cache_lookup(
+    cache_df: pd.DataFrame | None,
+    *,
+    required_feature_columns: Sequence[str],
+    table_name: str,
+) -> dict[str, dict[str, object]]:
+    if cache_df is None or cache_df.empty:
+        return {}
+
+    if "observation_id" not in cache_df.columns:
+        raise ValueError(f"{table_name} cache must contain an 'observation_id' column.")
+
+    missing_cols = [col for col in required_feature_columns if col not in cache_df.columns]
+    if missing_cols:
+        needed = ", ".join(sorted(missing_cols))
+        raise ValueError(f"{table_name} cache is missing required feature columns: {needed}")
+
+    lookup: dict[str, dict[str, object]] = {}
+    for record in cache_df.to_dict(orient="records"):
+        obs_id = str(record.get("observation_id", "")).strip()
+        if not obs_id:
+            continue
+        lookup[obs_id] = record
+    return lookup
+
+
+def _coerce_int(value: object, *, default: int = 0) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_str(value: object, *, default: str = "") -> str:
+    if value is None or pd.isna(value):
+        return default
+    text = str(value)
+    return text if text.strip() else default
+
+
 def extract_core_feature_tables(
     observations: Sequence[CanonicalObservation],
     cfg: PipelineConfig,
+    *,
+    eeg_feature_cache: pd.DataFrame | None = None,
+    ppg_feature_cache: pd.DataFrame | None = None,
 ) -> FeatureExtractionResult:
     eeg_records: list[dict[str, object]] = []
     ppg_records: list[dict[str, object]] = []
 
     selected_eeg_features = list(cfg.features.eeg)
     selected_ppg_features = list(cfg.features.ppg)
+    base_eeg_feature_columns = base_eeg_power_columns("feature")
+    eeg_cache_lookup = _build_feature_cache_lookup(
+        eeg_feature_cache,
+        required_feature_columns=selected_eeg_features,
+        table_name="EEG feature",
+    )
+    ppg_cache_lookup = _build_feature_cache_lookup(
+        ppg_feature_cache,
+        required_feature_columns=selected_ppg_features,
+        table_name="PPG feature",
+    )
 
     for obs in observations:
         if not obs.is_usable:
@@ -280,6 +377,7 @@ def extract_core_feature_tables(
                 "eeg_path": str(obs.eeg_path),
                 "eeg_format": obs.eeg_format,
                 "ppg_source": obs.ppg_source,
+                "channel": "",
             }
         )
         ppg_row.update(
@@ -297,21 +395,35 @@ def extract_core_feature_tables(
         eeg_error = "ok"
         ppg_error = "ok"
         n_bad_channels = 0
+        eeg_channel = ""
+        eeg_raw: mne.io.BaseRaw | None = None
+        eeg_load_error: Exception | None = None
 
-        try:
-            eeg_raw = _read_raw(obs.eeg_path, obs.eeg_format)
-            prep = preprocess_eeg(
-                eeg_raw,
-                l_freq=cfg.eeg.l_freq,
-                h_freq=cfg.eeg.h_freq,
-                bad_channel_variance_z=cfg.eeg.bad_channel_variance_z,
-                reference=cfg.eeg.reference,
-            )
-            eeg_values = _eeg_feature_values(prep.raw, cfg)
-            n_bad_channels = len(prep.bad_channels)
-        except Exception as exc:
-            eeg_error = f"{type(exc).__name__}: {exc}"
-            eeg_raw = None
+        eeg_cached = eeg_cache_lookup.get(str(obs.observation_id))
+        if eeg_cached is not None:
+            eeg_error = _coerce_str(eeg_cached.get("eeg_error"), default="cached")
+            n_bad_channels = _coerce_int(eeg_cached.get("n_bad_channels"), default=0)
+            eeg_channel = _coerce_str(eeg_cached.get("channel"), default="")
+            for name in base_eeg_feature_columns:
+                eeg_row[name] = float(pd.to_numeric(eeg_cached.get(name), errors="coerce"))
+            for name in selected_eeg_features:
+                eeg_row[name] = float(pd.to_numeric(eeg_cached.get(name), errors="coerce"))
+        else:
+            try:
+                eeg_raw = _read_raw(obs.eeg_path, obs.eeg_format)
+                prep = preprocess_eeg(
+                    eeg_raw,
+                    l_freq=cfg.eeg.l_freq,
+                    h_freq=cfg.eeg.h_freq,
+                    bad_channel_variance_z=cfg.eeg.bad_channel_variance_z,
+                    reference=cfg.eeg.reference,
+                )
+                eeg_values = _eeg_feature_values(prep.raw, cfg)
+                n_bad_channels = len(prep.bad_channels)
+                eeg_channel = "|".join(prep.raw.ch_names)
+            except Exception as exc:
+                eeg_error = f"{type(exc).__name__}: {exc}"
+                eeg_load_error = exc
 
         ppg_qc: dict[str, object] = {
             "ppg_channel": "",
@@ -319,30 +431,53 @@ def extract_core_feature_tables(
             "ppg_segment_end_s": np.nan,
             "n_ibi_clean": 0,
         }
-        try:
-            if obs.ppg_source == "embedded_eeg":
-                if eeg_raw is None:
-                    raise RuntimeError("EEG recording failed to load; cannot access embedded PPG.")
-                ppg_raw = eeg_raw
-            elif obs.ppg_source == "external_file":
-                if obs.ppg_path is None or obs.ppg_format is None:
-                    raise ValueError("External PPG source requires both ppg_path and ppg_format.")
-                ppg_raw = _read_raw(obs.ppg_path, obs.ppg_format)
-            else:
-                raise ValueError(f"Unsupported ppg_source={obs.ppg_source!r}")
+        ppg_cached = ppg_cache_lookup.get(str(obs.observation_id))
+        if ppg_cached is not None:
+            ppg_error = _coerce_str(ppg_cached.get("ppg_error"), default="cached")
+            ppg_qc = {
+                "ppg_channel": _coerce_str(ppg_cached.get("ppg_channel"), default=""),
+                "ppg_segment_start_s": float(pd.to_numeric(ppg_cached.get("ppg_segment_start_s"), errors="coerce")),
+                "ppg_segment_end_s": float(pd.to_numeric(ppg_cached.get("ppg_segment_end_s"), errors="coerce")),
+                "n_ibi_clean": _coerce_int(ppg_cached.get("n_ibi_clean"), default=0),
+            }
+            for name in selected_ppg_features:
+                ppg_row[name] = float(pd.to_numeric(ppg_cached.get(name), errors="coerce"))
+        else:
+            try:
+                if obs.ppg_source == "embedded_eeg":
+                    if eeg_raw is None:
+                        if eeg_load_error is not None:
+                            raise RuntimeError("EEG recording failed to load; cannot access embedded PPG.") from eeg_load_error
+                        eeg_raw = _read_raw(obs.eeg_path, obs.eeg_format)
+                    ppg_raw = eeg_raw
+                elif obs.ppg_source == "external_file":
+                    if obs.ppg_path is None or obs.ppg_format is None:
+                        raise ValueError("External PPG source requires both ppg_path and ppg_format.")
+                    ppg_raw = _read_raw(obs.ppg_path, obs.ppg_format)
+                else:
+                    raise ValueError(f"Unsupported ppg_source={obs.ppg_source!r}")
 
-            ppg_values, ppg_qc = _ppg_feature_values(ppg_raw, cfg)
-        except Exception as exc:
-            ppg_error = f"{type(exc).__name__}: {exc}"
+                ppg_values, ppg_qc = _ppg_feature_values(ppg_raw, cfg)
+            except Exception as exc:
+                ppg_error = f"{type(exc).__name__}: {exc}"
 
         eeg_row["n_bad_channels"] = n_bad_channels
         eeg_row["eeg_error"] = eeg_error
+        eeg_row["channel"] = eeg_channel
+        for name in base_eeg_feature_columns:
+            if name in eeg_row:
+                continue
+            eeg_row[name] = float(eeg_values.get(name, np.nan))
         for name in selected_eeg_features:
+            if name in eeg_row:
+                continue
             eeg_row[name] = float(eeg_values.get(name, np.nan))
 
         ppg_row["ppg_error"] = ppg_error
         ppg_row.update(ppg_qc)
         for name in selected_ppg_features:
+            if name in ppg_row:
+                continue
             ppg_row[name] = float(ppg_values.get(name, np.nan))
 
         eeg_records.append(eeg_row)
@@ -352,7 +487,17 @@ def extract_core_feature_tables(
     ppg_df = pd.DataFrame(ppg_records)
 
     if eeg_df.empty:
-        eeg_df = pd.DataFrame(columns=OBSERVATION_KEY_COLUMNS + ["eeg_path", "eeg_format", "ppg_source", "n_bad_channels", "eeg_error"] + selected_eeg_features)
+        eeg_columns = OBSERVATION_KEY_COLUMNS + [
+            "eeg_path",
+            "eeg_format",
+            "ppg_source",
+            "n_bad_channels",
+            "eeg_error",
+            "channel",
+            *base_eeg_feature_columns,
+            *selected_eeg_features,
+        ]
+        eeg_df = pd.DataFrame(columns=list(dict.fromkeys(eeg_columns)))
     if ppg_df.empty:
         ppg_df = pd.DataFrame(columns=OBSERVATION_KEY_COLUMNS + ["eeg_path", "eeg_format", "ppg_source", "ppg_path", "ppg_format", "ppg_error", "ppg_channel", "ppg_segment_start_s", "ppg_segment_end_s", "n_ibi_clean"] + selected_ppg_features)
 

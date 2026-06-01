@@ -1,9 +1,10 @@
+h5py
+ipykernel
+matplotlib
 mne
 numpy
-scipy
-h5py
-pymatreader
 pandas
+PyYAML
+pymatreader
+scipy
 statsmodels
-matplotlib
-pyyaml

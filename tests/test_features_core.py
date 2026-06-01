@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import mne
 import numpy as np
+import pandas as pd
 
 from ppg_eeg.config import PathsConfig, PipelineConfig, PpgConfig
 from ppg_eeg.datasets.base import CanonicalObservation
@@ -96,11 +97,100 @@ class TestFeaturesCore(unittest.TestCase):
         self.assertEqual(len(result.merged_features), 1)
         self.assertEqual(result.eeg_features.loc[0, "eeg_error"], "ok")
         self.assertEqual(result.ppg_features.loc[0, "ppg_error"], "ok")
+        self.assertIn("channel", result.eeg_features.columns)
+        self.assertIn("power_theta", result.eeg_features.columns)
+        self.assertIn("power_alpha", result.eeg_features.columns)
+        self.assertIn("power_beta", result.eeg_features.columns)
         for feature in CORE_EEG_FEATURES:
             self.assertIn(feature, result.eeg_features.columns)
         for feature in CORE_PPG_FEATURES:
             self.assertIn(feature, result.ppg_features.columns)
             self.assertIn(feature, result.merged_features.columns)
+
+    def test_extract_core_feature_tables_uses_cached_csv_rows(self) -> None:
+        cfg = _test_cfg()
+        obs = CanonicalObservation(
+            dataset_id="hiit",
+            observation_id="hiit-01-ph-pre-rest",
+            subject_id="01",
+            task_label="rest",
+            condition_label="ph_pre_rest",
+            eeg_path=Path("/tmp/fake.vhdr"),
+            eeg_format="brainvision",
+            ppg_source="embedded_eeg",
+            session_label="ph",
+            modality="ph",
+            timepoint="pre",
+            state="rest",
+        )
+
+        eeg_cache = pd.DataFrame(
+            [
+                {
+                    "dataset_id": "hiit",
+                    "observation_id": "hiit-01-ph-pre-rest",
+                    "subject_id": "01",
+                    "task_label": "rest",
+                    "condition_label": "ph_pre_rest",
+                    "session_label": "ph",
+                    "modality": "ph",
+                    "timepoint": "pre",
+                    "state": "rest",
+                    "eeg_fm_theta": 1.1,
+                    "eeg_frontal_beta": 2.2,
+                    "eeg_faa": 3.3,
+                    "eeg_global_alpha_db": 4.4,
+                    "eeg_global_beta_db": 5.5,
+                    "channel": "F3|F4|Fz",
+                    "power_theta": 0.11,
+                    "power_alpha": 0.22,
+                    "power_beta": 0.33,
+                    "n_bad_channels": 1,
+                    "eeg_error": "ok",
+                }
+            ]
+        )
+        ppg_cache = pd.DataFrame(
+            [
+                {
+                    "dataset_id": "hiit",
+                    "observation_id": "hiit-01-ph-pre-rest",
+                    "subject_id": "01",
+                    "task_label": "rest",
+                    "condition_label": "ph_pre_rest",
+                    "session_label": "ph",
+                    "modality": "ph",
+                    "timepoint": "pre",
+                    "state": "rest",
+                    "ppg_mean_hr_bpm": 70.0,
+                    "ppg_rmssd_ms": 30.0,
+                    "ppg_sdnn_ms": 45.0,
+                    "ppg_mean_rr_ms": 860.0,
+                    "ppg_peak_hr_bpm": 92.0,
+                    "ppg_error": "ok",
+                    "ppg_channel": "photosensor",
+                    "ppg_segment_start_s": 0.0,
+                    "ppg_segment_end_s": 9.0,
+                    "n_ibi_clean": 10,
+                }
+            ]
+        )
+
+        with patch("ppg_eeg.features_core._read_raw", side_effect=RuntimeError("raw loading should be skipped")):
+            result = extract_core_feature_tables(
+                [obs],
+                cfg,
+                eeg_feature_cache=eeg_cache,
+                ppg_feature_cache=ppg_cache,
+            )
+
+        self.assertEqual(result.eeg_features.loc[0, "eeg_fm_theta"], 1.1)
+        self.assertEqual(result.eeg_features.loc[0, "eeg_global_beta_db"], 5.5)
+        self.assertEqual(result.eeg_features.loc[0, "channel"], "F3|F4|Fz")
+        self.assertEqual(result.eeg_features.loc[0, "power_alpha"], 0.22)
+        self.assertEqual(result.ppg_features.loc[0, "ppg_mean_hr_bpm"], 70.0)
+        self.assertEqual(result.ppg_features.loc[0, "ppg_peak_hr_bpm"], 92.0)
+        self.assertEqual(len(result.merged_features), 1)
 
 
 if __name__ == "__main__":

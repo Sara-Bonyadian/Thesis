@@ -39,6 +39,10 @@ ppg:
 
 features:
   eeg:
+    # Optional base power-only set:
+    # - power_theta
+    # - power_alpha
+    # - power_beta
     - eeg_fm_theta
     - eeg_frontal_beta
     - eeg_faa
@@ -51,6 +55,11 @@ features:
     - ppg_mean_rr_ms
     - ppg_peak_hr_bpm
   include_robust_z: true
+  # If true, load prior EEG features from out_root/<dataset_id>/features_core_eeg.csv
+  # instead of recomputing EEG power features from raw files.
+  reuse_eeg_features_csv: false
+  # Optional: also reuse prior PPG features from CSV to avoid raw file loading.
+  reuse_ppg_features_csv: false
 
 correlation:
   alpha: 0.05
@@ -64,3 +73,9 @@ correlation:
 output:
   save_observation_index: true
   save_summary_json: true
+  # How to write features_base_eeg_power.csv:
+  # - base_only: write only base EEG columns
+  # - append_columns: merge newly computed EEG feature columns into existing base CSV
+  # - new_file: keep base CSV unchanged and write extra columns to eeg_base_csv_new_file_name
+  eeg_base_csv_mode: base_only
+  eeg_base_csv_new_file_name: features_base_eeg_power_extended.csv
