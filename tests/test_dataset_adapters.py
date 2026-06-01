@@ -46,6 +46,10 @@ class TestDatasetAdapters(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].task_label, "rest")
             self.assertEqual(rows[0].ppg_source, "external_file")
+            self.assertEqual(rows[0].session_label, "single")
+            self.assertEqual(rows[0].modality, "eeg_ecg_split")
+            self.assertEqual(rows[0].timepoint, "na")
+            self.assertEqual(rows[0].state, "rest")
 
     def test_ds006848_embedded_ppg_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,6 +64,10 @@ class TestDatasetAdapters(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].task_label, "rest")
             self.assertEqual(rows[0].ppg_source, "embedded_eeg")
+            self.assertEqual(rows[0].session_label, "single")
+            self.assertEqual(rows[0].modality, "eeg_ppg")
+            self.assertEqual(rows[0].timepoint, "na")
+            self.assertEqual(rows[0].state, "rest")
 
 
 if __name__ == "__main__":

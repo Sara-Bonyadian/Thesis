@@ -238,8 +238,8 @@ def extract_core_feature_tables(
 
         eeg_values = {name: float("nan") for name in CORE_EEG_FEATURES}
         ppg_values = {name: float("nan") for name in CORE_PPG_FEATURES}
-        eeg_error = ""
-        ppg_error = ""
+        eeg_error = "ok"
+        ppg_error = "ok"
         n_bad_channels = 0
 
         try:

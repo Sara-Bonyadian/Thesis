@@ -62,6 +62,27 @@ POSTERIOR_ELECTRODES: list[str] = [
 ]
 
 
+def _trapezoid_integral(y: np.ndarray, *, x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """
+    NumPy 2.x removed np.trapz in favor of np.trapezoid.
+    Keep compatibility with both old and new NumPy versions.
+    """
+    trapezoid = getattr(np, "trapezoid", None)
+    if trapezoid is not None:
+        return trapezoid(y, x=x, axis=axis)
+    return np.trapz(y, x=x, axis=axis)
+
+
+def _integrate_band_power(band_power: np.ndarray, band_freqs: np.ndarray) -> np.ndarray:
+    """
+    Integrate PSD across a frequency band.
+    If only one PSD bin falls in-band (coarse n_fft), use that bin value.
+    """
+    if band_power.shape[1] == 1:
+        return band_power[:, 0]
+    return _trapezoid_integral(band_power, x=band_freqs, axis=1)
+
+
 @dataclass(frozen=True)
 class EegPreprocessResult:
     raw: mne.io.BaseRaw
@@ -419,7 +440,7 @@ def _alpha_power_per_channel(
 
     band_freqs = freqs[mask]
     band_power = psd_linear[:, mask]
-    alpha_power = np.trapz(band_power, x=band_freqs, axis=1)  # µV²
+    alpha_power = _integrate_band_power(band_power, band_freqs)  # µV²
     return {ch: float(p) for ch, p in zip(r.ch_names, alpha_power)}
 
 
@@ -597,7 +618,7 @@ def _theta_power_per_channel(
 
     band_freqs = freqs[mask]
     band_power = psd_linear[:, mask]
-    theta_power = np.trapz(band_power, x=band_freqs, axis=1)  # µV²
+    theta_power = _integrate_band_power(band_power, band_freqs)  # µV²
     return {ch: float(p) for ch, p in zip(r.ch_names, theta_power)}
 
 
@@ -746,7 +767,7 @@ def _beta_power_per_channel(
 
     band_freqs = freqs[mask]
     band_power = psd_linear[:, mask]
-    beta_power = np.trapz(band_power, x=band_freqs, axis=1)  # µV²
+    beta_power = _integrate_band_power(band_power, band_freqs)  # µV²
     return {ch: float(p) for ch, p in zip(r.ch_names, beta_power)}
 
 

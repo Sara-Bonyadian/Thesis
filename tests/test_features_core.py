@@ -74,6 +74,8 @@ class TestFeaturesCore(unittest.TestCase):
         self.assertEqual(len(result.eeg_features), 1)
         self.assertEqual(len(result.ppg_features), 1)
         self.assertEqual(len(result.merged_features), 1)
+        self.assertEqual(result.eeg_features.loc[0, "eeg_error"], "ok")
+        self.assertEqual(result.ppg_features.loc[0, "ppg_error"], "ok")
         for feature in CORE_EEG_FEATURES:
             self.assertIn(feature, result.eeg_features.columns)
         for feature in CORE_PPG_FEATURES:
