@@ -37,9 +37,26 @@ pip install -r requirements.txt
 
 ## Run
 
+Run both stages in one command:
+
 ```bash
 python -m ppg_eeg.run --config config.example.yaml
 ```
+
+Or split Stage 1 and Stage 2 across separate runs (same config, same `paths.out_root`):
+
+```bash
+# Stage 1: raw → base CSVs only
+python -m ppg_eeg.run --config config.example.yaml --stage 1
+
+# Stage 2: base CSVs → derived features + correlations
+python -m ppg_eeg.run --config config.example.yaml --stage 2
+```
+
+Stage 2 reads `observations_index.csv`, `features_base_eeg_power.csv`, and
+`features_base_ppg_ibi.csv` from `paths.out_root/<dataset_id>/`. You can change
+`features.eeg`, `features.ppg`, or correlation settings between runs without
+re-extracting raw data.
 
 ### Two-Stage Workflow
 
