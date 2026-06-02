@@ -12,7 +12,7 @@ from .correlation import apply_fdr, compute_pairwise_correlations, compute_trend
 from .datasets import build_observations
 from .features_core import FeatureExtractionResult, base_eeg_power_columns, extract_core_feature_tables
 
-EEG_FEATURE_ROW_KEYS: list[str] = ["dataset_id", "observation_id"]
+EEG_FEATURE_ROW_KEYS: list[str] = ["dataset_id", "observation_id", "channel"]
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class DatasetArtifacts:
     dataset_id: str
     observations: pd.DataFrame
     eeg_features: pd.DataFrame
+    eeg_base_features: pd.DataFrame
     ppg_features: pd.DataFrame
     merged_features: pd.DataFrame
     correlations_raw: pd.DataFrame
@@ -157,6 +158,7 @@ def _run_single_dataset(dataset_id: str, cfg: PipelineConfig) -> DatasetArtifact
         dataset_id=dataset_id,
         observations=observations_df,
         eeg_features=features.eeg_features,
+        eeg_base_features=features.eeg_base_features,
         ppg_features=features.ppg_features,
         merged_features=features.merged_features,
         correlations_raw=corr_raw,
@@ -197,7 +199,7 @@ def write_artifacts(cfg: PipelineConfig, artifacts: PipelineArtifacts) -> None:
         if cfg.output.save_observation_index:
             _write_csv(data.observations, dataset_dir / "observations_index.csv")
         _write_csv(data.eeg_features, dataset_dir / "features_core_eeg.csv")
-        _write_base_eeg_csv(cfg, dataset_dir, data.eeg_features)
+        _write_base_eeg_csv(cfg, dataset_dir, data.eeg_base_features)
         _write_csv(data.ppg_features, dataset_dir / "features_core_ppg.csv")
         _write_csv(data.merged_features, dataset_dir / "features_core_merged.csv")
         _write_csv(data.correlations_raw, dataset_dir / "correlations_raw.csv")

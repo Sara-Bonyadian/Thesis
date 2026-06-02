@@ -10,7 +10,14 @@ import pandas as pd
 
 from .config import PipelineConfig
 from .datasets import CanonicalObservation
-from .eeg import frontal_alpha_asymmetry, frontal_beta_value, frontal_midline_theta, global_band_value, preprocess_eeg
+from .eeg import (
+    channel_band_powers,
+    frontal_alpha_asymmetry,
+    frontal_beta_value,
+    frontal_midline_theta,
+    global_band_value,
+    preprocess_eeg,
+)
 from .ppg import extract_clean_ppg_ibi_from_raw, mean_hr_bpm, mean_rr_ms, peak_hr_bpm, rmssd_ms, sdnn_ms
 
 
@@ -76,6 +83,7 @@ def base_eeg_power_columns(kind: str = "export") -> list[str]:
 @dataclass(frozen=True)
 class FeatureExtractionResult:
     eeg_features: pd.DataFrame
+    eeg_base_features: pd.DataFrame
     ppg_features: pd.DataFrame
     merged_features: pd.DataFrame
 
@@ -349,6 +357,7 @@ def extract_core_feature_tables(
     ppg_feature_cache: pd.DataFrame | None = None,
 ) -> FeatureExtractionResult:
     eeg_records: list[dict[str, object]] = []
+    base_eeg_records: list[dict[str, object]] = []
     ppg_records: list[dict[str, object]] = []
 
     selected_eeg_features = list(cfg.features.eeg)
@@ -400,6 +409,7 @@ def extract_core_feature_tables(
         eeg_load_error: Exception | None = None
 
         eeg_cached = eeg_cache_lookup.get(str(obs.observation_id))
+        channel_band_rows: list[dict[str, object]] = []
         if eeg_cached is not None:
             eeg_error = _coerce_str(eeg_cached.get("eeg_error"), default="cached")
             n_bad_channels = _coerce_int(eeg_cached.get("n_bad_channels"), default=0)
@@ -408,6 +418,19 @@ def extract_core_feature_tables(
                 eeg_row[name] = float(pd.to_numeric(eeg_cached.get(name), errors="coerce"))
             for name in selected_eeg_features:
                 eeg_row[name] = float(pd.to_numeric(eeg_cached.get(name), errors="coerce"))
+            cached_base_row = dict(base)
+            cached_base_row.update(
+                {
+                    "eeg_format": obs.eeg_format,
+                    "eeg_path": str(obs.eeg_path),
+                    "n_bad_channels": n_bad_channels,
+                    "eeg_error": eeg_error,
+                    "channel": eeg_channel,
+                }
+            )
+            for name in base_eeg_feature_columns:
+                cached_base_row[name] = float(pd.to_numeric(eeg_cached.get(name), errors="coerce"))
+            channel_band_rows.append(cached_base_row)
         else:
             try:
                 eeg_raw = _read_raw(obs.eeg_path, obs.eeg_format)
@@ -421,6 +444,27 @@ def extract_core_feature_tables(
                 eeg_values = _eeg_feature_values(prep.raw, cfg)
                 n_bad_channels = len(prep.bad_channels)
                 eeg_channel = "|".join(prep.raw.ch_names)
+                per_channel_band = channel_band_powers(
+                    prep.raw,
+                    band_names=("theta", "alpha", "beta"),
+                    psd_fmin=cfg.eeg.psd.fmin,
+                    psd_fmax=cfg.eeg.psd.fmax,
+                    n_fft=cfg.eeg.psd.n_fft,
+                )
+                for ch_name, band_values in per_channel_band.items():
+                    ch_row = dict(base)
+                    ch_row.update(
+                        {
+                            "eeg_format": obs.eeg_format,
+                            "eeg_path": str(obs.eeg_path),
+                            "n_bad_channels": n_bad_channels,
+                            "eeg_error": eeg_error,
+                            "channel": ch_name,
+                        }
+                    )
+                    for name in base_eeg_feature_columns:
+                        ch_row[name] = float(band_values.get(name, np.nan))
+                    channel_band_rows.append(ch_row)
             except Exception as exc:
                 eeg_error = f"{type(exc).__name__}: {exc}"
                 eeg_load_error = exc
@@ -473,6 +517,21 @@ def extract_core_feature_tables(
                 continue
             eeg_row[name] = float(eeg_values.get(name, np.nan))
 
+        if not channel_band_rows:
+            fallback_base_row = dict(base)
+            fallback_base_row.update(
+                {
+                    "eeg_format": obs.eeg_format,
+                    "eeg_path": str(obs.eeg_path),
+                    "n_bad_channels": n_bad_channels,
+                    "eeg_error": eeg_error,
+                    "channel": eeg_channel,
+                }
+            )
+            for name in base_eeg_feature_columns:
+                fallback_base_row[name] = float(eeg_row.get(name, eeg_values.get(name, np.nan)))
+            channel_band_rows.append(fallback_base_row)
+
         ppg_row["ppg_error"] = ppg_error
         ppg_row.update(ppg_qc)
         for name in selected_ppg_features:
@@ -481,9 +540,11 @@ def extract_core_feature_tables(
             ppg_row[name] = float(ppg_values.get(name, np.nan))
 
         eeg_records.append(eeg_row)
+        base_eeg_records.extend(channel_band_rows)
         ppg_records.append(ppg_row)
 
     eeg_df = pd.DataFrame(eeg_records)
+    base_eeg_df = pd.DataFrame(base_eeg_records)
     ppg_df = pd.DataFrame(ppg_records)
 
     if eeg_df.empty:
@@ -498,6 +559,14 @@ def extract_core_feature_tables(
             *selected_eeg_features,
         ]
         eeg_df = pd.DataFrame(columns=list(dict.fromkeys(eeg_columns)))
+    if base_eeg_df.empty:
+        base_eeg_df = pd.DataFrame(columns=base_eeg_power_columns("export"))
+    else:
+        ordered_base_cols = base_eeg_power_columns("export")
+        for col in ordered_base_cols:
+            if col not in base_eeg_df.columns:
+                base_eeg_df[col] = np.nan
+        base_eeg_df = base_eeg_df[ordered_base_cols]
     if ppg_df.empty:
         ppg_df = pd.DataFrame(columns=OBSERVATION_KEY_COLUMNS + ["eeg_path", "eeg_format", "ppg_source", "ppg_path", "ppg_format", "ppg_error", "ppg_channel", "ppg_segment_start_s", "ppg_segment_end_s", "n_ibi_clean"] + selected_ppg_features)
 
@@ -514,6 +583,7 @@ def extract_core_feature_tables(
 
     return FeatureExtractionResult(
         eeg_features=eeg_df,
+        eeg_base_features=base_eeg_df,
         ppg_features=ppg_df,
         merged_features=merged_df,
     )

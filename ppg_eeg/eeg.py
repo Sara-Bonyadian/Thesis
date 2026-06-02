@@ -6,7 +6,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
 import mne
-from typing import Any
+from typing import Any, Sequence
 
 
 EEG_BANDS: dict[str, tuple[float, float]] = {
@@ -178,6 +178,51 @@ def global_band_value(raw: mne.io.BaseRaw, band_name: str, *, psd_fmin: float = 
     psd_db, freqs, _ = compute_psd_db(raw, fmin=psd_fmin, fmax=psd_fmax)
     vals = band_mean(psd_db, freqs, *EEG_BANDS[band_name])
     return float(np.nanmean(vals))
+
+
+def channel_band_powers(
+    raw: mne.io.BaseRaw,
+    *,
+    band_names: Sequence[str] = ("theta", "alpha", "beta"),
+    psd_fmin: float = 1.0,
+    psd_fmax: float = 60.0,
+    n_fft: int = 2048,
+) -> dict[str, dict[str, float]]:
+    """
+    Compute per-channel mean band powers in dB.
+
+    Returns:
+        {
+            "<channel_name>": {
+                "power_theta": <float>,
+                "power_alpha": <float>,
+                "power_beta": <float>,
+            },
+            ...
+        }
+    """
+    normalized_bands = [str(name).casefold() for name in band_names]
+    unknown = [band for band in normalized_bands if band not in EEG_BANDS]
+    if unknown:
+        raise KeyError(f"Unknown bands {unknown!r}. Known: {sorted(EEG_BANDS)}")
+
+    psd_db, freqs, ch_names = compute_psd_db(
+        raw,
+        fmin=psd_fmin,
+        fmax=psd_fmax,
+        n_fft=n_fft,
+    )
+    band_arrays: dict[str, np.ndarray] = {
+        band: band_mean(psd_db, freqs, *EEG_BANDS[band]) for band in normalized_bands
+    }
+
+    out: dict[str, dict[str, float]] = {}
+    for ch_idx, ch_name in enumerate(ch_names):
+        row: dict[str, float] = {}
+        for band in normalized_bands:
+            row[f"power_{band}"] = float(band_arrays[band][ch_idx])
+        out[ch_name] = row
+    return out
 
 
 def _channel_indices(ch_names: list[str], channels: list[str]) -> np.ndarray:
