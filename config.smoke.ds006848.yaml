@@ -50,8 +50,8 @@ correlation:
   alpha: 0.05
   min_n: 3
   methods:
-    - spearman
-  primary_method: spearman
+    - auto
+  primary_method: auto
   fdr_method: fdr_bh
 
 output:

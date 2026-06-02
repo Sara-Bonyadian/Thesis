@@ -65,9 +65,8 @@ correlation:
   alpha: 0.05
   min_n: 5
   methods:
-    - spearman
-    - pearson
-  primary_method: spearman
+    - auto
+  primary_method: auto
   fdr_method: fdr_bh
 
 output:
