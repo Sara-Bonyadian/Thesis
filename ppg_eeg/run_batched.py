@@ -31,7 +31,12 @@ from pandas.errors import EmptyDataError
 from .config import PipelineConfig, load_config
 from .correlation import apply_fdr, compute_pairwise_correlations, compute_trend_agreement
 from .datasets import build_observations
-from .features_core import OBSERVATION_KEY_COLUMNS, add_dataset_local_robust_zscores, base_eeg_power_columns
+from .features_core import (
+    OBSERVATION_KEY_COLUMNS,
+    add_dataset_local_robust_zscores,
+    base_eeg_power_columns,
+    base_ppg_ibi_columns,
+)
 
 
 @dataclass(frozen=True)
@@ -137,6 +142,7 @@ def _required_dataset_files(cfg: PipelineConfig) -> list[str]:
         "features_core_ppg.csv",
         "features_core_merged.csv",
         "features_base_eeg_power.csv",
+        "features_base_ppg_ibi.csv",
         "correlations_raw.csv",
         "correlations_fdr.csv",
     ]
@@ -226,6 +232,7 @@ def _merge_completed_batches(
     eeg_frames: list[pd.DataFrame] = []
     ppg_frames: list[pd.DataFrame] = []
     base_frames: list[pd.DataFrame] = []
+    ppg_ibi_frames: list[pd.DataFrame] = []
 
     for batch in batches:
         dataset_dir = batch.output_dir / dataset_id
@@ -237,6 +244,7 @@ def _merge_completed_batches(
         eeg_df = _safe_read_csv(dataset_dir / "features_core_eeg.csv")
         ppg_df = _safe_read_csv(dataset_dir / "features_core_ppg.csv")
         base_df = _safe_read_csv(dataset_dir / "features_base_eeg_power.csv")
+        ppg_ibi_df = _safe_read_csv(dataset_dir / "features_base_ppg_ibi.csv")
 
         if not eeg_df.empty:
             eeg_frames.append(eeg_df)
@@ -244,16 +252,20 @@ def _merge_completed_batches(
             ppg_frames.append(ppg_df)
         if not base_df.empty:
             base_frames.append(base_df)
+        if not ppg_ibi_df.empty:
+            ppg_ibi_frames.append(ppg_ibi_df)
 
     obs_all = pd.concat(obs_frames, ignore_index=True) if obs_frames else pd.DataFrame()
     eeg_all = pd.concat(eeg_frames, ignore_index=True) if eeg_frames else pd.DataFrame()
     ppg_all = pd.concat(ppg_frames, ignore_index=True) if ppg_frames else pd.DataFrame()
     base_all = pd.concat(base_frames, ignore_index=True) if base_frames else pd.DataFrame()
+    ppg_ibi_all = pd.concat(ppg_ibi_frames, ignore_index=True) if ppg_ibi_frames else pd.DataFrame()
 
     obs_all = _drop_duplicates_if_possible(obs_all, ["observation_id"])
     eeg_all = _drop_duplicates_if_possible(eeg_all, ["observation_id"])
     ppg_all = _drop_duplicates_if_possible(ppg_all, ["observation_id"])
     base_all = _drop_duplicates_if_possible(base_all, ["observation_id", "channel"])
+    ppg_ibi_all = _drop_duplicates_if_possible(ppg_ibi_all, ["observation_id", "ibi_index"])
 
     selected_eeg = list(cfg.features.eeg)
     selected_ppg = list(cfg.features.ppg)
@@ -311,6 +323,16 @@ def _merge_completed_batches(
     _write_csv(base_all, dataset_dir / "features_base_eeg_power.csv")
 
     _write_csv(ppg_all, dataset_dir / "features_core_ppg.csv")
+    if ppg_ibi_all.empty:
+        ppg_ibi_all = pd.DataFrame(columns=base_ppg_ibi_columns())
+    else:
+        ordered_ppg_ibi_cols = base_ppg_ibi_columns()
+        for col in ordered_ppg_ibi_cols:
+            if col not in ppg_ibi_all.columns:
+                ppg_ibi_all[col] = pd.NA
+        ppg_ibi_all = ppg_ibi_all[ordered_ppg_ibi_cols]
+    _write_csv(ppg_ibi_all, dataset_dir / "features_base_ppg_ibi.csv")
+
     _write_csv(merged_all, dataset_dir / "features_core_merged.csv")
     _write_csv(corr_raw, dataset_dir / "correlations_raw.csv")
     _write_csv(corr_fdr, dataset_dir / "correlations_fdr.csv")

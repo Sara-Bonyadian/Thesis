@@ -17,7 +17,15 @@ from .eeg import (
     channel_band_powers,
     preprocess_eeg,
 )
-from .ppg import extract_clean_ppg_ibi_from_raw, mean_hr_bpm, mean_rr_ms, peak_hr_bpm, rmssd_ms, sdnn_ms
+from .ppg import (
+    PpgIbiResult,
+    extract_clean_ppg_ibi_from_raw,
+    mean_hr_bpm,
+    mean_rr_ms,
+    peak_hr_bpm,
+    rmssd_ms,
+    sdnn_ms,
+)
 
 
 CORE_EEG_FEATURES: list[str] = [
@@ -52,6 +60,7 @@ OBSERVATION_KEY_COLUMNS: list[str] = [
 ]
 
 EEG_POWER_SCHEMA_VERSION = "eeg_power_schema_v2"
+PPG_IBI_SCHEMA_VERSION = "ppg_ibi_schema_v1"
 
 
 DB_BAND_POWER_COLUMNS: list[str] = [
@@ -75,6 +84,34 @@ EEG_PROCESSING_METADATA_COLUMNS: list[str] = [
     "psd_fmin",
     "psd_fmax",
     "n_fft",
+    "processing_version",
+]
+
+
+PPG_IBI_COLUMNS: list[str] = [
+    *OBSERVATION_KEY_COLUMNS,
+    "eeg_path",
+    "eeg_format",
+    "ppg_source",
+    "ppg_path",
+    "ppg_format",
+    "ppg_error",
+    "ppg_channel",
+    "ppg_segment_start_s",
+    "ppg_segment_end_s",
+    "sfreq",
+    "peak_min_distance_s",
+    "peak_height",
+    "ibi_min_ms",
+    "ibi_max_ms",
+    "n_peaks",
+    "n_ibi_raw",
+    "n_ibi_clean",
+    "ibi_index",
+    "peak_time_s",
+    "peak_index",
+    "ibi_ms_raw",
+    "ibi_ms_clean",
     "processing_version",
 ]
 
@@ -107,11 +144,16 @@ def base_eeg_power_columns(kind: str = "export") -> list[str]:
     raise ValueError(f"Unsupported base EEG column kind: {kind!r}")
 
 
+def base_ppg_ibi_columns() -> list[str]:
+    return list(PPG_IBI_COLUMNS)
+
+
 @dataclass(frozen=True)
 class FeatureExtractionResult:
     eeg_features: pd.DataFrame
     eeg_base_features: pd.DataFrame
     ppg_features: pd.DataFrame
+    ppg_ibi_features: pd.DataFrame
     merged_features: pd.DataFrame
 
 
@@ -203,7 +245,7 @@ def _segment_bounds_for_ppg(raw: mne.io.BaseRaw, cfg: PipelineConfig) -> tuple[f
 def _extract_ppg_ibi_with_fallback(
     raw: mne.io.BaseRaw,
     cfg: PipelineConfig,
-) -> tuple[np.ndarray | None, str | None, float, float]:
+) -> tuple[PpgIbiResult, float, float]:
     start_s, end_s = _segment_bounds_for_ppg(raw, cfg)
     result = extract_clean_ppg_ibi_from_raw(
         raw,
@@ -216,7 +258,7 @@ def _extract_ppg_ibi_with_fallback(
     )
 
     if result.ibi_ms_clean is not None and len(result.ibi_ms_clean) >= 3:
-        return result.ibi_ms_clean, result.ppg_channel, start_s, end_s
+        return result, start_s, end_s
 
     sfreq = float(raw.info["sfreq"])
     duration_s = max(0.0, (float(raw.n_times) - 1.0) / sfreq)
@@ -231,9 +273,9 @@ def _extract_ppg_ibi_with_fallback(
             ibi_max_ms=cfg.ppg.ibi_max_ms,
         )
         if fallback.ibi_ms_clean is not None and len(fallback.ibi_ms_clean) >= 3:
-            return fallback.ibi_ms_clean, fallback.ppg_channel, 0.0, duration_s
+            return fallback, 0.0, duration_s
 
-    return None, result.ppg_channel, start_s, end_s
+    return result, start_s, end_s
 
 
 def _robust_zscore(series: pd.Series) -> pd.Series:
@@ -382,27 +424,123 @@ def _derive_eeg_feature_values_from_channel_rows(channel_rows: Sequence[dict[str
     return values
 
 
-def _ppg_feature_values(raw: mne.io.BaseRaw, cfg: PipelineConfig) -> tuple[dict[str, float], dict[str, object]]:
-    ibi_ms, ppg_channel, start_s, end_s = _extract_ppg_ibi_with_fallback(raw, cfg)
+def _ppg_processing_metadata(cfg: PipelineConfig) -> dict[str, object]:
+    return {
+        "peak_min_distance_s": float(cfg.ppg.peak_min_distance_s),
+        "peak_height": float(cfg.ppg.peak_height),
+        "ibi_min_ms": float(cfg.ppg.ibi_min_ms),
+        "ibi_max_ms": float(cfg.ppg.ibi_max_ms),
+        "processing_version": PPG_IBI_SCHEMA_VERSION,
+    }
+
+
+def _ppg_feature_values_from_ibi(ibi_ms: np.ndarray | Sequence[float] | pd.Series | None) -> dict[str, float]:
+    values = {name: float("nan") for name in CORE_PPG_FEATURES}
+    if ibi_ms is None:
+        return values
+
+    ibi = pd.to_numeric(pd.Series(ibi_ms), errors="coerce").astype(float)
+    clean = ibi[np.isfinite(ibi)].to_numpy(dtype=float)
+    if len(clean) < 3:
+        return values
+
+    values.update(
+        {
+            "ppg_mean_hr_bpm": _safe_eval(lambda: mean_hr_bpm(clean)),
+            "ppg_rmssd_ms": _safe_eval(lambda: rmssd_ms(clean)),
+            "ppg_sdnn_ms": _safe_eval(lambda: sdnn_ms(clean)),
+            "ppg_mean_rr_ms": _safe_eval(lambda: mean_rr_ms(clean)),
+            "ppg_peak_hr_bpm": _safe_eval(lambda: peak_hr_bpm(clean)),
+        }
+    )
+    return values
+
+
+def _ppg_feature_values(raw: mne.io.BaseRaw, cfg: PipelineConfig) -> tuple[dict[str, float], dict[str, object], PpgIbiResult, float, float]:
+    result, start_s, end_s = _extract_ppg_ibi_with_fallback(raw, cfg)
+    ibi_ms = result.ibi_ms_clean
     qc: dict[str, object] = {
-        "ppg_channel": ppg_channel or "",
+        "ppg_channel": result.ppg_channel or "",
         "ppg_segment_start_s": start_s,
         "ppg_segment_end_s": end_s,
         "n_ibi_clean": int(len(ibi_ms)) if ibi_ms is not None else 0,
     }
 
-    if ibi_ms is None or len(ibi_ms) < 3:
-        values = {name: float("nan") for name in CORE_PPG_FEATURES}
-        return values, qc
+    return _ppg_feature_values_from_ibi(ibi_ms), qc, result, start_s, end_s
 
-    values = {
-        "ppg_mean_hr_bpm": _safe_eval(lambda: mean_hr_bpm(ibi_ms)),
-        "ppg_rmssd_ms": _safe_eval(lambda: rmssd_ms(ibi_ms)),
-        "ppg_sdnn_ms": _safe_eval(lambda: sdnn_ms(ibi_ms)),
-        "ppg_mean_rr_ms": _safe_eval(lambda: mean_rr_ms(ibi_ms)),
-        "ppg_peak_hr_bpm": _safe_eval(lambda: peak_hr_bpm(ibi_ms)),
+
+def _ppg_ibi_rows_from_result(
+    *,
+    base: dict[str, object],
+    obs: CanonicalObservation,
+    cfg: PipelineConfig,
+    result: PpgIbiResult,
+    start_s: float,
+    end_s: float,
+    ppg_error: str,
+) -> list[dict[str, object]]:
+    raw_ibi = result.ibi_ms_raw if result.ibi_ms_raw is not None else np.array([], dtype=float)
+    clean_ibi = result.ibi_ms_clean if result.ibi_ms_clean is not None else np.array([], dtype=float)
+    peak_times = result.peak_times_s if result.peak_times_s is not None else np.array([], dtype=float)
+    peak_indices = result.peaks_idx if result.peaks_idx is not None else np.array([], dtype=float)
+    n_rows = max(len(raw_ibi), len(clean_ibi))
+    if n_rows == 0:
+        return []
+
+    rows: list[dict[str, object]] = []
+    metadata = _ppg_processing_metadata(cfg)
+    for idx in range(n_rows):
+        row = dict(base)
+        row.update(
+            {
+                "eeg_path": str(obs.eeg_path),
+                "eeg_format": obs.eeg_format,
+                "ppg_source": obs.ppg_source,
+                "ppg_path": str(obs.ppg_path) if obs.ppg_path is not None else "",
+                "ppg_format": obs.ppg_format or "",
+                "ppg_error": ppg_error,
+                "ppg_channel": result.ppg_channel or "",
+                "ppg_segment_start_s": start_s,
+                "ppg_segment_end_s": end_s,
+                "sfreq": float(result.sfreq),
+                "n_peaks": int(len(peak_times)),
+                "n_ibi_raw": int(len(raw_ibi)),
+                "n_ibi_clean": int(len(clean_ibi)),
+                "ibi_index": idx,
+                "peak_time_s": float(peak_times[idx + 1]) if idx + 1 < len(peak_times) else np.nan,
+                "peak_index": int(peak_indices[idx + 1]) if idx + 1 < len(peak_indices) else pd.NA,
+                "ibi_ms_raw": float(raw_ibi[idx]) if idx < len(raw_ibi) else np.nan,
+                "ibi_ms_clean": float(clean_ibi[idx]) if idx < len(clean_ibi) else np.nan,
+                **metadata,
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def _derive_ppg_from_ibi_rows(ibi_rows: Sequence[dict[str, object]]) -> tuple[dict[str, float], dict[str, object], str]:
+    df = pd.DataFrame(ibi_rows)
+    values = {name: float("nan") for name in CORE_PPG_FEATURES}
+    qc: dict[str, object] = {
+        "ppg_channel": "",
+        "ppg_segment_start_s": np.nan,
+        "ppg_segment_end_s": np.nan,
+        "n_ibi_clean": 0,
     }
-    return values, qc
+    if df.empty:
+        return values, qc, "cached"
+
+    clean_ibi = pd.to_numeric(df.get("ibi_ms_clean"), errors="coerce").astype(float)
+    clean_ibi = clean_ibi[np.isfinite(clean_ibi)]
+    values = _ppg_feature_values_from_ibi(clean_ibi)
+    first = df.iloc[0]
+    qc = {
+        "ppg_channel": _coerce_str(first.get("ppg_channel"), default=""),
+        "ppg_segment_start_s": _coerce_float(first.get("ppg_segment_start_s")),
+        "ppg_segment_end_s": _coerce_float(first.get("ppg_segment_end_s")),
+        "n_ibi_clean": int(len(clean_ibi)),
+    }
+    return values, qc, _coerce_str(first.get("ppg_error"), default="cached")
 
 
 def _build_feature_cache_lookup(
@@ -490,6 +628,63 @@ def _build_eeg_cache_lookups(
     return feature_lookup, {}
 
 
+def _has_ppg_ibi_schema(cache_df: pd.DataFrame) -> bool:
+    required = {"observation_id", "ibi_ms_clean"}
+    return required.issubset(set(cache_df.columns))
+
+
+def _build_ppg_cache_lookups(
+    cache_df: pd.DataFrame | None,
+    *,
+    required_feature_columns: Sequence[str],
+) -> tuple[dict[str, dict[str, object]], dict[str, list[dict[str, object]]]]:
+    if cache_df is None or cache_df.empty:
+        return {}, {}
+
+    if "observation_id" not in cache_df.columns:
+        raise ValueError("PPG feature cache must contain an 'observation_id' column.")
+
+    ibi_lookup: dict[str, list[dict[str, object]]] = {}
+    if _has_ppg_ibi_schema(cache_df):
+        for obs_id, group in cache_df.groupby("observation_id", dropna=False):
+            obs_key = str(obs_id).strip()
+            if not obs_key:
+                continue
+            ibi_lookup[obs_key] = group.to_dict(orient="records")
+
+        feature_lookup: dict[str, dict[str, object]] = {}
+        for obs_key, ibi_rows in ibi_lookup.items():
+            values, qc, ppg_error = _derive_ppg_from_ibi_rows(ibi_rows)
+            first = dict(ibi_rows[0])
+            first.update(values)
+            first.update(qc)
+            first["ppg_error"] = ppg_error
+            feature_lookup[obs_key] = first
+
+        missing_cols = [
+            col
+            for col in required_feature_columns
+            if all(col not in record for record in feature_lookup.values())
+        ]
+        if missing_cols:
+            needed = ", ".join(sorted(missing_cols))
+            raise ValueError(f"PPG IBI cache cannot derive required feature columns: {needed}")
+        return feature_lookup, ibi_lookup
+
+    missing_cols = [col for col in required_feature_columns if col not in cache_df.columns]
+    if missing_cols:
+        needed = ", ".join(sorted(missing_cols))
+        raise ValueError(f"PPG feature cache is missing required feature columns: {needed}")
+
+    feature_lookup = {}
+    for record in cache_df.to_dict(orient="records"):
+        obs_id = str(record.get("observation_id", "")).strip()
+        if not obs_id:
+            continue
+        feature_lookup[obs_id] = record
+    return feature_lookup, {}
+
+
 def _coerce_int(value: object, *, default: int = 0) -> int:
     try:
         return int(value)  # type: ignore[arg-type]
@@ -523,6 +718,7 @@ def extract_core_feature_tables(
     eeg_records: list[dict[str, object]] = []
     base_eeg_records: list[dict[str, object]] = []
     ppg_records: list[dict[str, object]] = []
+    ppg_ibi_records: list[dict[str, object]] = []
 
     selected_eeg_features = list(cfg.features.eeg)
     selected_ppg_features = list(cfg.features.ppg)
@@ -532,10 +728,9 @@ def extract_core_feature_tables(
         eeg_feature_cache,
         required_feature_columns=selected_eeg_features,
     )
-    ppg_cache_lookup = _build_feature_cache_lookup(
+    ppg_cache_lookup, ppg_ibi_cache_lookup = _build_ppg_cache_lookups(
         ppg_feature_cache,
         required_feature_columns=selected_ppg_features,
-        table_name="PPG feature",
     )
 
     for obs in observations:
@@ -662,6 +857,7 @@ def extract_core_feature_tables(
             "n_ibi_clean": 0,
         }
         ppg_cached = ppg_cache_lookup.get(str(obs.observation_id))
+        ppg_ibi_rows: list[dict[str, object]] = []
         if ppg_cached is not None:
             ppg_error = _coerce_str(ppg_cached.get("ppg_error"), default="cached")
             ppg_qc = {
@@ -672,6 +868,27 @@ def extract_core_feature_tables(
             }
             for name in selected_ppg_features:
                 ppg_row[name] = _coerce_float(ppg_cached.get(name))
+            cached_ibi_rows = ppg_ibi_cache_lookup.get(str(obs.observation_id), [])
+            if cached_ibi_rows:
+                for cached_ibi_row in cached_ibi_rows:
+                    ibi_row = dict(base)
+                    for name in base_ppg_ibi_columns():
+                        if name in OBSERVATION_KEY_COLUMNS:
+                            continue
+                        if name in cached_ibi_row:
+                            ibi_row[name] = cached_ibi_row[name]
+                    ibi_row.update(
+                        {
+                            "eeg_path": str(obs.eeg_path),
+                            "eeg_format": obs.eeg_format,
+                            "ppg_source": obs.ppg_source,
+                            "ppg_path": str(obs.ppg_path) if obs.ppg_path is not None else "",
+                            "ppg_format": obs.ppg_format or "",
+                            "ppg_error": ppg_error,
+                            "ppg_channel": ppg_qc["ppg_channel"],
+                        }
+                    )
+                    ppg_ibi_rows.append(ibi_row)
         else:
             try:
                 if obs.ppg_source == "embedded_eeg":
@@ -687,7 +904,16 @@ def extract_core_feature_tables(
                 else:
                     raise ValueError(f"Unsupported ppg_source={obs.ppg_source!r}")
 
-                ppg_values, ppg_qc = _ppg_feature_values(ppg_raw, cfg)
+                ppg_values, ppg_qc, ppg_ibi_result, ppg_start_s, ppg_end_s = _ppg_feature_values(ppg_raw, cfg)
+                ppg_ibi_rows = _ppg_ibi_rows_from_result(
+                    base=base,
+                    obs=obs,
+                    cfg=cfg,
+                    result=ppg_ibi_result,
+                    start_s=ppg_start_s,
+                    end_s=ppg_end_s,
+                    ppg_error=ppg_error,
+                )
             except Exception as exc:
                 ppg_error = f"{type(exc).__name__}: {exc}"
 
@@ -729,10 +955,12 @@ def extract_core_feature_tables(
         eeg_records.append(eeg_row)
         base_eeg_records.extend(channel_band_rows)
         ppg_records.append(ppg_row)
+        ppg_ibi_records.extend(ppg_ibi_rows)
 
     eeg_df = pd.DataFrame(eeg_records)
     base_eeg_df = pd.DataFrame(base_eeg_records)
     ppg_df = pd.DataFrame(ppg_records)
+    ppg_ibi_df = pd.DataFrame(ppg_ibi_records)
 
     if eeg_df.empty:
         eeg_columns = OBSERVATION_KEY_COLUMNS + [
@@ -756,6 +984,14 @@ def extract_core_feature_tables(
         base_eeg_df = base_eeg_df[ordered_base_cols]
     if ppg_df.empty:
         ppg_df = pd.DataFrame(columns=OBSERVATION_KEY_COLUMNS + ["eeg_path", "eeg_format", "ppg_source", "ppg_path", "ppg_format", "ppg_error", "ppg_channel", "ppg_segment_start_s", "ppg_segment_end_s", "n_ibi_clean"] + selected_ppg_features)
+    if ppg_ibi_df.empty:
+        ppg_ibi_df = pd.DataFrame(columns=base_ppg_ibi_columns())
+    else:
+        ordered_ppg_ibi_cols = base_ppg_ibi_columns()
+        for col in ordered_ppg_ibi_cols:
+            if col not in ppg_ibi_df.columns:
+                ppg_ibi_df[col] = np.nan
+        ppg_ibi_df = ppg_ibi_df[ordered_ppg_ibi_cols]
 
     if cfg.features.include_robust_z:
         eeg_df = add_dataset_local_robust_zscores(eeg_df, selected_eeg_features)
@@ -772,5 +1008,6 @@ def extract_core_feature_tables(
         eeg_features=eeg_df,
         eeg_base_features=base_eeg_df,
         ppg_features=ppg_df,
+        ppg_ibi_features=ppg_ibi_df,
         merged_features=merged_df,
     )

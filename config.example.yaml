@@ -63,6 +63,8 @@ features:
   # eeg_fm_theta, eeg_frontal_beta, eeg_faa, eeg_global_alpha_db, and eeg_global_beta_db.
   reuse_eeg_features_csv: false
   # Optional: also reuse prior PPG features from CSV to avoid raw file loading.
+  # The loader checks features_core_ppg.csv first, then features_base_ppg_ibi.csv.
+  # A PPG IBI CSV can derive HR, RMSSD, SDNN, mean RR, and peak HR from ibi_ms_clean.
   reuse_ppg_features_csv: false
 
 correlation:

@@ -10,7 +10,12 @@ import pandas as pd
 from .config import PipelineConfig
 from .correlation import apply_fdr, compute_pairwise_correlations, compute_trend_agreement
 from .datasets import build_observations
-from .features_core import FeatureExtractionResult, base_eeg_power_columns, extract_core_feature_tables
+from .features_core import (
+    FeatureExtractionResult,
+    base_eeg_power_columns,
+    base_ppg_ibi_columns,
+    extract_core_feature_tables,
+)
 
 EEG_FEATURE_ROW_KEYS: list[str] = ["dataset_id", "observation_id", "channel"]
 
@@ -22,6 +27,7 @@ class DatasetArtifacts:
     eeg_features: pd.DataFrame
     eeg_base_features: pd.DataFrame
     ppg_features: pd.DataFrame
+    ppg_ibi_features: pd.DataFrame
     merged_features: pd.DataFrame
     correlations_raw: pd.DataFrame
     correlations_fdr: pd.DataFrame
@@ -148,6 +154,8 @@ def _run_single_dataset(dataset_id: str, cfg: PipelineConfig) -> DatasetArtifact
             eeg_feature_cache = _read_csv_if_exists(dataset_dir / "features_base_eeg_power.csv")
     if cfg.features.reuse_ppg_features_csv:
         ppg_feature_cache = _read_csv_if_exists(dataset_dir / "features_core_ppg.csv")
+        if ppg_feature_cache is None:
+            ppg_feature_cache = _read_csv_if_exists(dataset_dir / "features_base_ppg_ibi.csv")
 
     features: FeatureExtractionResult = extract_core_feature_tables(
         observations,
@@ -169,6 +177,7 @@ def _run_single_dataset(dataset_id: str, cfg: PipelineConfig) -> DatasetArtifact
         eeg_features=features.eeg_features,
         eeg_base_features=features.eeg_base_features,
         ppg_features=features.ppg_features,
+        ppg_ibi_features=features.ppg_ibi_features,
         merged_features=features.merged_features,
         correlations_raw=corr_raw,
         correlations_fdr=corr_fdr,
@@ -210,6 +219,10 @@ def write_artifacts(cfg: PipelineConfig, artifacts: PipelineArtifacts) -> None:
         _write_csv(data.eeg_features, dataset_dir / "features_core_eeg.csv")
         _write_base_eeg_csv(cfg, dataset_dir, data.eeg_base_features)
         _write_csv(data.ppg_features, dataset_dir / "features_core_ppg.csv")
+        _write_csv(
+            _ensure_columns(_subset_columns(data.ppg_ibi_features, base_ppg_ibi_columns()), base_ppg_ibi_columns()),
+            dataset_dir / "features_base_ppg_ibi.csv",
+        )
         _write_csv(data.merged_features, dataset_dir / "features_core_merged.csv")
         _write_csv(data.correlations_raw, dataset_dir / "correlations_raw.csv")
         _write_csv(data.correlations_fdr, dataset_dir / "correlations_fdr.csv")

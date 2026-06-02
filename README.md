@@ -21,6 +21,7 @@ This repository contains a **raw-to-features** pipeline that runs across `HIIT`,
   - SDNN
   - mean RR
   - peak HR
+  - reusable cleaned IBI table for deriving these features without raw PPG
 - **Analysis:**
   - pairwise EEG×PPG correlations per dataset (Spearman/Pearson/Auto)
   - Benjamini-Hochberg FDR correction per dataset
@@ -47,6 +48,8 @@ python -m ppg_eeg.run --config config.example.yaml
    This file is the channel-level EEG power master table: one row per
    observation/channel with dB band powers, linear integrated band powers, and
    processing metadata.
+   The same run also writes `features_base_ppg_ibi.csv`, the IBI-level PPG
+   master table used to derive HR and HRV features without rereading raw PPG.
 
 2. **Later runs with new EEG features**  
    Add new feature names under `features.eeg`, then choose:
@@ -60,6 +63,7 @@ To reuse previously extracted feature CSVs (and avoid recomputing from raw files
   `features_base_eeg_power.csv`. If the base CSV has the channel-level schema,
   high-level EEG features can be derived from it.
 - `features.reuse_ppg_features_csv: true` to load `features_core_ppg.csv`
+  or, if that is absent, derive PPG features from `features_base_ppg_ibi.csv`.
 
 Both are loaded from `paths.out_root/<dataset_id>/`.
 
@@ -69,6 +73,7 @@ Per dataset, under `derivatives/<dataset_id>/`:
 
 - `observations_index.csv`
 - `features_base_eeg_power.csv`
+- `features_base_ppg_ibi.csv`
 - `features_base_eeg_power_extended.csv` (only when `output.eeg_base_csv_mode: new_file`)
 - `features_core_eeg.csv`
 - `features_core_ppg.csv`
@@ -104,6 +109,41 @@ Base EEG CSV schema (`features_base_eeg_power.csv`):
 - `psd_fmin`
 - `psd_fmax`
 - `n_fft`
+- `processing_version`
+
+Base PPG IBI CSV schema (`features_base_ppg_ibi.csv`):
+
+- `dataset_id`
+- `observation_id`
+- `subject_id`
+- `task_label`
+- `condition_label`
+- `session_label`
+- `modality`
+- `timepoint`
+- `state`
+- `eeg_path`
+- `eeg_format`
+- `ppg_source`
+- `ppg_path`
+- `ppg_format`
+- `ppg_error`
+- `ppg_channel`
+- `ppg_segment_start_s`
+- `ppg_segment_end_s`
+- `sfreq`
+- `peak_min_distance_s`
+- `peak_height`
+- `ibi_min_ms`
+- `ibi_max_ms`
+- `n_peaks`
+- `n_ibi_raw`
+- `n_ibi_clean`
+- `ibi_index`
+- `peak_time_s`
+- `peak_index`
+- `ibi_ms_raw`
+- `ibi_ms_clean`
 - `processing_version`
 
 Cross-dataset, under `derivatives/cross_dataset/`:

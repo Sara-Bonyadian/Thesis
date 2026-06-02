@@ -50,11 +50,15 @@ flowchart LR
   ds003838Adapter --> canonicalObs
   ds006848Adapter --> canonicalObs
 
-  canonicalObs --> eegCore["EEGCoreFeatureExtractor"]
-  canonicalObs --> ppgCore["PPGCoreFeatureExtractor"]
+  canonicalObs --> eegCore["EEGBasePowerExtractor"]
+  canonicalObs --> ppgCore["PPGBaseIBIExtractor"]
 
-  eegCore --> mergedTable["MergedFeatureTable"]
-  ppgCore --> mergedTable
+  eegCore --> eegBase["features_base_eeg_power.csv"]
+  ppgCore --> ppgBase["features_base_ppg_ibi.csv"]
+  eegBase --> derivedEeg["DerivedEEGFeatures"]
+  ppgBase --> derivedPpg["DerivedPPGFeatures"]
+  derivedEeg --> mergedTable["MergedFeatureTable"]
+  derivedPpg --> mergedTable
 
   mergedTable --> corrPerDataset["DatasetCorrelationAndFDR"]
   corrPerDataset --> agreement["CrossDatasetTrendAgreement"]
@@ -75,6 +79,8 @@ flowchart LR
 
 3. Build a core feature extraction layer on top of existing primitives.
 - Add a unified feature orchestrator module (for example [`/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/features_core.py`](/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/features_core.py)).
+- First write reusable low-level base CSVs: `features_base_eeg_power.csv` (per-channel EEG band power) and `features_base_ppg_ibi.csv` (per-IBI PPG intervals).
+- Derive higher-level EEG/PPG feature tables from those base CSVs when reuse is enabled, instead of rereading raw recordings.
 - Core EEG v1 (shared): FM-theta, frontal beta, frontal alpha asymmetry, global alpha power, global beta power.
 - Core PPG v1 (shared): mean HR, RMSSD, SDNN, mean RR, peak HR.
 - Store both raw feature values and dataset-local robust z-scores so correlation patterns are comparable across datasets with different baselines.
@@ -95,6 +101,8 @@ flowchart LR
 
 6. Define output artifact contract for reproducibility.
 - Write per-dataset files under `derivatives/<dataset_id>/`:
+  - `features_base_eeg_power.csv`
+  - `features_base_ppg_ibi.csv`
   - `features_core_eeg.csv`
   - `features_core_ppg.csv`
   - `features_core_merged.csv`

@@ -95,6 +95,8 @@ class TestFeaturesCore(unittest.TestCase):
         self.assertEqual(len(result.eeg_features), 1)
         self.assertEqual(len(result.ppg_features), 1)
         self.assertEqual(len(result.merged_features), 1)
+        self.assertIn("ibi_ms_clean", result.ppg_ibi_features.columns)
+        self.assertIn("processing_version", result.ppg_ibi_features.columns)
         self.assertEqual(result.eeg_features.loc[0, "eeg_error"], "ok")
         self.assertEqual(result.ppg_features.loc[0, "ppg_error"], "ok")
         self.assertIn("channel", result.eeg_features.columns)
@@ -286,6 +288,89 @@ class TestFeaturesCore(unittest.TestCase):
         self.assertAlmostEqual(float(row["eeg_global_alpha_db"]), float(eeg_cache["power_alpha"].mean()))
         self.assertAlmostEqual(float(row["eeg_global_beta_db"]), float(eeg_cache["power_beta"].mean()))
         self.assertEqual(len(result.eeg_base_features), len(channels))
+
+    def test_extract_core_feature_tables_derives_ppg_features_from_ibi_cache(self) -> None:
+        cfg = _test_cfg()
+        obs = CanonicalObservation(
+            dataset_id="hiit",
+            observation_id="hiit-01-ph-pre-rest",
+            subject_id="01",
+            task_label="rest",
+            condition_label="ph_pre_rest",
+            eeg_path=Path("/tmp/fake.vhdr"),
+            eeg_format="brainvision",
+            ppg_source="embedded_eeg",
+            session_label="ph",
+            modality="ph",
+            timepoint="pre",
+            state="rest",
+        )
+        eeg_cache = pd.DataFrame(
+            [
+                {
+                    "dataset_id": "hiit",
+                    "observation_id": "hiit-01-ph-pre-rest",
+                    "subject_id": "01",
+                    "task_label": "rest",
+                    "condition_label": "ph_pre_rest",
+                    "session_label": "ph",
+                    "modality": "ph",
+                    "timepoint": "pre",
+                    "state": "rest",
+                    "eeg_fm_theta": 1.1,
+                    "eeg_frontal_beta": 2.2,
+                    "eeg_faa": 3.3,
+                    "eeg_global_alpha_db": 4.4,
+                    "eeg_global_beta_db": 5.5,
+                    "channel": "F3|F4|Fz",
+                    "power_theta": 0.11,
+                    "power_alpha": 0.22,
+                    "power_beta": 0.33,
+                    "n_bad_channels": 1,
+                    "eeg_error": "ok",
+                }
+            ]
+        )
+        ibi_values = np.array([800.0, 1000.0, 750.0, 900.0])
+        ppg_ibi_cache = pd.DataFrame(
+            [
+                {
+                    "dataset_id": "hiit",
+                    "observation_id": "hiit-01-ph-pre-rest",
+                    "subject_id": "01",
+                    "task_label": "rest",
+                    "condition_label": "ph_pre_rest",
+                    "session_label": "ph",
+                    "modality": "ph",
+                    "timepoint": "pre",
+                    "state": "rest",
+                    "ppg_error": "ok",
+                    "ppg_channel": "photosensor",
+                    "ppg_segment_start_s": 0.0,
+                    "ppg_segment_end_s": 9.0,
+                    "n_ibi_clean": len(ibi_values),
+                    "ibi_index": idx,
+                    "ibi_ms_clean": ibi,
+                }
+                for idx, ibi in enumerate(ibi_values)
+            ]
+        )
+
+        with patch("ppg_eeg.features_core._read_raw", side_effect=RuntimeError("raw loading should be skipped")):
+            result = extract_core_feature_tables(
+                [obs],
+                cfg,
+                eeg_feature_cache=eeg_cache,
+                ppg_feature_cache=ppg_ibi_cache,
+            )
+
+        row = result.ppg_features.iloc[0]
+        self.assertAlmostEqual(float(row["ppg_mean_hr_bpm"]), 60000.0 / float(np.mean(ibi_values)))
+        self.assertAlmostEqual(float(row["ppg_rmssd_ms"]), float(np.sqrt(np.mean(np.diff(ibi_values) ** 2))))
+        self.assertAlmostEqual(float(row["ppg_sdnn_ms"]), float(np.std(ibi_values, ddof=1)))
+        self.assertAlmostEqual(float(row["ppg_mean_rr_ms"]), float(np.mean(ibi_values)))
+        self.assertAlmostEqual(float(row["ppg_peak_hr_bpm"]), float(np.quantile(60000.0 / ibi_values, 0.95)))
+        self.assertEqual(len(result.ppg_ibi_features), len(ibi_values))
 
 
 if __name__ == "__main__":
