@@ -69,16 +69,11 @@ class FeaturesConfig:
     eeg: list[str] = field(default_factory=lambda: list(DEFAULT_CORE_EEG_FEATURES))
     ppg: list[str] = field(default_factory=lambda: list(DEFAULT_CORE_PPG_FEATURES))
     include_robust_z: bool = True
-    reuse_eeg_features_csv: bool = False
-    reuse_ppg_features_csv: bool = False
 
 
 @dataclass(frozen=True)
 class OutputConfig:
-    save_observation_index: bool = True
     save_summary_json: bool = True
-    eeg_base_csv_mode: str = "base_only"
-    eeg_base_csv_new_file_name: str = "features_base_eeg_power_extended.csv"
 
 
 @dataclass(frozen=True)
@@ -171,8 +166,6 @@ def load_config(path: str | Path) -> PipelineConfig:
             eeg=feature_eeg,
             ppg=feature_ppg,
             include_robust_z=bool(_get(features, "include_robust_z", True)),
-            reuse_eeg_features_csv=bool(_get(features, "reuse_eeg_features_csv", False)),
-            reuse_ppg_features_csv=bool(_get(features, "reuse_ppg_features_csv", False)),
         ),
         correlation=CorrelationConfig(
             alpha=float(_get(correlation, "alpha", 0.05)),
@@ -182,24 +175,9 @@ def load_config(path: str | Path) -> PipelineConfig:
             fdr_method=str(_get(correlation, "fdr_method", "fdr_bh")),
         ),
         output=OutputConfig(
-            save_observation_index=bool(_get(output, "save_observation_index", True)),
             save_summary_json=bool(_get(output, "save_summary_json", True)),
-            eeg_base_csv_mode=str(_get(output, "eeg_base_csv_mode", "base_only")).casefold(),
-            eeg_base_csv_new_file_name=str(
-                _get(output, "eeg_base_csv_new_file_name", "features_base_eeg_power_extended.csv")
-            ),
         ),
     )
-
-    allowed_modes = {"base_only", "append_columns", "new_file"}
-    if cfg.output.eeg_base_csv_mode not in allowed_modes:
-        allowed_text = ", ".join(sorted(allowed_modes))
-        raise ValueError(
-            f"Invalid output.eeg_base_csv_mode={cfg.output.eeg_base_csv_mode!r}. "
-            f"Expected one of: {allowed_text}."
-        )
-    if not cfg.output.eeg_base_csv_new_file_name.strip():
-        raise ValueError("output.eeg_base_csv_new_file_name must be a non-empty filename.")
 
     return cfg
 

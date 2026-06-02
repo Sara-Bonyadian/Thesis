@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,13 +29,20 @@ import yaml
 from pandas.errors import EmptyDataError
 
 from .config import PipelineConfig, load_config
-from .correlation import apply_fdr, compute_pairwise_correlations, compute_trend_agreement
 from .datasets import build_observations
 from .features_core import (
-    OBSERVATION_KEY_COLUMNS,
-    add_dataset_local_robust_zscores,
     base_eeg_power_columns,
     base_ppg_ibi_columns,
+)
+from .pipeline import (
+    EEG_BASE_FILE,
+    OBSERVATION_INDEX_COLUMNS,
+    OBSERVATIONS_INDEX_FILE,
+    PPG_IBI_BASE_FILE,
+    STAGE1_DATASET_FILES,
+    STAGE2_DATASET_FILES,
+    run_stage2_from_base_csvs,
+    write_stage2_artifacts,
 )
 
 
@@ -90,19 +97,6 @@ def _drop_duplicates_if_possible(df: pd.DataFrame, columns: list[str]) -> pd.Dat
     return df.drop_duplicates(subset=usable, keep="last").reset_index(drop=True)
 
 
-def _drop_robust_z_columns(df: pd.DataFrame, feature_names: list[str]) -> pd.DataFrame:
-    if df.empty:
-        return df
-    to_drop: list[str] = []
-    for feature_name in feature_names:
-        rz_col = f"{feature_name}_rz"
-        if rz_col in df.columns:
-            to_drop.append(rz_col)
-    if not to_drop:
-        return df
-    return df.drop(columns=to_drop)
-
-
 def _discover_subjects(cfg: PipelineConfig, dataset_id: str) -> list[str]:
     observations = build_observations(
         dataset_id,
@@ -127,28 +121,13 @@ def _build_batch_config_data(
 ) -> dict[str, Any]:
     batch_data = copy.deepcopy(source_config_data)
     batch_data["subjects"] = subjects
-    batch_data.setdefault("features", {})
-    # Batch runs should be deterministic and independent.
-    batch_data["features"]["reuse_eeg_features_csv"] = False
-    batch_data["features"]["reuse_ppg_features_csv"] = False
     batch_data.setdefault("paths", {})
     batch_data["paths"]["out_root"] = _safe_relative_or_absolute(batch_output_dir, repo_root)
     return batch_data
 
 
-def _required_dataset_files(cfg: PipelineConfig) -> list[str]:
-    required = [
-        "features_core_eeg.csv",
-        "features_core_ppg.csv",
-        "features_core_merged.csv",
-        "features_base_eeg_power.csv",
-        "features_base_ppg_ibi.csv",
-        "correlations_raw.csv",
-        "correlations_fdr.csv",
-    ]
-    if cfg.output.save_observation_index:
-        required.append("observations_index.csv")
-    return required
+def _required_dataset_files(_cfg: PipelineConfig) -> list[str]:
+    return [*STAGE1_DATASET_FILES, *STAGE2_DATASET_FILES]
 
 
 def _run_single_batch(
@@ -229,88 +208,35 @@ def _merge_completed_batches(
     final_out_root: Path,
 ) -> dict[str, int]:
     obs_frames: list[pd.DataFrame] = []
-    eeg_frames: list[pd.DataFrame] = []
-    ppg_frames: list[pd.DataFrame] = []
     base_frames: list[pd.DataFrame] = []
     ppg_ibi_frames: list[pd.DataFrame] = []
 
     for batch in batches:
         dataset_dir = batch.output_dir / dataset_id
-        if cfg.output.save_observation_index:
-            obs_df = _safe_read_csv(dataset_dir / "observations_index.csv")
-            if not obs_df.empty:
-                obs_frames.append(obs_df)
+        obs_df = _safe_read_csv(dataset_dir / OBSERVATIONS_INDEX_FILE)
+        base_df = _safe_read_csv(dataset_dir / EEG_BASE_FILE)
+        ppg_ibi_df = _safe_read_csv(dataset_dir / PPG_IBI_BASE_FILE)
 
-        eeg_df = _safe_read_csv(dataset_dir / "features_core_eeg.csv")
-        ppg_df = _safe_read_csv(dataset_dir / "features_core_ppg.csv")
-        base_df = _safe_read_csv(dataset_dir / "features_base_eeg_power.csv")
-        ppg_ibi_df = _safe_read_csv(dataset_dir / "features_base_ppg_ibi.csv")
-
-        if not eeg_df.empty:
-            eeg_frames.append(eeg_df)
-        if not ppg_df.empty:
-            ppg_frames.append(ppg_df)
+        if not obs_df.empty:
+            obs_frames.append(obs_df)
         if not base_df.empty:
             base_frames.append(base_df)
         if not ppg_ibi_df.empty:
             ppg_ibi_frames.append(ppg_ibi_df)
 
     obs_all = pd.concat(obs_frames, ignore_index=True) if obs_frames else pd.DataFrame()
-    eeg_all = pd.concat(eeg_frames, ignore_index=True) if eeg_frames else pd.DataFrame()
-    ppg_all = pd.concat(ppg_frames, ignore_index=True) if ppg_frames else pd.DataFrame()
     base_all = pd.concat(base_frames, ignore_index=True) if base_frames else pd.DataFrame()
     ppg_ibi_all = pd.concat(ppg_ibi_frames, ignore_index=True) if ppg_ibi_frames else pd.DataFrame()
 
     obs_all = _drop_duplicates_if_possible(obs_all, ["observation_id"])
-    eeg_all = _drop_duplicates_if_possible(eeg_all, ["observation_id"])
-    ppg_all = _drop_duplicates_if_possible(ppg_all, ["observation_id"])
     base_all = _drop_duplicates_if_possible(base_all, ["observation_id", "channel"])
     ppg_ibi_all = _drop_duplicates_if_possible(ppg_ibi_all, ["observation_id", "ibi_index"])
 
-    selected_eeg = list(cfg.features.eeg)
-    selected_ppg = list(cfg.features.ppg)
-
-    eeg_all = _drop_robust_z_columns(eeg_all, selected_eeg)
-    ppg_all = _drop_robust_z_columns(ppg_all, selected_ppg)
-
-    if cfg.features.include_robust_z:
-        if not eeg_all.empty:
-            eeg_all = add_dataset_local_robust_zscores(eeg_all, selected_eeg)
-        if not ppg_all.empty:
-            ppg_all = add_dataset_local_robust_zscores(ppg_all, selected_ppg)
-
-    merge_key_missing = any(col not in eeg_all.columns or col not in ppg_all.columns for col in OBSERVATION_KEY_COLUMNS)
-    if eeg_all.empty or ppg_all.empty or merge_key_missing:
-        merged_all = pd.DataFrame()
-    else:
-        ppg_cols: list[str] = [*OBSERVATION_KEY_COLUMNS, *selected_ppg]
-        ppg_cols.extend(f"{name}_rz" for name in selected_ppg if f"{name}_rz" in ppg_all.columns)
-        for extra_col in (
-            "ppg_error",
-            "ppg_channel",
-            "ppg_segment_start_s",
-            "ppg_segment_end_s",
-            "n_ibi_clean",
-        ):
-            if extra_col in ppg_all.columns:
-                ppg_cols.append(extra_col)
-        ppg_cols = [col for col in dict.fromkeys(ppg_cols) if col in ppg_all.columns]
-        merged_all = eeg_all.merge(ppg_all[ppg_cols], on=OBSERVATION_KEY_COLUMNS, how="inner")
-
-    corr_raw = compute_pairwise_correlations(
-        merged_all,
-        eeg_features=selected_eeg,
-        ppg_features=selected_ppg,
-        cfg=cfg,
-    )
-    corr_fdr = apply_fdr(corr_raw, cfg=cfg)
-    trend_df, trend_summary = compute_trend_agreement(corr_fdr, cfg=cfg)
-
     dataset_dir = final_out_root / dataset_id
     dataset_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.output.save_observation_index:
-        _write_csv(obs_all, dataset_dir / "observations_index.csv")
-    _write_csv(eeg_all, dataset_dir / "features_core_eeg.csv")
+    if obs_all.empty:
+        obs_all = pd.DataFrame(columns=OBSERVATION_INDEX_COLUMNS)
+    _write_csv(obs_all, dataset_dir / OBSERVATIONS_INDEX_FILE)
 
     if base_all.empty:
         base_all = pd.DataFrame(columns=base_eeg_power_columns("export"))
@@ -320,9 +246,8 @@ def _merge_completed_batches(
             if col not in base_all.columns:
                 base_all[col] = pd.NA
         base_all = base_all[ordered_base_cols]
-    _write_csv(base_all, dataset_dir / "features_base_eeg_power.csv")
+    _write_csv(base_all, dataset_dir / EEG_BASE_FILE)
 
-    _write_csv(ppg_all, dataset_dir / "features_core_ppg.csv")
     if ppg_ibi_all.empty:
         ppg_ibi_all = pd.DataFrame(columns=base_ppg_ibi_columns())
     else:
@@ -331,22 +256,17 @@ def _merge_completed_batches(
             if col not in ppg_ibi_all.columns:
                 ppg_ibi_all[col] = pd.NA
         ppg_ibi_all = ppg_ibi_all[ordered_ppg_ibi_cols]
-    _write_csv(ppg_ibi_all, dataset_dir / "features_base_ppg_ibi.csv")
+    _write_csv(ppg_ibi_all, dataset_dir / PPG_IBI_BASE_FILE)
 
-    _write_csv(merged_all, dataset_dir / "features_core_merged.csv")
-    _write_csv(corr_raw, dataset_dir / "correlations_raw.csv")
-    _write_csv(corr_fdr, dataset_dir / "correlations_fdr.csv")
-
-    cross_dir = final_out_root / "cross_dataset"
-    cross_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(trend_df, cross_dir / "trend_agreement.csv")
-    if cfg.output.save_summary_json:
-        (cross_dir / "trend_agreement_summary.json").write_text(json.dumps(trend_summary, indent=2))
+    stage_cfg = replace(cfg, paths=replace(cfg.paths, out_root=final_out_root))
+    artifacts = run_stage2_from_base_csvs(stage_cfg)
+    write_stage2_artifacts(stage_cfg, artifacts)
+    dataset_artifacts = artifacts.per_dataset[dataset_id]
 
     return {
         "observations": int(len(obs_all)),
-        "merged_rows": int(len(merged_all)),
-        "corr_tests": int(len(corr_raw)),
+        "merged_rows": int(len(dataset_artifacts.merged_features)),
+        "corr_tests": int(len(dataset_artifacts.correlations_raw)),
     }
 
 

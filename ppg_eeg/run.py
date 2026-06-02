@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .config import load_config
-from .pipeline import run_pipeline, write_artifacts
+from .pipeline import run_two_stage_pipeline
 
 
 def main() -> None:
@@ -16,8 +16,7 @@ def main() -> None:
     out_root = Path(cfg.paths.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    artifacts = run_pipeline(cfg)
-    write_artifacts(cfg, artifacts)
+    artifacts = run_two_stage_pipeline(cfg)
 
     print(f"Loaded config for dataset_ids={cfg.dataset_ids!r}")
     print(f"raw_root={cfg.paths.raw_root}")

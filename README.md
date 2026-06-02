@@ -1,6 +1,6 @@
 # EEG–PPG correlation pipeline
 
-This repository contains a **raw-to-features** pipeline that runs across `HIIT`, `ds003838`, and `ds006848`, then computes inter-subject EEG↔PPG correlations and cross-dataset trend agreement.
+This repository contains a two-stage **raw-to-base-to-features** pipeline that runs across `HIIT`, `ds003838`, and `ds006848`, then computes inter-subject EEG↔PPG correlations and cross-dataset trend agreement.
 
 ## Scope
 
@@ -41,43 +41,33 @@ pip install -r requirements.txt
 python -m ppg_eeg.run --config config.example.yaml
 ```
 
-### Feature Iteration Workflow
+### Two-Stage Workflow
 
-1. **Base extraction run**  
-   Use `output.eeg_base_csv_mode: base_only` to write `features_base_eeg_power.csv`.
-   This file is the channel-level EEG power master table: one row per
-   observation/channel with dB band powers, linear integrated band powers, and
-   processing metadata.
-   The same run also writes `features_base_ppg_ibi.csv`, the IBI-level PPG
-   master table used to derive HR and HRV features without rereading raw PPG.
+1. **Stage 1: base extraction**  
+   Reads raw EEG/PPG observations and writes only the reusable base inputs:
+   `observations_index.csv`, `features_base_eeg_power.csv`, and
+   `features_base_ppg_ibi.csv`.
 
-2. **Later runs with new EEG features**  
-   Add new feature names under `features.eeg`, then choose:
-   - `output.eeg_base_csv_mode: append_columns` to add/update feature columns in the same base CSV.
-   - `output.eeg_base_csv_mode: new_file` to keep base CSV unchanged and write an expanded file using `output.eeg_base_csv_new_file_name`.
-
-To reuse previously extracted feature CSVs (and avoid recomputing from raw files), set:
-
-- `features.reuse_eeg_features_csv: true` to load prior EEG features. The loader
-  checks `features_core_eeg.csv`, then the configured extended EEG file, then
-  `features_base_eeg_power.csv`. If the base CSV has the channel-level schema,
-  high-level EEG features can be derived from it.
-- `features.reuse_ppg_features_csv: true` to load `features_core_ppg.csv`
-  or, if that is absent, derive PPG features from `features_base_ppg_ibi.csv`.
-
-Both are loaded from `paths.out_root/<dataset_id>/`.
+2. **Stage 2: derived analysis outputs**  
+   Reloads those Stage 1 CSVs from `paths.out_root/<dataset_id>/`, derives
+   `features_eeg.csv`, `features_ppg.csv`, and `features_merged.csv`, then
+   computes per-dataset correlations and cross-dataset trend agreement.
 
 ## Output artifacts
 
 Per dataset, under `derivatives/<dataset_id>/`:
 
+Stage 1:
+
 - `observations_index.csv`
 - `features_base_eeg_power.csv`
 - `features_base_ppg_ibi.csv`
-- `features_base_eeg_power_extended.csv` (only when `output.eeg_base_csv_mode: new_file`)
-- `features_core_eeg.csv`
-- `features_core_ppg.csv`
-- `features_core_merged.csv`
+
+Stage 2:
+
+- `features_eeg.csv`
+- `features_ppg.csv`
+- `features_merged.csv`
 - `correlations_raw.csv`
 - `correlations_fdr.csv`
 

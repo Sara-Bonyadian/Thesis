@@ -14,10 +14,62 @@ from .features_core import (
     FeatureExtractionResult,
     base_eeg_power_columns,
     base_ppg_ibi_columns,
+    derive_core_feature_tables_from_base_tables,
     extract_core_feature_tables,
 )
 
-EEG_FEATURE_ROW_KEYS: list[str] = ["dataset_id", "observation_id", "channel"]
+OBSERVATIONS_INDEX_FILE = "observations_index.csv"
+EEG_BASE_FILE = "features_base_eeg_power.csv"
+PPG_IBI_BASE_FILE = "features_base_ppg_ibi.csv"
+EEG_FEATURES_FILE = "features_eeg.csv"
+PPG_FEATURES_FILE = "features_ppg.csv"
+MERGED_FEATURES_FILE = "features_merged.csv"
+CORRELATIONS_RAW_FILE = "correlations_raw.csv"
+CORRELATIONS_FDR_FILE = "correlations_fdr.csv"
+
+STAGE1_DATASET_FILES: tuple[str, ...] = (
+    OBSERVATIONS_INDEX_FILE,
+    EEG_BASE_FILE,
+    PPG_IBI_BASE_FILE,
+)
+STAGE2_DATASET_FILES: tuple[str, ...] = (
+    EEG_FEATURES_FILE,
+    PPG_FEATURES_FILE,
+    MERGED_FEATURES_FILE,
+    CORRELATIONS_RAW_FILE,
+    CORRELATIONS_FDR_FILE,
+)
+OBSERVATION_INDEX_COLUMNS: list[str] = [
+    "dataset_id",
+    "observation_id",
+    "subject_id",
+    "task_label",
+    "condition_label",
+    "eeg_path",
+    "eeg_format",
+    "ppg_source",
+    "ppg_path",
+    "ppg_format",
+    "session_label",
+    "modality",
+    "timepoint",
+    "state",
+    "is_usable",
+    "notes",
+]
+
+
+@dataclass(frozen=True)
+class DatasetStage1Artifacts:
+    dataset_id: str
+    observations: pd.DataFrame
+    eeg_base_features: pd.DataFrame
+    ppg_ibi_features: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class PipelineStage1Artifacts:
+    per_dataset: dict[str, DatasetStage1Artifacts]
 
 
 @dataclass(frozen=True)
@@ -49,9 +101,9 @@ def _dataset_output_dir(cfg: PipelineConfig, dataset_id: str) -> Path:
     return Path(cfg.paths.out_root) / dataset_id
 
 
-def _read_csv_if_exists(path: Path) -> pd.DataFrame | None:
+def _read_required_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
-        return None
+        raise FileNotFoundError(f"Required pipeline input is missing: {path}")
     return pd.read_csv(path)
 
 
@@ -68,71 +120,19 @@ def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return out.loc[:, columns].copy()
 
 
-def _eeg_feature_extension_columns(cfg: PipelineConfig, eeg_df: pd.DataFrame) -> list[str]:
-    cols: list[str] = []
-    for feature_name in cfg.features.eeg:
-        if feature_name in eeg_df.columns:
-            cols.append(feature_name)
-        rz_col = f"{feature_name}_rz"
-        if rz_col in eeg_df.columns:
-            cols.append(rz_col)
-    return list(dict.fromkeys(cols))
+def _write_base_eeg_csv(dataset_dir: Path, eeg_df: pd.DataFrame) -> None:
+    base_columns = base_eeg_power_columns("export")
+    base_rows = _ensure_columns(_subset_columns(eeg_df, base_columns), base_columns)
+    _write_csv(base_rows, dataset_dir / EEG_BASE_FILE)
 
 
-def _upsert_feature_columns(existing_df: pd.DataFrame, incoming_df: pd.DataFrame) -> pd.DataFrame:
-    for key in EEG_FEATURE_ROW_KEYS:
-        if key not in existing_df.columns:
-            raise ValueError(f"Existing EEG base CSV is missing key column: {key}")
-        if key not in incoming_df.columns:
-            raise ValueError(f"Incoming EEG base rows are missing key column: {key}")
-
-    existing = existing_df.drop_duplicates(subset=EEG_FEATURE_ROW_KEYS, keep="last").copy()
-    incoming = incoming_df.drop_duplicates(subset=EEG_FEATURE_ROW_KEYS, keep="last").copy()
-    existing_idx = existing.set_index(EEG_FEATURE_ROW_KEYS)
-    incoming_idx = incoming.set_index(EEG_FEATURE_ROW_KEYS)
-
-    merged = existing_idx.reindex(existing_idx.index.union(incoming_idx.index))
-    for col in incoming_idx.columns:
-        merged[col] = incoming_idx[col]
-    return merged.reset_index()
+def _write_base_ppg_ibi_csv(dataset_dir: Path, ppg_ibi_df: pd.DataFrame) -> None:
+    base_columns = base_ppg_ibi_columns()
+    base_rows = _ensure_columns(_subset_columns(ppg_ibi_df, base_columns), base_columns)
+    _write_csv(base_rows, dataset_dir / PPG_IBI_BASE_FILE)
 
 
-def _write_base_eeg_csv(cfg: PipelineConfig, dataset_dir: Path, eeg_df: pd.DataFrame) -> None:
-    base_path = dataset_dir / "features_base_eeg_power.csv"
-    base_export_columns = base_eeg_power_columns("export")
-    base_rows = _ensure_columns(_subset_columns(eeg_df, base_export_columns), base_export_columns)
-    mode = cfg.output.eeg_base_csv_mode
-
-    if mode == "base_only":
-        _write_csv(base_rows, base_path)
-        return
-
-    extension_cols = _eeg_feature_extension_columns(cfg, eeg_df)
-
-    if mode == "append_columns":
-        existing = _read_csv_if_exists(base_path)
-        if existing is None:
-            _write_csv(base_rows, base_path)
-            existing = base_rows
-        incoming_columns = [*base_export_columns, *extension_cols]
-        incoming_rows = _ensure_columns(_subset_columns(eeg_df, incoming_columns), incoming_columns)
-        merged = _upsert_feature_columns(existing, incoming_rows)
-        _write_csv(merged, base_path)
-        return
-
-    if mode == "new_file":
-        _write_csv(base_rows, base_path)
-        if extension_cols:
-            new_path = dataset_dir / cfg.output.eeg_base_csv_new_file_name
-            new_columns = [*base_export_columns, *extension_cols]
-            new_rows = _ensure_columns(_subset_columns(eeg_df, new_columns), new_columns)
-            _write_csv(new_rows, new_path)
-        return
-
-    raise ValueError(f"Unsupported output.eeg_base_csv_mode: {mode!r}")
-
-
-def _run_single_dataset(dataset_id: str, cfg: PipelineConfig) -> DatasetArtifacts:
+def _run_stage1_single_dataset(dataset_id: str, cfg: PipelineConfig) -> DatasetStage1Artifacts:
     observations = build_observations(
         dataset_id,
         cfg.paths.raw_root,
@@ -141,28 +141,45 @@ def _run_single_dataset(dataset_id: str, cfg: PipelineConfig) -> DatasetArtifact
         conditions=cfg.conditions,
         sessions=cfg.sessions,
     )
-    observations_df = pd.DataFrame([obs.to_record() for obs in observations])
-    dataset_dir = _dataset_output_dir(cfg, dataset_id)
-
-    eeg_feature_cache: pd.DataFrame | None = None
-    ppg_feature_cache: pd.DataFrame | None = None
-    if cfg.features.reuse_eeg_features_csv:
-        eeg_feature_cache = _read_csv_if_exists(dataset_dir / "features_core_eeg.csv")
-        if eeg_feature_cache is None:
-            eeg_feature_cache = _read_csv_if_exists(dataset_dir / cfg.output.eeg_base_csv_new_file_name)
-        if eeg_feature_cache is None:
-            eeg_feature_cache = _read_csv_if_exists(dataset_dir / "features_base_eeg_power.csv")
-    if cfg.features.reuse_ppg_features_csv:
-        ppg_feature_cache = _read_csv_if_exists(dataset_dir / "features_core_ppg.csv")
-        if ppg_feature_cache is None:
-            ppg_feature_cache = _read_csv_if_exists(dataset_dir / "features_base_ppg_ibi.csv")
-
-    features: FeatureExtractionResult = extract_core_feature_tables(
-        observations,
-        cfg,
-        eeg_feature_cache=eeg_feature_cache,
-        ppg_feature_cache=ppg_feature_cache,
+    observations_df = _ensure_columns(
+        pd.DataFrame([obs.to_record() for obs in observations]),
+        OBSERVATION_INDEX_COLUMNS,
     )
+    extracted = extract_core_feature_tables(observations, cfg)
+    return DatasetStage1Artifacts(
+        dataset_id=dataset_id,
+        observations=observations_df,
+        eeg_base_features=extracted.eeg_base_features,
+        ppg_ibi_features=extracted.ppg_ibi_features,
+    )
+
+
+def run_stage1(cfg: PipelineConfig) -> PipelineStage1Artifacts:
+    return PipelineStage1Artifacts(
+        per_dataset={
+            dataset_id: _run_stage1_single_dataset(dataset_id, cfg)
+            for dataset_id in cfg.dataset_ids
+        }
+    )
+
+
+def write_stage1_artifacts(cfg: PipelineConfig, artifacts: PipelineStage1Artifacts) -> None:
+    Path(cfg.paths.out_root).mkdir(parents=True, exist_ok=True)
+    for dataset_id, data in artifacts.per_dataset.items():
+        dataset_dir = _dataset_output_dir(cfg, dataset_id)
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        _write_csv(data.observations, dataset_dir / OBSERVATIONS_INDEX_FILE)
+        _write_base_eeg_csv(dataset_dir, data.eeg_base_features)
+        _write_base_ppg_ibi_csv(dataset_dir, data.ppg_ibi_features)
+
+
+def _dataset_artifacts_from_feature_result(
+    *,
+    dataset_id: str,
+    observations_df: pd.DataFrame,
+    features: FeatureExtractionResult,
+    cfg: PipelineConfig,
+) -> DatasetArtifacts:
     corr_raw = compute_pairwise_correlations(
         features.merged_features,
         eeg_features=cfg.features.eeg,
@@ -184,21 +201,13 @@ def _run_single_dataset(dataset_id: str, cfg: PipelineConfig) -> DatasetArtifact
     )
 
 
-def run_pipeline(cfg: PipelineConfig) -> PipelineArtifacts:
-    per_dataset: dict[str, DatasetArtifacts] = {}
-    all_corr_fdr: list[pd.DataFrame] = []
-
-    for dataset_id in cfg.dataset_ids:
-        artifacts = _run_single_dataset(dataset_id, cfg)
-        per_dataset[dataset_id] = artifacts
-        all_corr_fdr.append(artifacts.correlations_fdr)
-
+def _build_pipeline_artifacts(per_dataset: dict[str, DatasetArtifacts], cfg: PipelineConfig) -> PipelineArtifacts:
+    all_corr_fdr = [data.correlations_fdr for data in per_dataset.values()]
     if all_corr_fdr:
         all_corr_fdr_df = pd.concat(all_corr_fdr, ignore_index=True)
     else:
         all_corr_fdr_df = pd.DataFrame()
     trend_df, trend_summary = compute_trend_agreement(all_corr_fdr_df, cfg=cfg)
-
     return PipelineArtifacts(
         per_dataset=per_dataset,
         trend_agreement=trend_df,
@@ -206,26 +215,66 @@ def run_pipeline(cfg: PipelineConfig) -> PipelineArtifacts:
     )
 
 
-def write_artifacts(cfg: PipelineConfig, artifacts: PipelineArtifacts) -> None:
+def run_stage2_from_stage1(
+    cfg: PipelineConfig,
+    stage1_artifacts: PipelineStage1Artifacts,
+) -> PipelineArtifacts:
+    per_dataset: dict[str, DatasetArtifacts] = {}
+    for dataset_id, data in stage1_artifacts.per_dataset.items():
+        features = derive_core_feature_tables_from_base_tables(
+            data.observations,
+            data.eeg_base_features,
+            data.ppg_ibi_features,
+            cfg,
+        )
+        per_dataset[dataset_id] = _dataset_artifacts_from_feature_result(
+            dataset_id=dataset_id,
+            observations_df=data.observations,
+            features=features,
+            cfg=cfg,
+        )
+    return _build_pipeline_artifacts(per_dataset, cfg)
+
+
+def _run_stage2_single_dataset_from_csvs(dataset_id: str, cfg: PipelineConfig) -> DatasetArtifacts:
+    dataset_dir = _dataset_output_dir(cfg, dataset_id)
+    observations_df = _read_required_csv(dataset_dir / OBSERVATIONS_INDEX_FILE)
+    eeg_base_df = _read_required_csv(dataset_dir / EEG_BASE_FILE)
+    ppg_ibi_df = _read_required_csv(dataset_dir / PPG_IBI_BASE_FILE)
+    features = derive_core_feature_tables_from_base_tables(
+        observations_df,
+        eeg_base_df,
+        ppg_ibi_df,
+        cfg,
+    )
+    return _dataset_artifacts_from_feature_result(
+        dataset_id=dataset_id,
+        observations_df=observations_df,
+        features=features,
+        cfg=cfg,
+    )
+
+
+def run_stage2_from_base_csvs(cfg: PipelineConfig) -> PipelineArtifacts:
+    per_dataset = {
+        dataset_id: _run_stage2_single_dataset_from_csvs(dataset_id, cfg)
+        for dataset_id in cfg.dataset_ids
+    }
+    return _build_pipeline_artifacts(per_dataset, cfg)
+
+
+def write_stage2_artifacts(cfg: PipelineConfig, artifacts: PipelineArtifacts) -> None:
     out_root = Path(cfg.paths.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
     for dataset_id, data in artifacts.per_dataset.items():
         dataset_dir = _dataset_output_dir(cfg, dataset_id)
         dataset_dir.mkdir(parents=True, exist_ok=True)
-
-        if cfg.output.save_observation_index:
-            _write_csv(data.observations, dataset_dir / "observations_index.csv")
-        _write_csv(data.eeg_features, dataset_dir / "features_core_eeg.csv")
-        _write_base_eeg_csv(cfg, dataset_dir, data.eeg_base_features)
-        _write_csv(data.ppg_features, dataset_dir / "features_core_ppg.csv")
-        _write_csv(
-            _ensure_columns(_subset_columns(data.ppg_ibi_features, base_ppg_ibi_columns()), base_ppg_ibi_columns()),
-            dataset_dir / "features_base_ppg_ibi.csv",
-        )
-        _write_csv(data.merged_features, dataset_dir / "features_core_merged.csv")
-        _write_csv(data.correlations_raw, dataset_dir / "correlations_raw.csv")
-        _write_csv(data.correlations_fdr, dataset_dir / "correlations_fdr.csv")
+        _write_csv(data.eeg_features, dataset_dir / EEG_FEATURES_FILE)
+        _write_csv(data.ppg_features, dataset_dir / PPG_FEATURES_FILE)
+        _write_csv(data.merged_features, dataset_dir / MERGED_FEATURES_FILE)
+        _write_csv(data.correlations_raw, dataset_dir / CORRELATIONS_RAW_FILE)
+        _write_csv(data.correlations_fdr, dataset_dir / CORRELATIONS_FDR_FILE)
 
     cross_dir = out_root / "cross_dataset"
     cross_dir.mkdir(parents=True, exist_ok=True)
@@ -233,3 +282,36 @@ def write_artifacts(cfg: PipelineConfig, artifacts: PipelineArtifacts) -> None:
     if cfg.output.save_summary_json:
         summary_path = cross_dir / "trend_agreement_summary.json"
         summary_path.write_text(json.dumps(artifacts.trend_summary, indent=2))
+
+
+def run_pipeline(cfg: PipelineConfig) -> PipelineArtifacts:
+    """Run both stages in memory and return all artifacts."""
+
+    stage1_artifacts = run_stage1(cfg)
+    return run_stage2_from_stage1(cfg, stage1_artifacts)
+
+
+def run_two_stage_pipeline(cfg: PipelineConfig) -> PipelineArtifacts:
+    """Run Stage 1 to CSV, reload those base CSVs, then run and write Stage 2."""
+
+    stage1_artifacts = run_stage1(cfg)
+    write_stage1_artifacts(cfg, stage1_artifacts)
+    artifacts = run_stage2_from_base_csvs(cfg)
+    write_stage2_artifacts(cfg, artifacts)
+    return artifacts
+
+
+def write_artifacts(cfg: PipelineConfig, artifacts: PipelineArtifacts) -> None:
+    stage1_artifacts = PipelineStage1Artifacts(
+        per_dataset={
+            dataset_id: DatasetStage1Artifacts(
+                dataset_id=dataset_id,
+                observations=data.observations,
+                eeg_base_features=data.eeg_base_features,
+                ppg_ibi_features=data.ppg_ibi_features,
+            )
+            for dataset_id, data in artifacts.per_dataset.items()
+        }
+    )
+    write_stage1_artifacts(cfg, stage1_artifacts)
+    write_stage2_artifacts(cfg, artifacts)

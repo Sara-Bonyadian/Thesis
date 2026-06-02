@@ -709,6 +709,195 @@ def _coerce_str(value: object, *, default: str = "") -> str:
     return text if text.strip() else default
 
 
+def _truthy_csv_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    return text not in {"", "0", "false", "no", "nan", "none"}
+
+
+def _observation_base_from_record(record: dict[str, object]) -> dict[str, object]:
+    return {col: record.get(col, "") for col in OBSERVATION_KEY_COLUMNS}
+
+
+def _records_by_observation_id(df: pd.DataFrame) -> dict[str, list[dict[str, object]]]:
+    if df.empty or "observation_id" not in df.columns:
+        return {}
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for obs_id, group in df.groupby("observation_id", dropna=False):
+        obs_key = str(obs_id).strip()
+        if obs_key:
+            grouped[obs_key] = group.to_dict(orient="records")
+    return grouped
+
+
+def _ordered_feature_table(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in columns:
+        if col not in out.columns:
+            out[col] = np.nan
+    ordered = list(dict.fromkeys(columns))
+    extra = [col for col in out.columns if col not in ordered]
+    return out.loc[:, [*ordered, *extra]].copy()
+
+
+def derive_core_feature_tables_from_base_tables(
+    observations_df: pd.DataFrame,
+    eeg_base_df: pd.DataFrame,
+    ppg_ibi_df: pd.DataFrame,
+    cfg: PipelineConfig,
+) -> FeatureExtractionResult:
+    """Derive analysis feature tables from the required Stage 1 CSV tables."""
+
+    selected_eeg_features = list(cfg.features.eeg)
+    selected_ppg_features = list(cfg.features.ppg)
+    base_eeg_feature_columns = base_eeg_power_columns("feature")
+    eeg_by_observation = _records_by_observation_id(eeg_base_df)
+    ppg_by_observation = _records_by_observation_id(ppg_ibi_df)
+
+    eeg_records: list[dict[str, object]] = []
+    ppg_records: list[dict[str, object]] = []
+
+    for obs_record in observations_df.to_dict(orient="records"):
+        if "is_usable" in obs_record and not _truthy_csv_value(obs_record.get("is_usable")):
+            continue
+
+        obs_id = str(obs_record.get("observation_id", "")).strip()
+        if not obs_id:
+            continue
+
+        base = _observation_base_from_record(obs_record)
+        eeg_row = dict(base)
+        eeg_row.update(
+            {
+                "eeg_path": _coerce_str(obs_record.get("eeg_path")),
+                "eeg_format": _coerce_str(obs_record.get("eeg_format")),
+                "ppg_source": _coerce_str(obs_record.get("ppg_source")),
+                "n_bad_channels": 0,
+                "eeg_error": "missing_base_eeg_power",
+                "channel": "",
+            }
+        )
+        eeg_values = {name: float("nan") for name in [*CORE_EEG_FEATURES, *LINEAR_BAND_POWER_COLUMNS]}
+        eeg_rows = eeg_by_observation.get(obs_id, [])
+        if eeg_rows:
+            first_eeg = eeg_rows[0]
+            eeg_values.update(_derive_eeg_feature_values_from_channel_rows(eeg_rows))
+            eeg_row.update(
+                {
+                    "eeg_path": _coerce_str(first_eeg.get("eeg_path"), default=eeg_row["eeg_path"]),
+                    "eeg_format": _coerce_str(first_eeg.get("eeg_format"), default=eeg_row["eeg_format"]),
+                    "n_bad_channels": _coerce_int(first_eeg.get("n_bad_channels"), default=0),
+                    "eeg_error": _coerce_str(first_eeg.get("eeg_error"), default="cached"),
+                    "channel": "|".join(
+                        str(row.get("channel", "")).strip()
+                        for row in eeg_rows
+                        if str(row.get("channel", "")).strip()
+                    ),
+                }
+            )
+        for name in base_eeg_feature_columns:
+            eeg_row[name] = float(eeg_values.get(name, np.nan))
+        for name in selected_eeg_features:
+            eeg_row[name] = float(eeg_values.get(name, np.nan))
+        eeg_records.append(eeg_row)
+
+        ppg_row = dict(base)
+        ppg_row.update(
+            {
+                "eeg_path": _coerce_str(obs_record.get("eeg_path")),
+                "eeg_format": _coerce_str(obs_record.get("eeg_format")),
+                "ppg_source": _coerce_str(obs_record.get("ppg_source")),
+                "ppg_path": _coerce_str(obs_record.get("ppg_path")),
+                "ppg_format": _coerce_str(obs_record.get("ppg_format")),
+                "ppg_error": "missing_base_ppg_ibi",
+                "ppg_channel": "",
+                "ppg_segment_start_s": np.nan,
+                "ppg_segment_end_s": np.nan,
+                "n_ibi_clean": 0,
+            }
+        )
+        ppg_values = {name: float("nan") for name in CORE_PPG_FEATURES}
+        ppg_rows = ppg_by_observation.get(obs_id, [])
+        if ppg_rows:
+            values, qc, ppg_error = _derive_ppg_from_ibi_rows(ppg_rows)
+            first_ppg = ppg_rows[0]
+            ppg_values.update(values)
+            ppg_row.update(
+                {
+                    "eeg_path": _coerce_str(first_ppg.get("eeg_path"), default=ppg_row["eeg_path"]),
+                    "eeg_format": _coerce_str(first_ppg.get("eeg_format"), default=ppg_row["eeg_format"]),
+                    "ppg_source": _coerce_str(first_ppg.get("ppg_source"), default=ppg_row["ppg_source"]),
+                    "ppg_path": _coerce_str(first_ppg.get("ppg_path"), default=ppg_row["ppg_path"]),
+                    "ppg_format": _coerce_str(first_ppg.get("ppg_format"), default=ppg_row["ppg_format"]),
+                    "ppg_error": ppg_error,
+                    **qc,
+                }
+            )
+        for name in selected_ppg_features:
+            ppg_row[name] = float(ppg_values.get(name, np.nan))
+        ppg_records.append(ppg_row)
+
+    eeg_columns = [
+        *OBSERVATION_KEY_COLUMNS,
+        "eeg_path",
+        "eeg_format",
+        "ppg_source",
+        "n_bad_channels",
+        "eeg_error",
+        "channel",
+        *base_eeg_feature_columns,
+        *selected_eeg_features,
+    ]
+    ppg_columns = [
+        *OBSERVATION_KEY_COLUMNS,
+        "eeg_path",
+        "eeg_format",
+        "ppg_source",
+        "ppg_path",
+        "ppg_format",
+        "ppg_error",
+        "ppg_channel",
+        "ppg_segment_start_s",
+        "ppg_segment_end_s",
+        "n_ibi_clean",
+        *selected_ppg_features,
+    ]
+
+    eeg_df = _ordered_feature_table(pd.DataFrame(eeg_records), eeg_columns)
+    ppg_df = _ordered_feature_table(pd.DataFrame(ppg_records), ppg_columns)
+
+    if cfg.features.include_robust_z:
+        eeg_df = add_dataset_local_robust_zscores(eeg_df, selected_eeg_features)
+        ppg_df = add_dataset_local_robust_zscores(ppg_df, selected_ppg_features)
+
+    merge_cols = OBSERVATION_KEY_COLUMNS
+    if eeg_df.empty or ppg_df.empty:
+        merged_df = pd.DataFrame()
+    else:
+        ppg_merge_columns = [
+            *merge_cols,
+            *selected_ppg_features,
+            *[f"{f}_rz" for f in selected_ppg_features if f"{f}_rz" in ppg_df.columns],
+            "ppg_error",
+            "ppg_channel",
+            "ppg_segment_start_s",
+            "ppg_segment_end_s",
+            "n_ibi_clean",
+        ]
+        ppg_merge_columns = [col for col in dict.fromkeys(ppg_merge_columns) if col in ppg_df.columns]
+        merged_df = eeg_df.merge(ppg_df[ppg_merge_columns], on=merge_cols, how="inner")
+
+    return FeatureExtractionResult(
+        eeg_features=eeg_df,
+        eeg_base_features=eeg_base_df.copy(),
+        ppg_features=ppg_df,
+        ppg_ibi_features=ppg_ibi_df.copy(),
+        merged_features=merged_df,
+    )
+
+
 def extract_core_feature_tables(
     observations: Sequence[CanonicalObservation],
     cfg: PipelineConfig,

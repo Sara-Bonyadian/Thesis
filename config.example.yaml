@@ -57,15 +57,6 @@ features:
     - ppg_mean_rr_ms
     - ppg_peak_hr_bpm
   include_robust_z: true
-  # If true, load prior EEG features from out_root/<dataset_id>/.
-  # The loader checks features_core_eeg.csv, then the configured extended EEG file,
-  # then features_base_eeg_power.csv. A channel-level base CSV can be used to derive
-  # eeg_fm_theta, eeg_frontal_beta, eeg_faa, eeg_global_alpha_db, and eeg_global_beta_db.
-  reuse_eeg_features_csv: false
-  # Optional: also reuse prior PPG features from CSV to avoid raw file loading.
-  # The loader checks features_core_ppg.csv first, then features_base_ppg_ibi.csv.
-  # A PPG IBI CSV can derive HR, RMSSD, SDNN, mean RR, and peak HR from ibi_ms_clean.
-  reuse_ppg_features_csv: false
 
 correlation:
   alpha: 0.05
@@ -76,11 +67,4 @@ correlation:
   fdr_method: fdr_bh
 
 output:
-  save_observation_index: true
   save_summary_json: true
-  # How to write features_base_eeg_power.csv:
-  # - base_only: write the channel-level master EEG power schema
-  # - append_columns: merge newly computed EEG feature columns into existing base CSV
-  # - new_file: keep base CSV unchanged and write extra columns to eeg_base_csv_new_file_name
-  eeg_base_csv_mode: base_only
-  eeg_base_csv_new_file_name: features_base_eeg_power_extended.csv

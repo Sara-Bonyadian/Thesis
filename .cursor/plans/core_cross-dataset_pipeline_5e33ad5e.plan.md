@@ -1,6 +1,6 @@
 ---
 name: core cross-dataset pipeline
-overview: Build a first production pipeline that extracts a core EEG/PPG feature set shared across HIIT, ds003838, and ds006848, then computes within-dataset inter-subject correlations and cross-dataset trend agreement. Assume recordings are already ICA-cleaned and skip ICA logic in v1.
+overview: Build a first production two-stage pipeline that extracts base EEG/PPG inputs shared across HIIT, ds003838, and ds006848, then derives core feature tables, within-dataset inter-subject correlations, and cross-dataset trend agreement. Assume recordings are already ICA-cleaned and skip ICA logic in v1.
 todos:
   - id: define-canonical-observation-schema
     content: Design shared observation schema and dataset adapter interface for HIIT, ds003838, and ds006848.
@@ -79,8 +79,8 @@ flowchart LR
 
 3. Build a core feature extraction layer on top of existing primitives.
 - Add a unified feature orchestrator module (for example [`/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/features_core.py`](/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/features_core.py)).
-- First write reusable low-level base CSVs: `features_base_eeg_power.csv` (per-channel EEG band power) and `features_base_ppg_ibi.csv` (per-IBI PPG intervals).
-- Derive higher-level EEG/PPG feature tables from those base CSVs when reuse is enabled, instead of rereading raw recordings.
+- Stage 1 writes only the required reusable base CSVs: `observations_index.csv`, `features_base_eeg_power.csv` (per-channel EEG band power), and `features_base_ppg_ibi.csv` (per-IBI PPG intervals).
+- Stage 2 derives higher-level EEG/PPG feature tables, merged features, and correlations from those Stage 1 CSVs instead of rereading raw recordings.
 - Core EEG v1 (shared): FM-theta, frontal beta, frontal alpha asymmetry, global alpha power, global beta power.
 - Core PPG v1 (shared): mean HR, RMSSD, SDNN, mean RR, peak HR.
 - Store both raw feature values and dataset-local robust z-scores so correlation patterns are comparable across datasets with different baselines.
@@ -95,17 +95,19 @@ flowchart LR
 - Extend [`/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/config.py`](/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/config.py) to support `dataset_ids`, feature toggles, and output options.
 - Replace scaffold logic in [`/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/run.py`](/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/run.py) with orchestration:
   - load adapters
-  - extract features
-  - run correlations/FDR
+  - run Stage 1 base extraction and write required base CSVs
+  - run Stage 2 derivation from base CSVs
+  - run correlations/FDR from merged Stage 2 features
   - write outputs.
 
 6. Define output artifact contract for reproducibility.
 - Write per-dataset files under `derivatives/<dataset_id>/`:
+  - `observations_index.csv`
   - `features_base_eeg_power.csv`
   - `features_base_ppg_ibi.csv`
-  - `features_core_eeg.csv`
-  - `features_core_ppg.csv`
-  - `features_core_merged.csv`
+  - `features_eeg.csv`
+  - `features_ppg.csv`
+  - `features_merged.csv`
   - `correlations_raw.csv`
   - `correlations_fdr.csv`
 - Write cross-dataset files under `derivatives/cross_dataset/`:
