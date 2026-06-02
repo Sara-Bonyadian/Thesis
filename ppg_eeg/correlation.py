@@ -348,8 +348,9 @@ def plot_correlation_heatmap(
     ax.set_yticks(np.arange(corr_matrix.shape[0]))
     ax.set_xticklabels(corr_matrix.columns.tolist(), rotation=45, ha="right")
     ax.set_yticklabels(corr_matrix.index.tolist())
-    ax.set_xlabel("PPG feature")
+    ax.set_xlabel("PPG feature", labelpad=8)
     ax.set_ylabel("EEG feature")
+    ax.tick_params(axis="x", pad=2)
 
     if title is None:
         parts = ["Correlation heatmap"]
@@ -379,18 +380,28 @@ def plot_correlation_heatmap(
     ax.grid(which="minor", color="white", linewidth=0.7)
     ax.tick_params(which="minor", bottom=False, left=False)
 
-    ax.text(
-        0.0,
-        -0.16,
-        "*** q<0.05   ** q<0.10   * q<0.15   + p<0.05",
-        transform=ax.transAxes,
-        ha="left",
-        va="top",
-        fontsize=9,
-    )
-
+    legend_text = "*** q<0.05   ** q<0.10   * q<0.15   + p<0.05"
     if created_figure:
-        fig.tight_layout()
+        fig.tight_layout(rect=(0.0, 0.12, 1.0, 1.0))
+        fig.text(
+            0.5,
+            0.04,
+            legend_text,
+            ha="center",
+            va="center",
+            fontsize=9,
+        )
+    else:
+        fig.text(
+            0.5,
+            0.02,
+            legend_text,
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            transform=fig.transFigure,
+        )
+
     return fig, ax
 
 
