@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,12 +9,14 @@ import pandas as pd
 
 from ppg_eeg.config import CorrelationConfig, PathsConfig, PipelineConfig
 from ppg_eeg.correlation import (
+    CORRELATIONS_FDR_PRIMARY_COLUMNS,
     apply_fdr,
     build_correlation_heatmap_tables,
     compute_pairwise_correlations,
     compute_trend_agreement,
     plot_correlation_heatmap,
     significance_symbol,
+    write_correlation_heatmap,
 )
 
 
@@ -89,6 +92,13 @@ class TestCorrelation(unittest.TestCase):
         fdr = apply_fdr(raw, cfg=cfg)
         self.assertIn("q_value", fdr.columns)
         self.assertIn("reject_fdr", fdr.columns)
+        self.assertIn("sig_p_005", fdr.columns)
+        self.assertIn("sig_q_005", fdr.columns)
+        self.assertIn("sig_q_010", fdr.columns)
+        self.assertIn("sig_q_015", fdr.columns)
+        self.assertEqual(list(fdr.columns[: len(CORRELATIONS_FDR_PRIMARY_COLUMNS)]), list(CORRELATIONS_FDR_PRIMARY_COLUMNS))
+        self.assertTrue(bool(fdr["sig_p_005"].iloc[0]))
+        self.assertTrue(bool(fdr["sig_q_005"].iloc[0]))
 
         trend, summary = compute_trend_agreement(fdr, cfg=cfg)
         self.assertEqual(len(trend), 1)
@@ -261,6 +271,48 @@ class TestCorrelation(unittest.TestCase):
         self.assertIn("Correlation heatmap", ax.get_title())
         self.assertEqual(ax.get_xlabel(), "PPG feature")
         plt.close(fig)
+
+
+    def test_write_correlation_heatmap(self) -> None:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "correlations_heatmap.png"
+            corr_fdr = pd.DataFrame(
+                [
+                    {
+                        "dataset_id": "hiit",
+                        "method": "spearman",
+                        "eeg_feature": "eeg_a",
+                        "ppg_feature": "ppg_1",
+                        "correlation": 0.4,
+                        "p_value": 0.001,
+                        "q_value": 0.01,
+                    },
+                    {
+                        "dataset_id": "hiit",
+                        "method": "spearman",
+                        "eeg_feature": "eeg_b",
+                        "ppg_feature": "ppg_1",
+                        "correlation": -0.1,
+                        "p_value": 0.03,
+                        "q_value": 0.2,
+                    },
+                ]
+            )
+
+            fig = write_correlation_heatmap(
+                corr_fdr,
+                out_path,
+                dataset_id="hiit",
+                method="spearman",
+            )
+            self.assertIsNotNone(fig)
+            self.assertTrue(out_path.exists())
+            plt.close(fig)
 
 
 if __name__ == "__main__":

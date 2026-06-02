@@ -6,12 +6,37 @@ paths:
   raw_root: ./data/raw
   out_root: ./derivatives/smoke_hiit
 
+# 5-subject smoke cohort: one observation per subject, each from a random HIIT condition.
 subjects:
   - "01"
+  - "02"
+  - "03"
+  - "04"
+  - "05"
+# Fixed random draw (seed=42) from the 8 HIIT condition labels below.
+subject_conditions:
+  "01": ph_pre_tetris
+  "02": ph_pre_rest
+  "03": ps_pre_tetris
+  "04": ph_post_rest
+  "05": ps_post_tetris
 tasks:
   - rest
-conditions: []
-sessions: []
+  - tetris
+# HIIT condition_label = {modality}_{timepoint}_{state}.
+conditions:
+  - ph_pre_rest
+  - ph_pre_tetris
+  - ph_post_rest
+  - ph_post_tetris
+  - ps_pre_rest
+  - ps_pre_tetris
+  - ps_post_rest
+  - ps_post_tetris
+# HIIT session_label = modality (ph = photosensor, ps = pressure sensor).
+sessions:
+  - ph
+  - ps
 
 eeg:
   l_freq: 1.0
@@ -48,7 +73,7 @@ features:
 
 correlation:
   alpha: 0.05
-  min_n: 3
+  min_n: 5
   methods:
     - auto
   primary_method: auto

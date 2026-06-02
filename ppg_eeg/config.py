@@ -74,6 +74,8 @@ class FeaturesConfig:
 @dataclass(frozen=True)
 class OutputConfig:
     save_summary_json: bool = True
+    save_heatmap: bool = True
+    show_heatmap: bool = True
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,8 @@ class PipelineConfig:
     tasks: list[str]
     conditions: list[str]
     sessions: list[str]
+    subject_tasks: dict[str, str] = field(default_factory=dict)
+    subject_conditions: dict[str, str] = field(default_factory=dict)
     eeg: EegConfig = EegConfig()
     ppg: PpgConfig = PpgConfig()
     features: FeaturesConfig = FeaturesConfig()
@@ -103,6 +107,34 @@ def _as_str_list(value: Any) -> list[str]:
         return [str(v) for v in value if str(v).strip()]
     text = str(value).strip()
     return [text] if text else []
+
+
+def _as_subject_task_map(value: Any) -> dict[str, str]:
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("subject_tasks must be a YAML mapping of subject_id -> task_label.")
+    out: dict[str, str] = {}
+    for subject_id, task_label in value.items():
+        subject = str(subject_id).strip()
+        task = str(task_label).strip()
+        if subject and task:
+            out[subject] = task
+    return out
+
+
+def _as_subject_condition_map(value: Any) -> dict[str, str]:
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("subject_conditions must be a YAML mapping of subject_id -> condition_label.")
+    out: dict[str, str] = {}
+    for subject_id, condition_label in value.items():
+        subject = str(subject_id).strip()
+        condition = str(condition_label).strip()
+        if subject and condition:
+            out[subject] = condition
+    return out
 
 
 def load_config(path: str | Path) -> PipelineConfig:
@@ -143,6 +175,8 @@ def load_config(path: str | Path) -> PipelineConfig:
         tasks=_as_str_list(data.get("tasks")),
         conditions=_as_str_list(data.get("conditions")),
         sessions=_as_str_list(data.get("sessions")),
+        subject_tasks=_as_subject_task_map(data.get("subject_tasks")),
+        subject_conditions=_as_subject_condition_map(data.get("subject_conditions")),
         eeg=EegConfig(
             l_freq=float(_get(eeg, "l_freq", 1.0)),
             h_freq=float(_get(eeg, "h_freq", 60.0)),
@@ -176,6 +210,8 @@ def load_config(path: str | Path) -> PipelineConfig:
         ),
         output=OutputConfig(
             save_summary_json=bool(_get(output, "save_summary_json", True)),
+            save_heatmap=bool(_get(output, "save_heatmap", True)),
+            show_heatmap=bool(_get(output, "show_heatmap", True)),
         ),
     )
 

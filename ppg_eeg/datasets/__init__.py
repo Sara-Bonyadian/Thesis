@@ -24,6 +24,52 @@ def get_adapter(dataset_id: str) -> DatasetAdapter:
     return ADAPTER_REGISTRY[key]()
 
 
+def _apply_subject_task_assignments(
+    observations: list[CanonicalObservation],
+    subject_tasks: dict[str, str] | None,
+) -> list[CanonicalObservation]:
+    if not subject_tasks:
+        return observations
+
+    assignments = {
+        str(subject_id).strip().casefold(): str(task_label).strip().casefold()
+        for subject_id, task_label in subject_tasks.items()
+        if str(subject_id).strip() and str(task_label).strip()
+    }
+    if not assignments:
+        return observations
+
+    filtered: list[CanonicalObservation] = []
+    for observation in observations:
+        assigned_task = assignments.get(observation.subject_id.casefold())
+        if assigned_task is None or observation.task_label.casefold() == assigned_task:
+            filtered.append(observation)
+    return filtered
+
+
+def _apply_subject_condition_assignments(
+    observations: list[CanonicalObservation],
+    subject_conditions: dict[str, str] | None,
+) -> list[CanonicalObservation]:
+    if not subject_conditions:
+        return observations
+
+    assignments = {
+        str(subject_id).strip().casefold(): str(condition_label).strip().casefold()
+        for subject_id, condition_label in subject_conditions.items()
+        if str(subject_id).strip() and str(condition_label).strip()
+    }
+    if not assignments:
+        return observations
+
+    filtered: list[CanonicalObservation] = []
+    for observation in observations:
+        assigned_condition = assignments.get(observation.subject_id.casefold())
+        if assigned_condition is None or observation.condition_label.casefold() == assigned_condition:
+            filtered.append(observation)
+    return filtered
+
+
 def build_observations(
     dataset_id: str,
     raw_root: Path,
@@ -32,15 +78,19 @@ def build_observations(
     tasks: Sequence[str] | None = None,
     conditions: Sequence[str] | None = None,
     sessions: Sequence[str] | None = None,
+    subject_tasks: dict[str, str] | None = None,
+    subject_conditions: dict[str, str] | None = None,
 ) -> list[CanonicalObservation]:
     adapter = get_adapter(dataset_id)
-    return adapter.build_observations(
+    observations = adapter.build_observations(
         raw_root,
         subjects=subjects,
         tasks=tasks,
         conditions=conditions,
         sessions=sessions,
     )
+    observations = _apply_subject_task_assignments(observations, subject_tasks)
+    return _apply_subject_condition_assignments(observations, subject_conditions)
 
 
 __all__ = [

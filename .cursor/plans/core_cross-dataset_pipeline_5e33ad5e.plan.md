@@ -87,9 +87,76 @@ flowchart LR
 
 4. Implement correlation + multiple-comparison analysis.
 - Add analysis module (for example [`/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/correlation.py`](/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/correlation.py)) that computes pairwise EEG×PPG inter-subject correlations per dataset.
-- Use Spearman as default (robust to non-normality), optional Pearson in parallel.
+- Config defaults: `methods: [auto]`, `primary_method: auto`, `alpha: 0.05`, `min_n: 5`, `fdr_method: fdr_bh`.
+- `auto` resolves to Pearson when both feature vectors pass Shapiro–Wilk (p > 0.05), otherwise Spearman.
 - Apply Benjamini-Hochberg FDR within each dataset across all tested EEG×PPG pairs.
 - Build a cross-dataset agreement artifact: sign consistency, effect-size rank, and count of datasets surviving FDR.
+
+#### Correlation analysis flow
+
+```mermaid
+flowchart TD
+  merged["features_merged.csv\n(one row per observation/subject)"] --> group["Group by dataset_id"]
+  group --> pairs["For each EEG feature × PPG feature"]
+  pairs --> ncheck{"n >= min_n?"}
+  ncheck -->|no| skip["correlation/p_value = NaN\nselected_method = too_few_data"]
+  ncheck -->|yes| auto{"method = auto?"}
+  auto --> shapiro["Shapiro–Wilk on x and y"]
+  shapiro --> norm{"x_shapiro_p > 0.05\nAND y_shapiro_p > 0.05?"}
+  norm -->|yes| pearson["selected_method = pearson"]
+  norm -->|no| spearman["selected_method = spearman"]
+  pearson --> raw["correlations_raw.csv"]
+  spearman --> raw
+  skip --> raw
+  raw --> fdr["BH-FDR within each dataset_id × method\n(statsmodels multipletests, fdr_bh)"]
+  fdr --> fdrcsv["correlations_fdr.csv"]
+  fdrcsv --> trend["Cross-dataset trend_agreement\n(primary_method = auto)"]
+  trend --> cross["derivatives/cross_dataset/\ntrend_agreement.csv\n+ trend_agreement_summary.json"]
+```
+
+**Interpretation**
+
+- **Unit of analysis:** inter-subject (across rows in `features_merged.csv`) within each dataset.
+- **FDR scope:** all EEG×PPG pairs tested in that dataset (not pooled across HIIT / ds003838 / ds006848).
+- **Replication rule:** same sign in all present datasets and FDR q < 0.05 in ≥ 2 datasets (`trend_agreement.csv`).
+
+#### Correlation CSV schema (`correlations_fdr.csv`)
+
+Primary analysis file: `derivatives/<dataset_id>/correlations_fdr.csv`  
+(`correlations_raw.csv` is the same rows without FDR columns and significance flags.)
+
+**Column order (human-readable export contract):**
+
+| # | Column | Type | Description |
+|---|--------|------|-------------|
+| 1 | `dataset_id` | str | Dataset identifier (`hiit`, `ds003838`, `ds006848`) |
+| 2 | `x_shapiro_p` | float | Shapiro–Wilk p-value for EEG feature vector (`auto` method only; NaN otherwise) |
+| 3 | `y_shapiro_p` | float | Shapiro–Wilk p-value for PPG feature vector (`auto` method only; NaN otherwise) |
+| 4 | `selected_method` | str | Resolved test: `pearson`, `spearman`, or `too_few_data` |
+| 5 | `eeg_feature` | str | EEG feature column name from config |
+| 6 | `ppg_feature` | str | PPG feature column name from config |
+| 7 | `correlation` | float | Pearson r or Spearman ρ |
+| 8 | `p_value` | float | Two-sided p-value for the chosen test |
+| 9 | `sig_p_005` | bool | `p_value < 0.05` |
+| 10 | `q_value` | float | BH-FDR adjusted p-value (q) within dataset |
+| 11 | `sig_q_005` | bool | `q_value < 0.05` (primary inference threshold; heatmap `***`) |
+| 12 | `sig_q_010` | bool | `q_value < 0.10` (heatmap `**`) |
+| 13 | `sig_q_015` | bool | `q_value < 0.15` (heatmap `*`) |
+
+**Supporting columns** (appended after the block above):
+
+| Column | Description |
+|--------|-------------|
+| `method` | Config method label (e.g. `auto`) — used for FDR grouping and trend agreement filter |
+| `n` | Count of finite paired observations used for the test |
+| `reject_fdr` | Alias of `sig_q_005` when `alpha = 0.05` |
+
+**Heatmap marker legend** (from `plot_correlation_heatmap`):
+
+- `***` → `sig_q_005`
+- `**` → `sig_q_010` (and not `sig_q_005`)
+- `*` → `sig_q_015` (and not `sig_q_010`)
+- `+` → `sig_p_005` only (exploratory; FDR not met at q < 0.15)
 
 5. Wire the pipeline entrypoint and config for multi-dataset execution.
 - Extend [`/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/config.py`](/Users/sarabonyadian/Documents/HIIT/ppg-eeg/ppg_eeg/config.py) to support `dataset_ids`, feature toggles, and output options.
@@ -109,7 +176,11 @@ flowchart LR
   - `features_ppg.csv`
   - `features_merged.csv`
   - `correlations_raw.csv`
-  - `correlations_fdr.csv`
+  - `correlations_fdr.csv` — pairwise EEG×PPG tests with columns:
+    `dataset_id`, `x_shapiro_p`, `y_shapiro_p`, `selected_method`,
+    `eeg_feature`, `ppg_feature`, `correlation`, `p_value`, `sig_p_005`,
+    `q_value`, `sig_q_005`, `sig_q_010`, `sig_q_015`
+    (plus `method`, `n`, `reject_fdr` as pipeline metadata)
 - Write cross-dataset files under `derivatives/cross_dataset/`:
   - `trend_agreement.csv`
   - `trend_agreement_summary.json`
@@ -122,5 +193,5 @@ flowchart LR
 ## Definition of Done
 - One command runs the pipeline for all three datasets and writes deterministic artifacts.
 - Core feature names and units are consistent across datasets.
-- Correlation outputs include raw p-values and FDR-corrected q-values.
+- Correlation outputs include raw p-values, FDR-corrected q-values, and explicit significance flags at p < 0.05 and q < 0.05 / 0.10 / 0.15.
 - A cross-dataset agreement report clearly indicates which EEG↔PPG trends replicate.

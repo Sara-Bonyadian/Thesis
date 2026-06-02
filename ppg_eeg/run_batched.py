@@ -26,22 +26,18 @@ for _env_name in THREAD_LIMIT_ENV_VARS:
 
 import pandas as pd
 import yaml
-from pandas.errors import EmptyDataError
 
 from .config import PipelineConfig, load_config
 from .datasets import build_observations
-from .features_core import (
-    base_eeg_power_columns,
-    base_ppg_ibi_columns,
-)
+from .output_layout import safe_subject_dir_name
 from .pipeline import (
-    EEG_BASE_FILE,
     OBSERVATION_INDEX_COLUMNS,
-    OBSERVATIONS_INDEX_FILE,
-    PPG_IBI_BASE_FILE,
-    STAGE1_DATASET_FILES,
+    STAGE1_SUBJECT_FILES,
     STAGE2_DATASET_FILES,
+    STAGE2_SUBJECT_FILES,
+    load_stage1_tables_from_subject_dirs,
     run_stage2_from_base_csvs,
+    write_stage1_subject_csvs,
     write_stage2_artifacts,
 )
 
@@ -76,18 +72,6 @@ def _safe_relative_or_absolute(path: Path, repo_root: Path) -> str:
         return str(resolved)
 
 
-def _safe_read_csv(path: Path) -> pd.DataFrame:
-    try:
-        return pd.read_csv(path)
-    except (FileNotFoundError, EmptyDataError):
-        return pd.DataFrame()
-
-
-def _write_csv(df: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
-
-
 def _drop_duplicates_if_possible(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     if df.empty:
         return df
@@ -105,6 +89,8 @@ def _discover_subjects(cfg: PipelineConfig, dataset_id: str) -> list[str]:
         tasks=cfg.tasks,
         conditions=cfg.conditions,
         sessions=cfg.sessions,
+        subject_tasks=cfg.subject_tasks,
+        subject_conditions=cfg.subject_conditions,
     )
     usable_subjects = sorted({obs.subject_id for obs in observations if bool(obs.is_usable)})
     if not usable_subjects:
@@ -126,8 +112,18 @@ def _build_batch_config_data(
     return batch_data
 
 
-def _required_dataset_files(_cfg: PipelineConfig) -> list[str]:
-    return [*STAGE1_DATASET_FILES, *STAGE2_DATASET_FILES]
+def _missing_batch_outputs(batch: BatchPlan, dataset_id: str) -> list[str]:
+    dataset_dir = batch.output_dir / dataset_id
+    missing: list[str] = [
+        name for name in STAGE2_DATASET_FILES if not (dataset_dir / name).exists()
+    ]
+    for subject_id in batch.subjects:
+        subject_dir = dataset_dir / safe_subject_dir_name(subject_id)
+        for name in [*STAGE1_SUBJECT_FILES, *STAGE2_SUBJECT_FILES]:
+            rel_path = f"{subject_dir.name}/{name}"
+            if not (subject_dir / name).exists():
+                missing.append(rel_path)
+    return missing
 
 
 def _run_single_batch(
@@ -151,7 +147,7 @@ def _run_single_batch(
     subprocess.run(cmd, cwd=str(repo_root), env=child_env, check=True)
 
     dataset_dir = batch.output_dir / dataset_id
-    missing_files = [name for name in _required_dataset_files(cfg) if not (dataset_dir / name).exists()]
+    missing_files = _missing_batch_outputs(batch, dataset_id)
     if missing_files:
         missing_list = ", ".join(sorted(missing_files))
         raise RuntimeError(
@@ -212,10 +208,12 @@ def _merge_completed_batches(
     ppg_ibi_frames: list[pd.DataFrame] = []
 
     for batch in batches:
-        dataset_dir = batch.output_dir / dataset_id
-        obs_df = _safe_read_csv(dataset_dir / OBSERVATIONS_INDEX_FILE)
-        base_df = _safe_read_csv(dataset_dir / EEG_BASE_FILE)
-        ppg_ibi_df = _safe_read_csv(dataset_dir / PPG_IBI_BASE_FILE)
+        batch_dataset_dir = batch.output_dir / dataset_id
+        obs_df, base_df, ppg_ibi_df = load_stage1_tables_from_subject_dirs(
+            cfg,
+            dataset_id,
+            dataset_dir=batch_dataset_dir,
+        )
 
         if not obs_df.empty:
             obs_frames.append(obs_df)
@@ -232,33 +230,13 @@ def _merge_completed_batches(
     base_all = _drop_duplicates_if_possible(base_all, ["observation_id", "channel"])
     ppg_ibi_all = _drop_duplicates_if_possible(ppg_ibi_all, ["observation_id", "ibi_index"])
 
+    stage_cfg = replace(cfg, paths=replace(cfg.paths, out_root=final_out_root))
     dataset_dir = final_out_root / dataset_id
     dataset_dir.mkdir(parents=True, exist_ok=True)
     if obs_all.empty:
         obs_all = pd.DataFrame(columns=OBSERVATION_INDEX_COLUMNS)
-    _write_csv(obs_all, dataset_dir / OBSERVATIONS_INDEX_FILE)
+    write_stage1_subject_csvs(stage_cfg, dataset_id, obs_all, base_all, ppg_ibi_all)
 
-    if base_all.empty:
-        base_all = pd.DataFrame(columns=base_eeg_power_columns("export"))
-    else:
-        ordered_base_cols = base_eeg_power_columns("export")
-        for col in ordered_base_cols:
-            if col not in base_all.columns:
-                base_all[col] = pd.NA
-        base_all = base_all[ordered_base_cols]
-    _write_csv(base_all, dataset_dir / EEG_BASE_FILE)
-
-    if ppg_ibi_all.empty:
-        ppg_ibi_all = pd.DataFrame(columns=base_ppg_ibi_columns())
-    else:
-        ordered_ppg_ibi_cols = base_ppg_ibi_columns()
-        for col in ordered_ppg_ibi_cols:
-            if col not in ppg_ibi_all.columns:
-                ppg_ibi_all[col] = pd.NA
-        ppg_ibi_all = ppg_ibi_all[ordered_ppg_ibi_cols]
-    _write_csv(ppg_ibi_all, dataset_dir / PPG_IBI_BASE_FILE)
-
-    stage_cfg = replace(cfg, paths=replace(cfg.paths, out_root=final_out_root))
     artifacts = run_stage2_from_base_csvs(stage_cfg)
     write_stage2_artifacts(stage_cfg, artifacts)
     dataset_artifacts = artifacts.per_dataset[dataset_id]

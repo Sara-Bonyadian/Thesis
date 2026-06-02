@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ppg_eeg.datasets import build_observations
 from ppg_eeg.datasets.ds003838 import DS003838Adapter
 from ppg_eeg.datasets.ds006848 import DS006848Adapter
 from ppg_eeg.datasets.hiit import HIITAdapter
@@ -68,6 +69,46 @@ class TestDatasetAdapters(unittest.TestCase):
             self.assertEqual(rows[0].modality, "eeg_ppg")
             self.assertEqual(rows[0].timepoint, "na")
             self.assertEqual(rows[0].state, "rest")
+
+    def test_build_observations_subject_tasks_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ds003838"
+            for subject, task in [("sub-001", "rest"), ("sub-001", "memory"), ("sub-002", "rest")]:
+                _touch(root / f"{subject}/eeg/{subject}_task-{task}_eeg.set")
+                _touch(root / f"{subject}/ecg/{subject}_task-{task}_ecg.set")
+
+            rows = build_observations(
+                "ds003838",
+                Path(tmp),
+                subjects=["sub-001", "sub-002"],
+                tasks=["rest", "memory"],
+                subject_tasks={"sub-001": "memory", "sub-002": "rest"},
+            )
+            self.assertEqual(
+                sorted((row.subject_id, row.task_label) for row in rows),
+                [("sub-001", "memory"), ("sub-002", "rest")],
+            )
+
+    def test_build_observations_subject_conditions_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "HIIT"
+            folder = root / "HIIT_01_PH"
+            for stem in ["HIIT_01_PH_PRE", "HIIT_01_PH_POST", "HIIT_01_PH_PRE_T"]:
+                _touch(folder / f"{stem}.vhdr")
+                _touch(folder / f"{stem}.eeg")
+                _touch(folder / f"{stem}.vmrk")
+
+            rows = build_observations(
+                "hiit",
+                Path(tmp),
+                subjects=["01"],
+                tasks=["rest", "tetris"],
+                conditions=["ph_pre_rest", "ph_post_rest", "ph_pre_tetris"],
+                sessions=["ph"],
+                subject_conditions={"01": "ph_post_rest"},
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].condition_label, "ph_post_rest")
 
 
 if __name__ == "__main__":

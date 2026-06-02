@@ -12,10 +12,43 @@ paths:
   out_root: ./derivatives
 
 # Optional global filters across adapters.
-subjects: []
-tasks: []
-conditions: []
-sessions: []
+# Limit to 6 subjects per dataset (IDs differ by dataset; each adapter keeps only its matches).
+# ds003838 subjects avoid sub-032/sub-034/sub-035 because those IDs also exist in ds006848.
+subjects:
+  # HIIT (2-digit IDs)
+  - "01"
+  - "02"
+  - "03"
+  - "04"
+  - "05"
+  - "06"
+  # ds003838
+  - sub-033
+  - sub-036
+  - sub-038
+  - sub-039
+  - sub-040
+  - sub-041
+  # ds006848
+  - sub-001
+  - sub-002
+  - sub-003
+  - sub-004
+  - sub-005
+  - sub-006
+# Task filter: rest for HIIT + ds003838; verbalwm for ds006848 (most subjects lack rest).
+tasks:
+  - rest
+  - verbalwm
+# HIIT uses composite condition labels; OpenNeuro uses the task name as condition_label.
+conditions:
+  - rest
+  - verbalwm
+  - ph_pre_rest
+# HIIT session = modality (ph); OpenNeuro datasets use session_label=single.
+sessions:
+  - ph
+  - single
 
 eeg:
   l_freq: 1.0

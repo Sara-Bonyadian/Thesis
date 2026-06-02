@@ -6,12 +6,29 @@ paths:
   raw_root: ./data/raw
   out_root: ./derivatives/smoke_ds003838
 
+# 5-subject smoke cohort: 3 rest + 2 memory (one observation per subject).
 subjects:
-  - sub-088
+  - sub-033
+  - sub-036
+  - sub-038
+  - sub-039
+  - sub-041
+subject_tasks:
+  sub-033: rest
+  sub-036: rest
+  sub-038: rest
+  sub-039: memory
+  sub-041: memory
 tasks:
   - rest
-conditions: []
-sessions: []
+  - memory
+# ds003838 sets condition_label equal to task_label.
+conditions:
+  - rest
+  - memory
+# ds003838 uses a single session label for all recordings.
+sessions:
+  - single
 
 eeg:
   l_freq: 1.0
@@ -48,7 +65,7 @@ features:
 
 correlation:
   alpha: 0.05
-  min_n: 3
+  min_n: 5
   methods:
     - auto
   primary_method: auto
@@ -56,3 +73,5 @@ correlation:
 
 output:
   save_summary_json: true
+  save_heatmap: true
+  show_heatmap: true

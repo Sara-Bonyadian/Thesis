@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -11,6 +12,27 @@ from statsmodels.stats.multitest import multipletests
 from .config import PipelineConfig
 
 AUTO_NORMALITY_ALPHA = 0.05
+
+CORRELATIONS_FDR_PRIMARY_COLUMNS: tuple[str, ...] = (
+    "dataset_id",
+    "x_shapiro_p",
+    "y_shapiro_p",
+    "selected_method",
+    "eeg_feature",
+    "ppg_feature",
+    "correlation",
+    "p_value",
+    "sig_p_005",
+    "q_value",
+    "sig_q_005",
+    "sig_q_010",
+    "sig_q_015",
+)
+CORRELATIONS_FDR_METADATA_COLUMNS: tuple[str, ...] = (
+    "method",
+    "n",
+    "reject_fdr",
+)
 
 
 @dataclass(frozen=True)
@@ -136,12 +158,38 @@ def compute_pairwise_correlations(
     return pd.DataFrame(rows)
 
 
+def _add_significance_flags(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    p_values = pd.to_numeric(out["p_value"], errors="coerce")
+    q_values = pd.to_numeric(out["q_value"], errors="coerce")
+    out["sig_p_005"] = p_values < 0.05
+    out["sig_q_005"] = q_values < 0.05
+    out["sig_q_010"] = q_values < 0.10
+    out["sig_q_015"] = q_values < 0.15
+    return out
+
+
+def format_correlations_fdr_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Return FDR correlation table with significance flags and stable column order."""
+    out = _add_significance_flags(df)
+    ordered = [
+        *CORRELATIONS_FDR_PRIMARY_COLUMNS,
+        *[col for col in CORRELATIONS_FDR_METADATA_COLUMNS if col in out.columns],
+    ]
+    extras = [col for col in out.columns if col not in ordered]
+    return out[[*ordered, *extras]]
+
+
 def apply_fdr(raw_correlations: pd.DataFrame, *, cfg: PipelineConfig) -> pd.DataFrame:
     if raw_correlations.empty:
         out = raw_correlations.copy()
         out["q_value"] = pd.Series(dtype=float)
         out["reject_fdr"] = pd.Series(dtype=bool)
-        return out
+        out["sig_p_005"] = pd.Series(dtype=bool)
+        out["sig_q_005"] = pd.Series(dtype=bool)
+        out["sig_q_010"] = pd.Series(dtype=bool)
+        out["sig_q_015"] = pd.Series(dtype=bool)
+        return format_correlations_fdr_table(out)
 
     out = raw_correlations.copy()
     out["q_value"] = np.nan
@@ -163,7 +211,7 @@ def apply_fdr(raw_correlations: pd.DataFrame, *, cfg: PipelineConfig) -> pd.Data
         out.loc[valid_indices, "q_value"] = qvals
         out.loc[valid_indices, "reject_fdr"] = reject
 
-    return out
+    return format_correlations_fdr_table(out)
 
 
 def _coerce_float(value: Any) -> float:
@@ -344,6 +392,44 @@ def plot_correlation_heatmap(
     if created_figure:
         fig.tight_layout()
     return fig, ax
+
+
+def write_correlation_heatmap(
+    correlations_fdr: pd.DataFrame,
+    path: Path,
+    *,
+    dataset_id: str | None = None,
+    method: str | None = None,
+    dpi: int = 150,
+    **plot_kwargs: Any,
+) -> Any | None:
+    """Render and save an EEG x PPG correlation heatmap PNG."""
+    if correlations_fdr.empty:
+        return None
+
+    try:
+        fig, _ax = plot_correlation_heatmap(
+            correlations_fdr,
+            dataset_id=dataset_id,
+            method=method,
+            **plot_kwargs,
+        )
+    except ValueError:
+        return None
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    return fig
+
+
+def display_correlation_heatmaps(figures: dict[str, Any]) -> None:
+    """Show saved correlation heatmap figures (interactive backends only)."""
+    if not figures:
+        return
+
+    import matplotlib.pyplot as plt
+
+    plt.show()
 
 
 def compute_trend_agreement(

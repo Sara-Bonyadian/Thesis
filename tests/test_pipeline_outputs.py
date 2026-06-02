@@ -10,6 +10,7 @@ from ppg_eeg.config import FeaturesConfig, OutputConfig, PathsConfig, PipelineCo
 from ppg_eeg.features_core import base_eeg_power_columns, base_ppg_ibi_columns
 from ppg_eeg.pipeline import (
     CORRELATIONS_FDR_FILE,
+    CORRELATIONS_HEATMAP_FILE,
     CORRELATIONS_RAW_FILE,
     DatasetStage1Artifacts,
     EEG_BASE_FILE,
@@ -166,9 +167,13 @@ class TestPipelineOutputs(unittest.TestCase):
             write_stage1_artifacts(cfg, artifacts)
 
             dataset_dir = out_root / "ds003838"
-            self.assertTrue((dataset_dir / OBSERVATIONS_INDEX_FILE).exists())
-            self.assertTrue((dataset_dir / EEG_BASE_FILE).exists())
-            self.assertTrue((dataset_dir / PPG_IBI_BASE_FILE).exists())
+            subject_dir = dataset_dir / "01"
+            self.assertFalse((dataset_dir / OBSERVATIONS_INDEX_FILE).exists())
+            self.assertFalse((dataset_dir / EEG_BASE_FILE).exists())
+            self.assertFalse((dataset_dir / PPG_IBI_BASE_FILE).exists())
+            self.assertTrue((subject_dir / OBSERVATIONS_INDEX_FILE).exists())
+            self.assertTrue((subject_dir / EEG_BASE_FILE).exists())
+            self.assertTrue((subject_dir / PPG_IBI_BASE_FILE).exists())
             self.assertFalse((dataset_dir / EEG_FEATURES_FILE).exists())
             self.assertFalse((dataset_dir / PPG_FEATURES_FILE).exists())
             self.assertFalse((dataset_dir / MERGED_FEATURES_FILE).exists())
@@ -195,15 +200,22 @@ class TestPipelineOutputs(unittest.TestCase):
             write_stage2_artifacts(cfg, artifacts)
 
             dataset_dir = out_root / "ds003838"
-            eeg_df = pd.read_csv(dataset_dir / EEG_FEATURES_FILE)
-            ppg_df = pd.read_csv(dataset_dir / PPG_FEATURES_FILE)
-            merged_df = pd.read_csv(dataset_dir / MERGED_FEATURES_FILE)
+            self.assertFalse((dataset_dir / EEG_FEATURES_FILE).exists())
+            self.assertFalse((dataset_dir / PPG_FEATURES_FILE).exists())
+            self.assertFalse((dataset_dir / MERGED_FEATURES_FILE).exists())
+            self.assertTrue((dataset_dir / CORRELATIONS_RAW_FILE).exists())
+            self.assertTrue((dataset_dir / CORRELATIONS_FDR_FILE).exists())
+            self.assertTrue((dataset_dir / CORRELATIONS_HEATMAP_FILE).exists())
+
+            eeg_df = pd.read_csv(dataset_dir / "01" / EEG_FEATURES_FILE)
+            ppg_df = pd.read_csv(dataset_dir / "01" / PPG_FEATURES_FILE)
+            merged_df = pd.read_csv(dataset_dir / "01" / MERGED_FEATURES_FILE)
 
             self.assertAlmostEqual(float(eeg_df.loc[0, "theta_power_uv2"]), 2.0)
             self.assertAlmostEqual(float(ppg_df.loc[0, "ppg_mean_hr_bpm"]), 60000.0 / 900.0)
             self.assertEqual(len(merged_df), 1)
-            self.assertTrue((dataset_dir / CORRELATIONS_RAW_FILE).exists())
-            self.assertTrue((dataset_dir / CORRELATIONS_FDR_FILE).exists())
+            self.assertTrue((dataset_dir / "01" / MERGED_FEATURES_FILE).exists())
+            self.assertTrue((dataset_dir / "01" / EEG_FEATURES_FILE).exists())
 
 
 if __name__ == "__main__":
