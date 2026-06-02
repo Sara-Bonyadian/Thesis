@@ -34,9 +34,9 @@ CORE_EEG_FEATURES: list[str] = [
     "eeg_faa",
     "eeg_global_alpha_db",
     "eeg_global_beta_db",
-    "power_theta",
-    "power_alpha",
-    "power_beta",
+    "theta_power_uv2",
+    "alpha_power_uv2",
+    "beta_power_uv2",
 ]
 
 CORE_PPG_FEATURES: list[str] = [
@@ -61,13 +61,6 @@ OBSERVATION_KEY_COLUMNS: list[str] = [
 
 EEG_POWER_SCHEMA_VERSION = "eeg_power_schema_v2"
 PPG_IBI_SCHEMA_VERSION = "ppg_ibi_schema_v1"
-
-
-DB_BAND_POWER_COLUMNS: list[str] = [
-    "power_theta",
-    "power_alpha",
-    "power_beta",
-]
 
 
 LINEAR_BAND_POWER_COLUMNS: list[str] = [
@@ -108,16 +101,19 @@ PPG_IBI_COLUMNS: list[str] = [
     "n_ibi_raw",
     "n_ibi_clean",
     "ibi_index",
-    "peak_time_s",
+    "peak_time_relative_s",
+    "peak_time_absolute_s",
     "peak_index",
-    "ibi_ms_raw",
     "ibi_ms_clean",
+    "n_ibi_raw_invalid",
+    "ibi_ms_raw_min",
+    "ibi_ms_raw_max",
     "processing_version",
 ]
 
 
 def base_eeg_power_columns(kind: str = "export") -> list[str]:
-    power_feature_columns = [*DB_BAND_POWER_COLUMNS, *LINEAR_BAND_POWER_COLUMNS]
+    power_feature_columns = list(LINEAR_BAND_POWER_COLUMNS)
 
     normalized = kind.casefold()
     if normalized in {"feature", "features"}:
@@ -372,18 +368,16 @@ def _derive_eeg_feature_values_from_channel_rows(channel_rows: Sequence[dict[str
     if df.empty:
         return values
 
-    if "power_theta" in df.columns:
-        values["power_theta"] = _mean_finite(df["power_theta"])
-    if "power_alpha" in df.columns:
-        values["power_alpha"] = _mean_finite(df["power_alpha"])
-        values["eeg_global_alpha_db"] = values["power_alpha"]
-    if "power_beta" in df.columns:
-        values["power_beta"] = _mean_finite(df["power_beta"])
-        values["eeg_global_beta_db"] = values["power_beta"]
-
     for col in LINEAR_BAND_POWER_COLUMNS:
         if col in df.columns:
             values[col] = _mean_positive(df[col])
+
+    alpha_power = values.get("alpha_power_uv2", float("nan"))
+    if np.isfinite(alpha_power) and alpha_power > 0.0:
+        values["eeg_global_alpha_db"] = float(10 * np.log10(alpha_power))
+    beta_power = values.get("beta_power_uv2", float("nan"))
+    if np.isfinite(beta_power) and beta_power > 0.0:
+        values["eeg_global_beta_db"] = float(10 * np.log10(beta_power))
 
     theta_by_channel = _channel_power_map(df, "theta_power_uv2")
     theta_vals = [
@@ -483,13 +477,17 @@ def _ppg_ibi_rows_from_result(
     clean_ibi = result.ibi_ms_clean if result.ibi_ms_clean is not None else np.array([], dtype=float)
     peak_times = result.peak_times_s if result.peak_times_s is not None else np.array([], dtype=float)
     peak_indices = result.peaks_idx if result.peaks_idx is not None else np.array([], dtype=float)
-    n_rows = max(len(raw_ibi), len(clean_ibi))
-    if n_rows == 0:
+    if len(clean_ibi) == 0:
         return []
 
+    raw_ibi_finite = raw_ibi[np.isfinite(raw_ibi)] if len(raw_ibi) else np.array([], dtype=float)
+    invalid_raw = raw_ibi_finite[(raw_ibi_finite <= cfg.ppg.ibi_min_ms) | (raw_ibi_finite >= cfg.ppg.ibi_max_ms)]
+    raw_min = float(np.min(raw_ibi_finite)) if len(raw_ibi_finite) else np.nan
+    raw_max = float(np.max(raw_ibi_finite)) if len(raw_ibi_finite) else np.nan
     rows: list[dict[str, object]] = []
     metadata = _ppg_processing_metadata(cfg)
-    for idx in range(n_rows):
+    for idx, ibi_clean in enumerate(clean_ibi):
+        peak_time_relative = float(peak_times[idx + 1]) if idx + 1 < len(peak_times) else np.nan
         row = dict(base)
         row.update(
             {
@@ -507,10 +505,13 @@ def _ppg_ibi_rows_from_result(
                 "n_ibi_raw": int(len(raw_ibi)),
                 "n_ibi_clean": int(len(clean_ibi)),
                 "ibi_index": idx,
-                "peak_time_s": float(peak_times[idx + 1]) if idx + 1 < len(peak_times) else np.nan,
+                "peak_time_relative_s": peak_time_relative,
+                "peak_time_absolute_s": peak_time_relative + start_s if np.isfinite(peak_time_relative) else np.nan,
                 "peak_index": int(peak_indices[idx + 1]) if idx + 1 < len(peak_indices) else pd.NA,
-                "ibi_ms_raw": float(raw_ibi[idx]) if idx < len(raw_ibi) else np.nan,
-                "ibi_ms_clean": float(clean_ibi[idx]) if idx < len(clean_ibi) else np.nan,
+                "ibi_ms_clean": float(ibi_clean),
+                "n_ibi_raw_invalid": int(len(invalid_raw)),
+                "ibi_ms_raw_min": raw_min,
+                "ibi_ms_raw_max": raw_max,
                 **metadata,
             }
         )
@@ -570,7 +571,7 @@ def _build_feature_cache_lookup(
 
 
 def _has_channel_power_schema(cache_df: pd.DataFrame) -> bool:
-    required = {"observation_id", "channel", *DB_BAND_POWER_COLUMNS, *LINEAR_BAND_POWER_COLUMNS}
+    required = {"observation_id", "channel", *LINEAR_BAND_POWER_COLUMNS}
     return required.issubset(set(cache_df.columns))
 
 

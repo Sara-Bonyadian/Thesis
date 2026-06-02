@@ -21,7 +21,7 @@ def _cfg_for_output_mode(mode: str, *, new_file_name: str = "features_extended.c
         conditions=[],
         sessions=[],
         features=FeaturesConfig(
-            eeg=["power_theta", "power_alpha", "power_beta", "eeg_custom"],
+            eeg=["theta_power_uv2", "alpha_power_uv2", "beta_power_uv2", "eeg_custom"],
             ppg=["ppg_mean_hr_bpm"],
             include_robust_z=False,
         ),
@@ -47,9 +47,9 @@ def _sample_eeg_df(custom_value: float) -> pd.DataFrame:
         "n_bad_channels": 0,
         "eeg_error": "ok",
         "channel": "F3|F4|Fz",
-        "power_theta": 0.1,
-        "power_alpha": 0.2,
-        "power_beta": 0.3,
+        "theta_power_uv2": 0.1,
+        "alpha_power_uv2": 0.2,
+        "beta_power_uv2": 0.3,
         "eeg_custom": custom_value,
     }
     return pd.DataFrame([row])

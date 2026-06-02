@@ -189,12 +189,11 @@ def channel_band_powers(
     n_fft: int = 2048,
 ) -> dict[str, dict[str, float]]:
     """
-    Compute per-channel band powers in both dB and linear integrated units.
+    Compute per-channel integrated band powers in linear units.
 
     Returns:
         {
             "<channel_name>": {
-                "power_theta": <mean dB>,
                 "theta_power_uv2": <integrated linear µV²>,
                 ...
             },
@@ -217,11 +216,6 @@ def channel_band_powers(
     )
     psd_linear = np.maximum(psd.get_data(), np.finfo(float).eps)
     freqs = psd.freqs
-    psd_db = 10 * np.log10(psd_linear + 1e-12)
-
-    band_arrays: dict[str, np.ndarray] = {
-        band: band_mean(psd_db, freqs, *EEG_BANDS[band]) for band in normalized_bands
-    }
     linear_band_arrays: dict[str, np.ndarray] = {}
     for band in normalized_bands:
         band_lo, band_hi = EEG_BANDS[band]
@@ -235,8 +229,8 @@ def channel_band_powers(
     for ch_idx, ch_name in enumerate(r.ch_names):
         row: dict[str, float] = {}
         for band in normalized_bands:
-            row[f"power_{band}"] = float(band_arrays[band][ch_idx])
-            row[f"{band}_power_uv2"] = float(linear_band_arrays[band][ch_idx])
+            linear_power = float(linear_band_arrays[band][ch_idx])
+            row[f"{band}_power_uv2"] = linear_power
         out[ch_name] = row
     return out
 

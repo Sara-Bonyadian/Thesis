@@ -41,9 +41,9 @@ features:
   eeg:
     # Optional base power-only correlation set. The pipeline still writes the
     # channel-level master EEG CSV with power_* and *_power_uv2 columns.
-    # - power_theta
-    # - power_alpha
-    # - power_beta
+    # - theta_power_uv2
+    # - alpha_power_uv2
+    # - beta_power_uv2
     # Higher-level EEG features are derived from channel-level band powers.
     - eeg_fm_theta
     - eeg_frontal_beta

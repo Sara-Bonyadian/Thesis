@@ -97,9 +97,6 @@ Base EEG CSV schema (`features_base_eeg_power.csv`):
 - `n_bad_channels`
 - `eeg_error`
 - `channel`
-- `power_theta`
-- `power_alpha`
-- `power_beta`
 - `theta_power_uv2`
 - `alpha_power_uv2`
 - `beta_power_uv2`
@@ -140,10 +137,13 @@ Base PPG IBI CSV schema (`features_base_ppg_ibi.csv`):
 - `n_ibi_raw`
 - `n_ibi_clean`
 - `ibi_index`
-- `peak_time_s`
+- `peak_time_relative_s`
+- `peak_time_absolute_s`
 - `peak_index`
-- `ibi_ms_raw`
 - `ibi_ms_clean`
+- `n_ibi_raw_invalid`
+- `ibi_ms_raw_min`
+- `ibi_ms_raw_max`
 - `processing_version`
 
 Cross-dataset, under `derivatives/cross_dataset/`:

@@ -31,9 +31,9 @@ ppg:
 
 features:
   eeg:
-    - power_theta
-    - power_alpha
-    - power_beta
+    - theta_power_uv2
+    - alpha_power_uv2
+    - beta_power_uv2
   ppg:
     - ppg_mean_hr_bpm
     - ppg_rmssd_ms

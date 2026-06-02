@@ -96,13 +96,17 @@ class TestFeaturesCore(unittest.TestCase):
         self.assertEqual(len(result.ppg_features), 1)
         self.assertEqual(len(result.merged_features), 1)
         self.assertIn("ibi_ms_clean", result.ppg_ibi_features.columns)
+        self.assertIn("peak_time_relative_s", result.ppg_ibi_features.columns)
+        self.assertIn("peak_time_absolute_s", result.ppg_ibi_features.columns)
+        self.assertNotIn("peak_time_s", result.ppg_ibi_features.columns)
+        self.assertNotIn("ibi_ms_raw", result.ppg_ibi_features.columns)
         self.assertIn("processing_version", result.ppg_ibi_features.columns)
         self.assertEqual(result.eeg_features.loc[0, "eeg_error"], "ok")
         self.assertEqual(result.ppg_features.loc[0, "ppg_error"], "ok")
         self.assertIn("channel", result.eeg_features.columns)
-        self.assertIn("power_theta", result.eeg_features.columns)
-        self.assertIn("power_alpha", result.eeg_features.columns)
-        self.assertIn("power_beta", result.eeg_features.columns)
+        self.assertIn("theta_power_uv2", result.eeg_features.columns)
+        self.assertIn("alpha_power_uv2", result.eeg_features.columns)
+        self.assertIn("beta_power_uv2", result.eeg_features.columns)
         self.assertIn("theta_power_uv2", result.eeg_base_features.columns)
         self.assertIn("alpha_power_uv2", result.eeg_base_features.columns)
         self.assertIn("beta_power_uv2", result.eeg_base_features.columns)
@@ -148,9 +152,6 @@ class TestFeaturesCore(unittest.TestCase):
                     "eeg_global_alpha_db": 4.4,
                     "eeg_global_beta_db": 5.5,
                     "channel": "F3|F4|Fz",
-                    "power_theta": 0.11,
-                    "power_alpha": 0.22,
-                    "power_beta": 0.33,
                     "n_bad_channels": 1,
                     "eeg_error": "ok",
                 }
@@ -193,7 +194,6 @@ class TestFeaturesCore(unittest.TestCase):
         self.assertEqual(result.eeg_features.loc[0, "eeg_fm_theta"], 1.1)
         self.assertEqual(result.eeg_features.loc[0, "eeg_global_beta_db"], 5.5)
         self.assertEqual(result.eeg_features.loc[0, "channel"], "F3|F4|Fz")
-        self.assertEqual(result.eeg_features.loc[0, "power_alpha"], 0.22)
         self.assertEqual(result.ppg_features.loc[0, "ppg_mean_hr_bpm"], 70.0)
         self.assertEqual(result.ppg_features.loc[0, "ppg_peak_hr_bpm"], 92.0)
         self.assertEqual(len(result.merged_features), 1)
@@ -233,9 +233,6 @@ class TestFeaturesCore(unittest.TestCase):
                     "n_bad_channels": 0,
                     "eeg_error": "ok",
                     "channel": channel,
-                    "power_theta": 1.0 + idx,
-                    "power_alpha": 10.0 + idx,
-                    "power_beta": 20.0 + idx,
                     "theta_power_uv2": 2.0 + idx,
                     "alpha_power_uv2": 4.0 + idx,
                     "beta_power_uv2": 8.0 + idx,
@@ -285,8 +282,8 @@ class TestFeaturesCore(unittest.TestCase):
         self.assertAlmostEqual(float(row["eeg_fm_theta"]), expected_fm_theta)
         self.assertAlmostEqual(float(row["eeg_frontal_beta"]), expected_frontal_beta)
         self.assertAlmostEqual(float(row["eeg_faa"]), expected_faa)
-        self.assertAlmostEqual(float(row["eeg_global_alpha_db"]), float(eeg_cache["power_alpha"].mean()))
-        self.assertAlmostEqual(float(row["eeg_global_beta_db"]), float(eeg_cache["power_beta"].mean()))
+        self.assertAlmostEqual(float(row["eeg_global_alpha_db"]), float(10 * np.log10(eeg_cache["alpha_power_uv2"].mean())))
+        self.assertAlmostEqual(float(row["eeg_global_beta_db"]), float(10 * np.log10(eeg_cache["beta_power_uv2"].mean())))
         self.assertEqual(len(result.eeg_base_features), len(channels))
 
     def test_extract_core_feature_tables_derives_ppg_features_from_ibi_cache(self) -> None:
@@ -323,9 +320,6 @@ class TestFeaturesCore(unittest.TestCase):
                     "eeg_global_alpha_db": 4.4,
                     "eeg_global_beta_db": 5.5,
                     "channel": "F3|F4|Fz",
-                    "power_theta": 0.11,
-                    "power_alpha": 0.22,
-                    "power_beta": 0.33,
                     "n_bad_channels": 1,
                     "eeg_error": "ok",
                 }
