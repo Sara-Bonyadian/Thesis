@@ -39,10 +39,12 @@ ppg:
 
 features:
   eeg:
-    # Optional base power-only set:
+    # Optional base power-only correlation set. The pipeline still writes the
+    # channel-level master EEG CSV with power_* and *_power_uv2 columns.
     # - power_theta
     # - power_alpha
     # - power_beta
+    # Higher-level EEG features are derived from channel-level band powers.
     - eeg_fm_theta
     - eeg_frontal_beta
     - eeg_faa
@@ -55,8 +57,10 @@ features:
     - ppg_mean_rr_ms
     - ppg_peak_hr_bpm
   include_robust_z: true
-  # If true, load prior EEG features from out_root/<dataset_id>/features_core_eeg.csv
-  # instead of recomputing EEG power features from raw files.
+  # If true, load prior EEG features from out_root/<dataset_id>/.
+  # The loader checks features_core_eeg.csv, then the configured extended EEG file,
+  # then features_base_eeg_power.csv. A channel-level base CSV can be used to derive
+  # eeg_fm_theta, eeg_frontal_beta, eeg_faa, eeg_global_alpha_db, and eeg_global_beta_db.
   reuse_eeg_features_csv: false
   # Optional: also reuse prior PPG features from CSV to avoid raw file loading.
   reuse_ppg_features_csv: false
@@ -73,7 +77,7 @@ output:
   save_observation_index: true
   save_summary_json: true
   # How to write features_base_eeg_power.csv:
-  # - base_only: write only base EEG columns
+  # - base_only: write the channel-level master EEG power schema
   # - append_columns: merge newly computed EEG feature columns into existing base CSV
   # - new_file: keep base CSV unchanged and write extra columns to eeg_base_csv_new_file_name
   eeg_base_csv_mode: base_only

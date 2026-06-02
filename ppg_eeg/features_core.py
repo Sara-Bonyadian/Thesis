@@ -11,11 +11,10 @@ import pandas as pd
 from .config import PipelineConfig
 from .datasets import CanonicalObservation
 from .eeg import (
+    FRONTAL_BETA_CHANNELS_DEFAULT,
+    FRONTAL_MIDLINE_CHANNELS_DEFAULT,
+    FRONTAL_PAIRS_DEFAULT,
     channel_band_powers,
-    frontal_alpha_asymmetry,
-    frontal_beta_value,
-    frontal_midline_theta,
-    global_band_value,
     preprocess_eeg,
 )
 from .ppg import extract_clean_ppg_ibi_from_raw, mean_hr_bpm, mean_rr_ms, peak_hr_bpm, rmssd_ms, sdnn_ms
@@ -52,12 +51,36 @@ OBSERVATION_KEY_COLUMNS: list[str] = [
     "state",
 ]
 
+EEG_POWER_SCHEMA_VERSION = "eeg_power_schema_v2"
+
+
+DB_BAND_POWER_COLUMNS: list[str] = [
+    "power_theta",
+    "power_alpha",
+    "power_beta",
+]
+
+
+LINEAR_BAND_POWER_COLUMNS: list[str] = [
+    "theta_power_uv2",
+    "alpha_power_uv2",
+    "beta_power_uv2",
+]
+
+
+EEG_PROCESSING_METADATA_COLUMNS: list[str] = [
+    "l_freq",
+    "h_freq",
+    "reference",
+    "psd_fmin",
+    "psd_fmax",
+    "n_fft",
+    "processing_version",
+]
+
+
 def base_eeg_power_columns(kind: str = "export") -> list[str]:
-    power_feature_columns = [
-        "power_theta",
-        "power_alpha",
-        "power_beta",
-    ]
+    power_feature_columns = [*DB_BAND_POWER_COLUMNS, *LINEAR_BAND_POWER_COLUMNS]
 
     normalized = kind.casefold()
     if normalized in {"feature", "features"}:
@@ -68,7 +91,10 @@ def base_eeg_power_columns(kind: str = "export") -> list[str]:
             "observation_id",
             "subject_id",
             "task_label",
+            "condition_label",
+            "session_label",
             "modality",
+            "timepoint",
             "state",
             "eeg_format",
             "eeg_path",
@@ -76,6 +102,7 @@ def base_eeg_power_columns(kind: str = "export") -> list[str]:
             "eeg_error",
             "channel",
             *power_feature_columns,
+            *EEG_PROCESSING_METADATA_COLUMNS,
         ]
     raise ValueError(f"Unsupported base EEG column kind: {kind!r}")
 
@@ -253,37 +280,106 @@ def _base_observation_record(obs: CanonicalObservation) -> dict[str, object]:
     }
 
 
-def _eeg_feature_values(preprocessed_raw: mne.io.BaseRaw, cfg: PipelineConfig) -> dict[str, float]:
-    psd_kwargs = dict(
-        psd_fmin=cfg.eeg.psd.fmin,
-        psd_fmax=cfg.eeg.psd.fmax,
-        n_fft=cfg.eeg.psd.n_fft,
-    )
-
-    band_power_values = {
-        "power_theta": _safe_eval(
-            lambda: global_band_value(preprocessed_raw, "theta", psd_fmin=cfg.eeg.psd.fmin, psd_fmax=cfg.eeg.psd.fmax)
-        ),
-        "power_alpha": _safe_eval(
-            lambda: global_band_value(preprocessed_raw, "alpha", psd_fmin=cfg.eeg.psd.fmin, psd_fmax=cfg.eeg.psd.fmax)
-        ),
-        "power_beta": _safe_eval(
-            lambda: global_band_value(preprocessed_raw, "beta", psd_fmin=cfg.eeg.psd.fmin, psd_fmax=cfg.eeg.psd.fmax)
-        ),
-    }
-
+def _eeg_processing_metadata(cfg: PipelineConfig) -> dict[str, object]:
     return {
-        **band_power_values,
-        "eeg_fm_theta": _safe_eval(lambda: frontal_midline_theta(preprocessed_raw, **psd_kwargs)),
-        "eeg_frontal_beta": _safe_eval(lambda: frontal_beta_value(preprocessed_raw, **psd_kwargs)),
-        "eeg_faa": _safe_eval(lambda: frontal_alpha_asymmetry(preprocessed_raw, **psd_kwargs)),
-        "eeg_global_alpha_db": _safe_eval(
-            lambda: global_band_value(preprocessed_raw, "alpha", psd_fmin=cfg.eeg.psd.fmin, psd_fmax=cfg.eeg.psd.fmax)
-        ),
-        "eeg_global_beta_db": _safe_eval(
-            lambda: global_band_value(preprocessed_raw, "beta", psd_fmin=cfg.eeg.psd.fmin, psd_fmax=cfg.eeg.psd.fmax)
-        ),
+        "l_freq": float(cfg.eeg.l_freq),
+        "h_freq": float(cfg.eeg.h_freq),
+        "reference": cfg.eeg.reference,
+        "psd_fmin": float(cfg.eeg.psd.fmin),
+        "psd_fmax": float(cfg.eeg.psd.fmax),
+        "n_fft": int(cfg.eeg.psd.n_fft),
+        "processing_version": EEG_POWER_SCHEMA_VERSION,
     }
+
+
+def _finite_values(values: pd.Series) -> np.ndarray:
+    numeric = pd.to_numeric(values, errors="coerce").astype(float)
+    return numeric[np.isfinite(numeric)].to_numpy(dtype=float)
+
+
+def _mean_finite(values: pd.Series) -> float:
+    finite = _finite_values(values)
+    return float(np.mean(finite)) if finite.size else float("nan")
+
+
+def _mean_positive(values: pd.Series) -> float:
+    finite = _finite_values(values)
+    positive = finite[finite > 0.0]
+    return float(np.mean(positive)) if positive.size else float("nan")
+
+
+def _channel_power_map(df: pd.DataFrame, power_col: str) -> dict[str, float]:
+    if "channel" not in df.columns or power_col not in df.columns:
+        return {}
+
+    out: dict[str, float] = {}
+    for _, row in df.iterrows():
+        channel = str(row.get("channel", "")).strip()
+        if not channel:
+            continue
+        value = _coerce_float(row.get(power_col))
+        if np.isfinite(value):
+            out[channel] = value
+    return out
+
+
+def _derive_eeg_feature_values_from_channel_rows(channel_rows: Sequence[dict[str, object]]) -> dict[str, float]:
+    df = pd.DataFrame(channel_rows)
+    values = {name: float("nan") for name in CORE_EEG_FEATURES}
+    values.update({name: float("nan") for name in LINEAR_BAND_POWER_COLUMNS})
+    if df.empty:
+        return values
+
+    if "power_theta" in df.columns:
+        values["power_theta"] = _mean_finite(df["power_theta"])
+    if "power_alpha" in df.columns:
+        values["power_alpha"] = _mean_finite(df["power_alpha"])
+        values["eeg_global_alpha_db"] = values["power_alpha"]
+    if "power_beta" in df.columns:
+        values["power_beta"] = _mean_finite(df["power_beta"])
+        values["eeg_global_beta_db"] = values["power_beta"]
+
+    for col in LINEAR_BAND_POWER_COLUMNS:
+        if col in df.columns:
+            values[col] = _mean_positive(df[col])
+
+    theta_by_channel = _channel_power_map(df, "theta_power_uv2")
+    theta_vals = [
+        theta_by_channel[ch]
+        for ch in FRONTAL_MIDLINE_CHANNELS_DEFAULT
+        if ch in theta_by_channel and np.isfinite(theta_by_channel[ch]) and theta_by_channel[ch] > 0.0
+    ]
+    if theta_vals:
+        values["eeg_fm_theta"] = float(np.log(np.mean(theta_vals)))
+
+    beta_by_channel = _channel_power_map(df, "beta_power_uv2")
+    beta_vals = [
+        beta_by_channel[ch]
+        for ch in FRONTAL_BETA_CHANNELS_DEFAULT
+        if ch in beta_by_channel and np.isfinite(beta_by_channel[ch]) and beta_by_channel[ch] > 0.0
+    ]
+    if beta_vals:
+        values["eeg_frontal_beta"] = float(np.log(np.mean(beta_vals)))
+
+    alpha_by_channel = _channel_power_map(df, "alpha_power_uv2")
+    faa_vals: list[float] = []
+    for left, right in FRONTAL_PAIRS_DEFAULT:
+        p_left = alpha_by_channel.get(left)
+        p_right = alpha_by_channel.get(right)
+        if (
+            p_left is None
+            or p_right is None
+            or not np.isfinite(p_left)
+            or not np.isfinite(p_right)
+            or p_left <= 0.0
+            or p_right <= 0.0
+        ):
+            continue
+        faa_vals.append(float(np.log(p_right) - np.log(p_left)))
+    if faa_vals:
+        values["eeg_faa"] = float(np.mean(faa_vals))
+
+    return values
 
 
 def _ppg_feature_values(raw: mne.io.BaseRaw, cfg: PipelineConfig) -> tuple[dict[str, float], dict[str, object]]:
@@ -335,9 +431,77 @@ def _build_feature_cache_lookup(
     return lookup
 
 
+def _has_channel_power_schema(cache_df: pd.DataFrame) -> bool:
+    required = {"observation_id", "channel", *DB_BAND_POWER_COLUMNS, *LINEAR_BAND_POWER_COLUMNS}
+    return required.issubset(set(cache_df.columns))
+
+
+def _build_eeg_cache_lookups(
+    cache_df: pd.DataFrame | None,
+    *,
+    required_feature_columns: Sequence[str],
+) -> tuple[dict[str, dict[str, object]], dict[str, list[dict[str, object]]]]:
+    if cache_df is None or cache_df.empty:
+        return {}, {}
+
+    if "observation_id" not in cache_df.columns:
+        raise ValueError("EEG feature cache must contain an 'observation_id' column.")
+
+    channel_lookup: dict[str, list[dict[str, object]]] = {}
+    if _has_channel_power_schema(cache_df):
+        for obs_id, group in cache_df.groupby("observation_id", dropna=False):
+            obs_key = str(obs_id).strip()
+            if not obs_key:
+                continue
+            channel_lookup[obs_key] = group.to_dict(orient="records")
+
+        feature_lookup: dict[str, dict[str, object]] = {}
+        for obs_key, channel_rows in channel_lookup.items():
+            first = dict(channel_rows[0])
+            first["channel"] = "|".join(
+                str(row.get("channel", "")).strip()
+                for row in channel_rows
+                if str(row.get("channel", "")).strip()
+            )
+            first.update(_derive_eeg_feature_values_from_channel_rows(channel_rows))
+            feature_lookup[obs_key] = first
+
+        missing_cols = [
+            col
+            for col in required_feature_columns
+            if all(col not in record for record in feature_lookup.values())
+        ]
+        if missing_cols:
+            needed = ", ".join(sorted(missing_cols))
+            raise ValueError(f"EEG channel-level cache cannot derive required feature columns: {needed}")
+        return feature_lookup, channel_lookup
+
+    missing_cols = [col for col in required_feature_columns if col not in cache_df.columns]
+    if missing_cols:
+        needed = ", ".join(sorted(missing_cols))
+        raise ValueError(f"EEG feature cache is missing required feature columns: {needed}")
+
+    feature_lookup = {}
+    for record in cache_df.to_dict(orient="records"):
+        obs_id = str(record.get("observation_id", "")).strip()
+        if not obs_id:
+            continue
+        feature_lookup[obs_id] = record
+    return feature_lookup, {}
+
+
 def _coerce_int(value: object, *, default: int = 0) -> int:
     try:
         return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: object, *, default: float = float("nan")) -> float:
+    if value is None:
+        return default
+    try:
+        return float(pd.to_numeric(value, errors="coerce"))
     except (TypeError, ValueError):
         return default
 
@@ -363,10 +527,10 @@ def extract_core_feature_tables(
     selected_eeg_features = list(cfg.features.eeg)
     selected_ppg_features = list(cfg.features.ppg)
     base_eeg_feature_columns = base_eeg_power_columns("feature")
-    eeg_cache_lookup = _build_feature_cache_lookup(
+    eeg_processing_metadata = _eeg_processing_metadata(cfg)
+    eeg_cache_lookup, eeg_channel_cache_lookup = _build_eeg_cache_lookups(
         eeg_feature_cache,
         required_feature_columns=selected_eeg_features,
-        table_name="EEG feature",
     )
     ppg_cache_lookup = _build_feature_cache_lookup(
         ppg_feature_cache,
@@ -415,9 +579,9 @@ def extract_core_feature_tables(
             n_bad_channels = _coerce_int(eeg_cached.get("n_bad_channels"), default=0)
             eeg_channel = _coerce_str(eeg_cached.get("channel"), default="")
             for name in base_eeg_feature_columns:
-                eeg_row[name] = float(pd.to_numeric(eeg_cached.get(name), errors="coerce"))
+                eeg_row[name] = _coerce_float(eeg_cached.get(name))
             for name in selected_eeg_features:
-                eeg_row[name] = float(pd.to_numeric(eeg_cached.get(name), errors="coerce"))
+                eeg_row[name] = _coerce_float(eeg_cached.get(name))
             cached_base_row = dict(base)
             cached_base_row.update(
                 {
@@ -426,11 +590,32 @@ def extract_core_feature_tables(
                     "n_bad_channels": n_bad_channels,
                     "eeg_error": eeg_error,
                     "channel": eeg_channel,
+                    **eeg_processing_metadata,
                 }
             )
-            for name in base_eeg_feature_columns:
-                cached_base_row[name] = float(pd.to_numeric(eeg_cached.get(name), errors="coerce"))
-            channel_band_rows.append(cached_base_row)
+            cached_channel_rows = eeg_channel_cache_lookup.get(str(obs.observation_id), [])
+            if cached_channel_rows:
+                for cached_channel_row in cached_channel_rows:
+                    ch_row = dict(base)
+                    for name in base_eeg_power_columns("export"):
+                        if name in OBSERVATION_KEY_COLUMNS:
+                            continue
+                        if name in cached_channel_row:
+                            ch_row[name] = cached_channel_row[name]
+                    ch_row.update(
+                        {
+                            "eeg_format": obs.eeg_format,
+                            "eeg_path": str(obs.eeg_path),
+                            "n_bad_channels": n_bad_channels,
+                            "eeg_error": eeg_error,
+                            **eeg_processing_metadata,
+                        }
+                    )
+                    channel_band_rows.append(ch_row)
+            else:
+                for name in base_eeg_feature_columns:
+                    cached_base_row[name] = _coerce_float(eeg_cached.get(name))
+                channel_band_rows.append(cached_base_row)
         else:
             try:
                 eeg_raw = _read_raw(obs.eeg_path, obs.eeg_format)
@@ -441,7 +626,6 @@ def extract_core_feature_tables(
                     bad_channel_variance_z=cfg.eeg.bad_channel_variance_z,
                     reference=cfg.eeg.reference,
                 )
-                eeg_values = _eeg_feature_values(prep.raw, cfg)
                 n_bad_channels = len(prep.bad_channels)
                 eeg_channel = "|".join(prep.raw.ch_names)
                 per_channel_band = channel_band_powers(
@@ -460,11 +644,13 @@ def extract_core_feature_tables(
                             "n_bad_channels": n_bad_channels,
                             "eeg_error": eeg_error,
                             "channel": ch_name,
+                            **eeg_processing_metadata,
                         }
                     )
                     for name in base_eeg_feature_columns:
                         ch_row[name] = float(band_values.get(name, np.nan))
                     channel_band_rows.append(ch_row)
+                eeg_values = _derive_eeg_feature_values_from_channel_rows(channel_band_rows)
             except Exception as exc:
                 eeg_error = f"{type(exc).__name__}: {exc}"
                 eeg_load_error = exc
@@ -480,12 +666,12 @@ def extract_core_feature_tables(
             ppg_error = _coerce_str(ppg_cached.get("ppg_error"), default="cached")
             ppg_qc = {
                 "ppg_channel": _coerce_str(ppg_cached.get("ppg_channel"), default=""),
-                "ppg_segment_start_s": float(pd.to_numeric(ppg_cached.get("ppg_segment_start_s"), errors="coerce")),
-                "ppg_segment_end_s": float(pd.to_numeric(ppg_cached.get("ppg_segment_end_s"), errors="coerce")),
+                "ppg_segment_start_s": _coerce_float(ppg_cached.get("ppg_segment_start_s")),
+                "ppg_segment_end_s": _coerce_float(ppg_cached.get("ppg_segment_end_s")),
                 "n_ibi_clean": _coerce_int(ppg_cached.get("n_ibi_clean"), default=0),
             }
             for name in selected_ppg_features:
-                ppg_row[name] = float(pd.to_numeric(ppg_cached.get(name), errors="coerce"))
+                ppg_row[name] = _coerce_float(ppg_cached.get(name))
         else:
             try:
                 if obs.ppg_source == "embedded_eeg":
@@ -526,6 +712,7 @@ def extract_core_feature_tables(
                     "n_bad_channels": n_bad_channels,
                     "eeg_error": eeg_error,
                     "channel": eeg_channel,
+                    **eeg_processing_metadata,
                 }
             )
             for name in base_eeg_feature_columns:

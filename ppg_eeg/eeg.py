@@ -189,14 +189,14 @@ def channel_band_powers(
     n_fft: int = 2048,
 ) -> dict[str, dict[str, float]]:
     """
-    Compute per-channel mean band powers in dB.
+    Compute per-channel band powers in both dB and linear integrated units.
 
     Returns:
         {
             "<channel_name>": {
-                "power_theta": <float>,
-                "power_alpha": <float>,
-                "power_beta": <float>,
+                "power_theta": <mean dB>,
+                "theta_power_uv2": <integrated linear µV²>,
+                ...
             },
             ...
         }
@@ -206,21 +206,37 @@ def channel_band_powers(
     if unknown:
         raise KeyError(f"Unknown bands {unknown!r}. Known: {sorted(EEG_BANDS)}")
 
-    psd_db, freqs, ch_names = compute_psd_db(
-        raw,
+    r = raw.copy()
+    r.apply_function(lambda x: x * 1e6)  # V -> µV
+    psd = r.compute_psd(
+        method="welch",
         fmin=psd_fmin,
         fmax=psd_fmax,
-        n_fft=n_fft,
+        n_fft=min(n_fft, r.n_times),
+        verbose=False,
     )
+    psd_linear = np.maximum(psd.get_data(), np.finfo(float).eps)
+    freqs = psd.freqs
+    psd_db = 10 * np.log10(psd_linear + 1e-12)
+
     band_arrays: dict[str, np.ndarray] = {
         band: band_mean(psd_db, freqs, *EEG_BANDS[band]) for band in normalized_bands
     }
+    linear_band_arrays: dict[str, np.ndarray] = {}
+    for band in normalized_bands:
+        band_lo, band_hi = EEG_BANDS[band]
+        mask = (freqs >= band_lo) & (freqs <= band_hi)
+        if not np.any(mask):
+            linear_band_arrays[band] = np.full(psd_linear.shape[0], np.nan)
+            continue
+        linear_band_arrays[band] = _integrate_band_power(psd_linear[:, mask], freqs[mask])
 
     out: dict[str, dict[str, float]] = {}
-    for ch_idx, ch_name in enumerate(ch_names):
+    for ch_idx, ch_name in enumerate(r.ch_names):
         row: dict[str, float] = {}
         for band in normalized_bands:
             row[f"power_{band}"] = float(band_arrays[band][ch_idx])
+            row[f"{band}_power_uv2"] = float(linear_band_arrays[band][ch_idx])
         out[ch_name] = row
     return out
 

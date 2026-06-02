@@ -54,6 +54,14 @@ def _subset_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return df.loc[:, existing].copy()
 
 
+def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in columns:
+        if col not in out.columns:
+            out[col] = pd.NA
+    return out.loc[:, columns].copy()
+
+
 def _eeg_feature_extension_columns(cfg: PipelineConfig, eeg_df: pd.DataFrame) -> list[str]:
     cols: list[str] = []
     for feature_name in cfg.features.eeg:
@@ -86,7 +94,7 @@ def _upsert_feature_columns(existing_df: pd.DataFrame, incoming_df: pd.DataFrame
 def _write_base_eeg_csv(cfg: PipelineConfig, dataset_dir: Path, eeg_df: pd.DataFrame) -> None:
     base_path = dataset_dir / "features_base_eeg_power.csv"
     base_export_columns = base_eeg_power_columns("export")
-    base_rows = _subset_columns(eeg_df, base_export_columns)
+    base_rows = _ensure_columns(_subset_columns(eeg_df, base_export_columns), base_export_columns)
     mode = cfg.output.eeg_base_csv_mode
 
     if mode == "base_only":
@@ -94,14 +102,14 @@ def _write_base_eeg_csv(cfg: PipelineConfig, dataset_dir: Path, eeg_df: pd.DataF
         return
 
     extension_cols = _eeg_feature_extension_columns(cfg, eeg_df)
-    extension_rows = _subset_columns(eeg_df, [*EEG_FEATURE_ROW_KEYS, *extension_cols])
 
     if mode == "append_columns":
         existing = _read_csv_if_exists(base_path)
         if existing is None:
             _write_csv(base_rows, base_path)
             existing = base_rows
-        incoming_rows = _subset_columns(eeg_df, [*base_export_columns, *extension_cols])
+        incoming_columns = [*base_export_columns, *extension_cols]
+        incoming_rows = _ensure_columns(_subset_columns(eeg_df, incoming_columns), incoming_columns)
         merged = _upsert_feature_columns(existing, incoming_rows)
         _write_csv(merged, base_path)
         return
@@ -110,7 +118,8 @@ def _write_base_eeg_csv(cfg: PipelineConfig, dataset_dir: Path, eeg_df: pd.DataF
         _write_csv(base_rows, base_path)
         if extension_cols:
             new_path = dataset_dir / cfg.output.eeg_base_csv_new_file_name
-            new_rows = _subset_columns(eeg_df, [*base_export_columns, *extension_cols])
+            new_columns = [*base_export_columns, *extension_cols]
+            new_rows = _ensure_columns(_subset_columns(eeg_df, new_columns), new_columns)
             _write_csv(new_rows, new_path)
         return
 

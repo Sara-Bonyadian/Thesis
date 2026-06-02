@@ -43,6 +43,8 @@ features:
     - ppg_mean_rr_ms
     - ppg_peak_hr_bpm
   include_robust_z: true
+  reuse_eeg_features_csv: false
+  reuse_ppg_features_csv: false
 
 correlation:
   alpha: 0.05
@@ -55,3 +57,5 @@ correlation:
 output:
   save_observation_index: true
   save_summary_json: true
+  eeg_base_csv_mode: base_only
+  eeg_base_csv_new_file_name: features_base_eeg_power_extended.csv

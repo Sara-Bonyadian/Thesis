@@ -44,6 +44,9 @@ python -m ppg_eeg.run --config config.example.yaml
 
 1. **Base extraction run**  
    Use `output.eeg_base_csv_mode: base_only` to write `features_base_eeg_power.csv`.
+   This file is the channel-level EEG power master table: one row per
+   observation/channel with dB band powers, linear integrated band powers, and
+   processing metadata.
 
 2. **Later runs with new EEG features**  
    Add new feature names under `features.eeg`, then choose:
@@ -52,7 +55,10 @@ python -m ppg_eeg.run --config config.example.yaml
 
 To reuse previously extracted feature CSVs (and avoid recomputing from raw files), set:
 
-- `features.reuse_eeg_features_csv: true` to load `features_core_eeg.csv`
+- `features.reuse_eeg_features_csv: true` to load prior EEG features. The loader
+  checks `features_core_eeg.csv`, then the configured extended EEG file, then
+  `features_base_eeg_power.csv`. If the base CSV has the channel-level schema,
+  high-level EEG features can be derived from it.
 - `features.reuse_ppg_features_csv: true` to load `features_core_ppg.csv`
 
 Both are loaded from `paths.out_root/<dataset_id>/`.
@@ -76,7 +82,10 @@ Base EEG CSV schema (`features_base_eeg_power.csv`):
 - `observation_id`
 - `subject_id`
 - `task_label`
+- `condition_label`
+- `session_label`
 - `modality`
+- `timepoint`
 - `state`
 - `eeg_format`
 - `eeg_path`
@@ -86,6 +95,16 @@ Base EEG CSV schema (`features_base_eeg_power.csv`):
 - `power_theta`
 - `power_alpha`
 - `power_beta`
+- `theta_power_uv2`
+- `alpha_power_uv2`
+- `beta_power_uv2`
+- `l_freq`
+- `h_freq`
+- `reference`
+- `psd_fmin`
+- `psd_fmax`
+- `n_fft`
+- `processing_version`
 
 Cross-dataset, under `derivatives/cross_dataset/`:
 
