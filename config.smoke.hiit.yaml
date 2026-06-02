@@ -81,3 +81,5 @@ correlation:
 
 output:
   save_summary_json: true
+  save_heatmap: true
+  show_heatmap: true
