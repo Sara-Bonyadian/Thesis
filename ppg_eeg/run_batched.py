@@ -37,6 +37,7 @@ from .pipeline import (
     STAGE2_SUBJECT_FILES,
     load_stage1_tables_from_subject_dirs,
     run_stage2_from_base_csvs,
+    write_stage1_dataset_csvs,
     write_stage1_subject_csvs,
     write_stage2_artifacts,
 )
@@ -49,8 +50,9 @@ class BatchPlan:
     output_dir: Path
     config_path: Path
 
-    @property
-    def done_marker(self) -> Path:
+    def done_marker(self, stage: int | None = None) -> Path:
+        if stage == 1:
+            return self.output_dir / "_done_stage1.json"
         return self.output_dir / "_done.json"
 
 
@@ -112,14 +114,26 @@ def _build_batch_config_data(
     return batch_data
 
 
-def _missing_batch_outputs(batch: BatchPlan, dataset_id: str) -> list[str]:
+def _missing_batch_outputs(
+    batch: BatchPlan,
+    dataset_id: str,
+    *,
+    stage: int | None = None,
+) -> list[str]:
     dataset_dir = batch.output_dir / dataset_id
-    missing: list[str] = [
-        name for name in STAGE2_DATASET_FILES if not (dataset_dir / name).exists()
-    ]
+    missing: list[str] = []
+    if stage != 1:
+        missing.extend(
+            name for name in STAGE2_DATASET_FILES if not (dataset_dir / name).exists()
+        )
+
+    subject_files = list(STAGE1_SUBJECT_FILES)
+    if stage != 1:
+        subject_files.extend(STAGE2_SUBJECT_FILES)
+
     for subject_id in batch.subjects:
         subject_dir = dataset_dir / safe_subject_dir_name(subject_id)
-        for name in [*STAGE1_SUBJECT_FILES, *STAGE2_SUBJECT_FILES]:
+        for name in subject_files:
             rel_path = f"{subject_dir.name}/{name}"
             if not (subject_dir / name).exists():
                 missing.append(rel_path)
@@ -132,6 +146,7 @@ def _run_single_batch(
     dataset_id: str,
     cfg: PipelineConfig,
     repo_root: Path,
+    stage: int | None = None,
 ) -> None:
     cache_root = repo_root / ".cache"
     (cache_root / "matplotlib").mkdir(parents=True, exist_ok=True)
@@ -144,10 +159,11 @@ def _run_single_batch(
         child_env.setdefault(env_name, "1")
 
     cmd = [sys.executable, "-m", "ppg_eeg.run", "--config", str(batch.config_path.resolve())]
+    if stage == 1:
+        cmd.extend(["--stage", "1"])
     subprocess.run(cmd, cwd=str(repo_root), env=child_env, check=True)
 
-    dataset_dir = batch.output_dir / dataset_id
-    missing_files = _missing_batch_outputs(batch, dataset_id)
+    missing_files = _missing_batch_outputs(batch, dataset_id, stage=stage)
     if missing_files:
         missing_list = ", ".join(sorted(missing_files))
         raise RuntimeError(
@@ -159,14 +175,16 @@ def _run_single_batch(
         "subject_count": len(batch.subjects),
         "subjects": batch.subjects,
         "dataset_id": dataset_id,
+        "stage": stage,
         "created_at": _utc_now_iso(),
     }
-    batch.done_marker.parent.mkdir(parents=True, exist_ok=True)
-    batch.done_marker.write_text(json.dumps(marker_payload, indent=2))
+    marker_path = batch.done_marker(stage)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(json.dumps(marker_payload, indent=2))
 
 
-def _completed_batch_indices(batches: list[BatchPlan]) -> list[int]:
-    return [batch.index for batch in batches if batch.done_marker.exists()]
+def _completed_batch_indices(batches: list[BatchPlan], *, stage: int | None = None) -> list[int]:
+    return [batch.index for batch in batches if batch.done_marker(stage).exists()]
 
 
 def _write_state(
@@ -180,12 +198,14 @@ def _write_state(
     total_batches: int,
     completed_batches: list[int],
     status: str,
+    stage: int | None = None,
 ) -> None:
     payload = {
         "dataset_id": dataset_id,
         "config_path": str(config_path.resolve()),
         "batch_size": batch_size,
         "sleep_seconds": sleep_seconds,
+        "stage": stage,
         "total_subjects": total_subjects,
         "total_batches": total_batches,
         "completed_batches": completed_batches,
@@ -196,13 +216,12 @@ def _write_state(
     path.write_text(json.dumps(payload, indent=2))
 
 
-def _merge_completed_batches(
+def _concat_stage1_batch_tables(
     *,
     batches: list[BatchPlan],
     dataset_id: str,
     cfg: PipelineConfig,
-    final_out_root: Path,
-) -> dict[str, int]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     obs_frames: list[pd.DataFrame] = []
     base_frames: list[pd.DataFrame] = []
     ppg_ibi_frames: list[pd.DataFrame] = []
@@ -229,20 +248,69 @@ def _merge_completed_batches(
     obs_all = _drop_duplicates_if_possible(obs_all, ["observation_id"])
     base_all = _drop_duplicates_if_possible(base_all, ["observation_id", "channel"])
     ppg_ibi_all = _drop_duplicates_if_possible(ppg_ibi_all, ["observation_id", "ibi_index"])
+    return obs_all, base_all, ppg_ibi_all
+
+
+def _merge_stage1_batches(
+    *,
+    batches: list[BatchPlan],
+    dataset_id: str,
+    cfg: PipelineConfig,
+    final_out_root: Path,
+) -> dict[str, int]:
+    obs_all, base_all, ppg_ibi_all = _concat_stage1_batch_tables(
+        batches=batches,
+        dataset_id=dataset_id,
+        cfg=cfg,
+    )
 
     stage_cfg = replace(cfg, paths=replace(cfg.paths, out_root=final_out_root))
-    dataset_dir = final_out_root / dataset_id
-    dataset_dir.mkdir(parents=True, exist_ok=True)
+    final_out_root.mkdir(parents=True, exist_ok=True)
     if obs_all.empty:
         obs_all = pd.DataFrame(columns=OBSERVATION_INDEX_COLUMNS)
     write_stage1_subject_csvs(stage_cfg, dataset_id, obs_all, base_all, ppg_ibi_all)
+    write_stage1_dataset_csvs(stage_cfg, dataset_id, obs_all, base_all, ppg_ibi_all)
 
+    return {"observations": int(len(obs_all))}
+
+
+def _merge_completed_batches(
+    *,
+    batches: list[BatchPlan],
+    dataset_id: str,
+    cfg: PipelineConfig,
+    final_out_root: Path,
+) -> dict[str, int]:
+    summary = _merge_stage1_batches(
+        batches=batches,
+        dataset_id=dataset_id,
+        cfg=cfg,
+        final_out_root=final_out_root,
+    )
+
+    stage_cfg = replace(cfg, paths=replace(cfg.paths, out_root=final_out_root))
     artifacts = run_stage2_from_base_csvs(stage_cfg)
     write_stage2_artifacts(stage_cfg, artifacts)
     dataset_artifacts = artifacts.per_dataset[dataset_id]
 
     return {
-        "observations": int(len(obs_all)),
+        **summary,
+        "merged_rows": int(len(dataset_artifacts.merged_features)),
+        "corr_tests": int(len(dataset_artifacts.correlations_raw)),
+    }
+
+
+def _run_stage2_on_merged_stage1(
+    *,
+    cfg: PipelineConfig,
+    final_out_root: Path,
+    dataset_id: str,
+) -> dict[str, int]:
+    stage_cfg = replace(cfg, paths=replace(cfg.paths, out_root=final_out_root))
+    artifacts = run_stage2_from_base_csvs(stage_cfg)
+    write_stage2_artifacts(stage_cfg, artifacts)
+    dataset_artifacts = artifacts.per_dataset[dataset_id]
+    return {
         "merged_rows": int(len(dataset_artifacts.merged_features)),
         "corr_tests": int(len(dataset_artifacts.correlations_raw)),
     }
@@ -312,6 +380,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run extraction batches only and skip final merged outputs.",
     )
+    ap.add_argument(
+        "--stage",
+        type=int,
+        choices=[1, 2],
+        default=None,
+        help=(
+            "Run only one stage in batches: 1 = raw-to-base extraction per batch, "
+            "2 = merge Stage 1 batches (if needed) then derive features/correlations. "
+            "Omit to run both stages per batch (legacy default)."
+        ),
+    )
     return ap.parse_args()
 
 
@@ -360,12 +439,59 @@ def main() -> None:
     )
 
     total_batches = len(batches)
+    stage = args.stage
+    stage_label = "both" if stage is None else str(stage)
     print(
-        f"Batch plan: dataset={dataset_id} subjects={len(subjects)} "
+        f"Batch plan: dataset={dataset_id} stage={stage_label} subjects={len(subjects)} "
         f"batch_size={args.batch_size} total_batches={total_batches}"
     )
     print(f"Batch outputs: {batch_root}")
     print(f"Final merged out_root: {final_out_root}")
+
+    if stage == 2:
+        missing_for_merge = [
+            batch.index for batch in batches if not batch.done_marker(1).exists()
+        ]
+        if missing_for_merge:
+            missing_text = ", ".join(str(i) for i in missing_for_merge)
+            raise RuntimeError(
+                "Cannot run Stage 2 because some Stage 1 batches are incomplete. "
+                f"Missing batch indices: {missing_text}"
+            )
+
+        print("Merging completed Stage 1 batch outputs...")
+        stage1_summary = _merge_stage1_batches(
+            batches=batches,
+            dataset_id=dataset_id,
+            cfg=cfg,
+            final_out_root=final_out_root,
+        )
+        print(f"Merged Stage 1 observations={stage1_summary['observations']}")
+
+        print("Running Stage 2 on merged Stage 1 tables...")
+        stage2_summary = _run_stage2_on_merged_stage1(
+            cfg=cfg,
+            final_out_root=final_out_root,
+            dataset_id=dataset_id,
+        )
+        _write_state(
+            path=state_path,
+            dataset_id=dataset_id,
+            config_path=config_path,
+            batch_size=args.batch_size,
+            sleep_seconds=args.sleep_seconds,
+            total_subjects=len(subjects),
+            total_batches=total_batches,
+            completed_batches=_completed_batch_indices(batches, stage=1),
+            status="complete_stage2",
+            stage=2,
+        )
+        print(
+            "Stage 2 complete: "
+            f"merged_rows={stage2_summary['merged_rows']} "
+            f"corr_tests={stage2_summary['corr_tests']}"
+        )
+        return
 
     _write_state(
         path=state_path,
@@ -375,8 +501,9 @@ def main() -> None:
         sleep_seconds=args.sleep_seconds,
         total_subjects=len(subjects),
         total_batches=total_batches,
-        completed_batches=_completed_batch_indices(batches),
+        completed_batches=_completed_batch_indices(batches, stage=stage),
         status="running",
+        stage=stage,
     )
 
     resume_enabled = not args.no_resume
@@ -385,7 +512,7 @@ def main() -> None:
         if args.stop_after_batch and batch.index > args.stop_after_batch:
             break
 
-        if resume_enabled and batch.done_marker.exists():
+        if resume_enabled and batch.done_marker(stage).exists():
             print(f"Skip batch {batch.index:03d}/{total_batches} (already complete).")
             continue
 
@@ -398,6 +525,7 @@ def main() -> None:
             dataset_id=dataset_id,
             cfg=cfg,
             repo_root=repo_root,
+            stage=stage,
         )
         print(f"Done batch {batch.index:03d}/{total_batches}.")
 
@@ -409,8 +537,9 @@ def main() -> None:
             sleep_seconds=args.sleep_seconds,
             total_subjects=len(subjects),
             total_batches=total_batches,
-            completed_batches=_completed_batch_indices(batches),
+            completed_batches=_completed_batch_indices(batches, stage=stage),
             status="running",
+            stage=stage,
         )
 
         if (
@@ -430,8 +559,9 @@ def main() -> None:
             sleep_seconds=args.sleep_seconds,
             total_subjects=len(subjects),
             total_batches=total_batches,
-            completed_batches=_completed_batch_indices(batches),
+            completed_batches=_completed_batch_indices(batches, stage=stage),
             status="paused_stop_after_batch",
+            stage=stage,
         )
         print(
             f"Stopped after batch {args.stop_after_batch}. "
@@ -448,19 +578,51 @@ def main() -> None:
             sleep_seconds=args.sleep_seconds,
             total_subjects=len(subjects),
             total_batches=total_batches,
-            completed_batches=_completed_batch_indices(batches),
+            completed_batches=_completed_batch_indices(batches, stage=stage),
             status="complete_batches_only",
+            stage=stage,
         )
         print("Batch extraction completed (merge skipped by --skip-merge).")
         return
 
-    missing_for_merge = [batch.index for batch in batches if not batch.done_marker.exists()]
+    missing_for_merge = [
+        batch.index for batch in batches if not batch.done_marker(stage).exists()
+    ]
     if missing_for_merge:
         missing_text = ", ".join(str(i) for i in missing_for_merge)
         raise RuntimeError(
             "Cannot merge because some batches are incomplete. "
             f"Missing batch indices: {missing_text}"
         )
+
+    if stage == 1:
+        print("Merging completed Stage 1 batch outputs...")
+        summary = _merge_stage1_batches(
+            batches=batches,
+            dataset_id=dataset_id,
+            cfg=cfg,
+            final_out_root=final_out_root,
+        )
+        _write_state(
+            path=state_path,
+            dataset_id=dataset_id,
+            config_path=config_path,
+            batch_size=args.batch_size,
+            sleep_seconds=args.sleep_seconds,
+            total_subjects=len(subjects),
+            total_batches=total_batches,
+            completed_batches=_completed_batch_indices(batches, stage=stage),
+            status="complete_stage1_merged",
+            stage=stage,
+        )
+        print(
+            "Merged Stage 1 outputs complete: "
+            f"observations={summary['observations']}. "
+            "Run Stage 2 with either "
+            f"'python -m ppg_eeg.run --config {config_path.name} --stage 2' or "
+            f"'python -m ppg_eeg.run_batched --config {config_path.name} --stage 2'."
+        )
+        return
 
     print("Merging completed batch outputs...")
     summary = _merge_completed_batches(
@@ -478,8 +640,9 @@ def main() -> None:
         sleep_seconds=args.sleep_seconds,
         total_subjects=len(subjects),
         total_batches=total_batches,
-        completed_batches=_completed_batch_indices(batches),
+        completed_batches=_completed_batch_indices(batches, stage=stage),
         status="complete_merged",
+        stage=stage,
     )
     print(
         "Merged outputs complete: "

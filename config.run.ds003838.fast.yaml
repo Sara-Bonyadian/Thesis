@@ -6,10 +6,18 @@ paths:
   raw_root: ./data/raw/ds003838
   out_root: ./derivatives/run_ds003838_fast
 
+# Empty lists = all subjects / observations for this dataset.
 subjects: []
-tasks: []
-conditions: []
-sessions: []
+# ds003838 sets condition_label equal to task_label.
+tasks:
+  - rest
+  - memory
+conditions:
+  - rest
+  - memory
+# ds003838 uses a single session label for all recordings.
+sessions:
+  - single
 
 eeg:
   l_freq: 1.0
@@ -31,9 +39,11 @@ ppg:
 
 features:
   eeg:
-    - theta_power_uv2
-    - alpha_power_uv2
-    - beta_power_uv2
+    - eeg_fm_theta
+    - eeg_frontal_beta
+    - eeg_faa
+    - eeg_global_alpha_db
+    - eeg_global_beta_db
   ppg:
     - ppg_mean_hr_bpm
     - ppg_rmssd_ms
@@ -52,3 +62,5 @@ correlation:
 
 output:
   save_summary_json: true
+  save_heatmap: true
+  show_heatmap: true

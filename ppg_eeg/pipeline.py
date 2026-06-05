@@ -187,6 +187,24 @@ def write_stage1_subject_csvs(
     )
 
 
+def write_stage1_dataset_csvs(
+    cfg: PipelineConfig,
+    dataset_id: str,
+    observations_df: pd.DataFrame,
+    eeg_base_df: pd.DataFrame,
+    ppg_ibi_df: pd.DataFrame,
+) -> None:
+    """Write one combined Stage 1 CSV per table at the dataset folder level."""
+    dataset_dir = _dataset_output_dir(cfg, dataset_id)
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    observations_df = _ensure_columns(observations_df, OBSERVATION_INDEX_COLUMNS)
+    eeg_base_df = _prepare_base_eeg_df(eeg_base_df)
+    ppg_ibi_df = _prepare_base_ppg_ibi_df(ppg_ibi_df)
+    _write_csv(observations_df, dataset_dir / OBSERVATIONS_INDEX_FILE)
+    _write_csv(eeg_base_df, dataset_dir / EEG_BASE_FILE)
+    _write_csv(ppg_ibi_df, dataset_dir / PPG_IBI_BASE_FILE)
+
+
 def load_stage1_tables_from_subject_dirs(
     cfg: PipelineConfig,
     dataset_id: str,
