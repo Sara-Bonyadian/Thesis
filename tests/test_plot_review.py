@@ -10,11 +10,16 @@ from ppg_eeg.config import CorrelationConfig, FeaturesConfig, OutputConfig, Path
 from ppg_eeg.plot_review import (
     PAIRS_SUMMARY_FILE,
     SCATTER_GRID_FILE,
+    CorrPairStats,
+    all_feature_pairs,
     load_merged_features,
     run_cross_dataset_review,
+    run_cross_dataset_scatter_grid,
     run_dataset_review,
     select_review_pairs,
+    write_cross_dataset_scatter_grid,
     write_dataset_review_plots,
+    _format_cross_dataset_legend_label,
 )
 from ppg_eeg.pipeline import CORRELATIONS_FDR_FILE, MERGED_FEATURES_FILE, OBSERVATIONS_INDEX_FILE
 
@@ -211,6 +216,109 @@ class TestPlotReview(unittest.TestCase):
                 ],
             )
             written = run_dataset_review(_cfg(out_root, "demo"), max_pairs=2)
+            self.assertTrue(written)
+
+    def test_all_feature_pairs_count(self) -> None:
+        pairs = all_feature_pairs(
+            ["e1", "e2", "e3", "e4", "e5"],
+            ["p1", "p2", "p3", "p4", "p5"],
+        )
+        self.assertEqual(len(pairs), 25)
+
+    def test_cross_dataset_legend_label_includes_method_and_p_value(self) -> None:
+        label = _format_cross_dataset_legend_label(
+            "ds003838",
+            CorrPairStats(correlation=-0.15, p_value=0.0918, method="spearman", n=130),
+        )
+        self.assertIn("ds003838", label)
+        self.assertIn("spearman", label)
+        self.assertIn("p=0.0918", label)
+        self.assertIn("r=-0.15", label)
+
+    def test_write_cross_dataset_scatter_grid(self) -> None:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_root = Path(tmp)
+            merged_by_dataset: dict[str, pd.DataFrame] = {}
+            corr_tables: dict[str, pd.DataFrame] = {}
+            for dataset_id, slope in [("ds003838", 1.0), ("ds006848", 0.5), ("hiit", -0.5)]:
+                rows = []
+                for idx in range(1, 4):
+                    rows.append(
+                        {
+                            "dataset_id": dataset_id,
+                            "observation_id": f"{dataset_id}-{idx}",
+                            "subject_id": f"s{idx}",
+                            "eeg_a": float(idx),
+                            "ppg_1": float(idx) * slope,
+                        }
+                    )
+                merged_by_dataset[dataset_id] = pd.DataFrame(rows)
+                corr_tables[dataset_id] = pd.DataFrame(
+                    [
+                        {
+                            "dataset_id": dataset_id,
+                            "method": "auto",
+                            "selected_method": "spearman",
+                            "eeg_feature": "eeg_a",
+                            "ppg_feature": "ppg_1",
+                            "correlation": slope,
+                            "p_value": 0.1,
+                            "q_value": 0.2,
+                            "n": 3,
+                        }
+                    ]
+                )
+
+            compare_out = out_root / "cross"
+            written = write_cross_dataset_scatter_grid(
+                merged_by_dataset=merged_by_dataset,
+                corr_tables=corr_tables,
+                eeg_features=["eeg_a"],
+                ppg_features=["ppg_1"],
+                compare_out=compare_out,
+                primary_method="auto",
+            )
+            self.assertTrue(any(path.name == "scatter_grid_25_cross_dataset.png" for path in written))
+            self.assertTrue((compare_out / "scatter_grid_25_cross_dataset.csv").exists())
+
+    def test_run_cross_dataset_scatter_grid(self) -> None:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_root = Path(tmp)
+            for dataset_id in ["ds003838", "ds006848", "hiit"]:
+                dataset_dir = out_root / dataset_id
+                dataset_dir.mkdir(parents=True)
+                _write_subject_outputs(dataset_dir, "s1", 1.0, 2.0)
+                _write_corr_fdr(
+                    dataset_dir,
+                    [
+                        {
+                            "dataset_id": dataset_id,
+                            "method": "auto",
+                            "selected_method": "pearson",
+                            "eeg_feature": "eeg_a",
+                            "ppg_feature": "ppg_1",
+                            "correlation": 0.5,
+                            "p_value": 0.2,
+                            "q_value": 0.2,
+                            "sig_q_005": False,
+                            "sig_q_010": False,
+                            "sig_q_015": False,
+                            "sig_p_005": False,
+                            "n": 1,
+                        }
+                    ],
+                )
+
+            cfgs = [_cfg(out_root, dataset_id) for dataset_id in ["ds003838", "ds006848", "hiit"]]
+            written = run_cross_dataset_scatter_grid(cfgs, compare_out=out_root / "cross")
             self.assertTrue(written)
 
 

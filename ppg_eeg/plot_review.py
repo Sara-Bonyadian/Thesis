@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,30 @@ REVIEW_SUBDIR = "review"
 SCATTER_GRID_FILE = "scatter_grid.png"
 CROSS_DATASET_BARS_FILE = "correlations_cross_dataset.png"
 CROSS_DATASET_TABLE_FILE = "correlations_cross_dataset.csv"
+CROSS_DATASET_SCATTER_GRID_FILE = "scatter_grid_25_cross_dataset.png"
 PAIRS_SUMMARY_FILE = "pairs_summary.csv"
+
+DATASET_STYLE: dict[str, dict[str, str | float]] = {
+    "ds003838": {"color": "#2c7bb6", "marker": "o"},
+    "ds006848": {"color": "#d7191c", "marker": "s"},
+    "hiit": {"color": "#1a9641", "marker": "^"},
+}
+DEFAULT_DATASET_STYLE: dict[str, str | float] = {"color": "#636363", "marker": "o"}
+
+
+@dataclass(frozen=True)
+class CorrPairStats:
+    correlation: float
+    p_value: float
+    method: str
+    n: int
+
+
+def _format_cross_dataset_legend_label(dataset_id: str, stats: CorrPairStats) -> str:
+    return (
+        f"{dataset_id} | {stats.method} | "
+        f"r={stats.correlation:.2f} | p={stats.p_value:.3g}"
+    )
 
 
 def _discover_subject_dirs(dataset_dir: Path) -> list[Path]:
@@ -32,19 +56,28 @@ def _discover_subject_dirs(dataset_dir: Path) -> list[Path]:
 
 
 def load_merged_features(dataset_dir: Path) -> pd.DataFrame:
+    combined_path = dataset_dir / MERGED_FEATURES_FILE
+    if combined_path.exists():
+        dtype: dict[str, type] = {}
+        header = pd.read_csv(combined_path, nrows=0)
+        if "subject_id" in header.columns:
+            dtype["subject_id"] = str
+        return pd.read_csv(combined_path, dtype=dtype)
+
     frames: list[pd.DataFrame] = []
     for subject_dir in _discover_subject_dirs(dataset_dir):
         path = subject_dir / MERGED_FEATURES_FILE
         if not path.exists():
             raise FileNotFoundError(f"Missing merged features for review plots: {path}")
-        dtype: dict[str, type] = {}
+        dtype = {}
         header = pd.read_csv(path, nrows=0)
         if "subject_id" in header.columns:
             dtype["subject_id"] = str
         frames.append(pd.read_csv(path, dtype=dtype))
     if not frames:
         raise FileNotFoundError(
-            f"No subject folders with {MERGED_FEATURES_FILE!r} found under {dataset_dir}"
+            f"No {MERGED_FEATURES_FILE!r} found under {dataset_dir}. "
+            f"Expected either {combined_path} or per-subject folders."
         )
     return pd.concat(frames, ignore_index=True)
 
@@ -90,6 +123,98 @@ def select_review_pairs(
 
 def _pair_slug(eeg_feature: str, ppg_feature: str) -> str:
     return f"{eeg_feature}__{ppg_feature}"
+
+
+def all_feature_pairs(eeg_features: list[str], ppg_features: list[str]) -> list[tuple[str, str]]:
+    return [(eeg, ppg) for eeg in eeg_features for ppg in ppg_features]
+
+
+def _dataset_style(dataset_id: str) -> dict[str, str | float]:
+    return DATASET_STYLE.get(dataset_id, DEFAULT_DATASET_STYLE)
+
+
+def _short_feature_label(name: str) -> str:
+    return (
+        name.replace("eeg_", "")
+        .replace("ppg_", "")
+        .replace("_db", " (dB)")
+        .replace("_uv2", "")
+        .replace("_ms", " (ms)")
+        .replace("_bpm", " (bpm)")
+    )
+
+
+def _regression_line(x: pd.Series, y: pd.Series) -> tuple[np.ndarray, np.ndarray] | None:
+    valid = np.isfinite(x.to_numpy(dtype=float)) & np.isfinite(y.to_numpy(dtype=float))
+    if int(valid.sum()) < 2:
+        return None
+    x_valid = x[valid].to_numpy(dtype=float)
+    y_valid = y[valid].to_numpy(dtype=float)
+    coeffs = np.polyfit(x_valid, y_valid, 1)
+    x_line = np.linspace(float(x_valid.min()), float(x_valid.max()), 50)
+    y_line = coeffs[0] * x_line + coeffs[1]
+    return x_line, y_line
+
+
+def plot_cross_dataset_pair_scatter(
+    ax: Any,
+    *,
+    merged_by_dataset: dict[str, pd.DataFrame],
+    eeg_feature: str,
+    ppg_feature: str,
+    stats_by_dataset: dict[str, CorrPairStats] | None = None,
+    show_points: bool = True,
+) -> None:
+    stats_by_dataset = stats_by_dataset or {}
+    for dataset_id, merged in merged_by_dataset.items():
+        style = _dataset_style(dataset_id)
+        color = str(style["color"])
+        marker = str(style["marker"])
+        x = pd.to_numeric(merged[eeg_feature], errors="coerce")
+        y = pd.to_numeric(merged[ppg_feature], errors="coerce")
+        valid = np.isfinite(x.to_numpy(dtype=float)) & np.isfinite(y.to_numpy(dtype=float))
+        x_valid = x[valid]
+        y_valid = y[valid]
+
+        stats = stats_by_dataset.get(dataset_id)
+        label = dataset_id
+        if stats is not None:
+            label = _format_cross_dataset_legend_label(dataset_id, stats)
+
+        if show_points and not x_valid.empty:
+            ax.scatter(
+                x_valid,
+                y_valid,
+                s=18,
+                alpha=0.35,
+                color=color,
+                marker=marker,
+                edgecolors="none",
+                zorder=2,
+            )
+
+        line = _regression_line(x, y)
+        if line is not None:
+            x_line, y_line = line
+            ax.plot(x_line, y_line, color=color, linewidth=1.8, label=label, zorder=3)
+
+    ax.set_xlabel(_short_feature_label(eeg_feature), fontsize=8)
+    ax.set_ylabel(_short_feature_label(ppg_feature), fontsize=8)
+    ax.set_title(f"{_short_feature_label(eeg_feature)} vs {_short_feature_label(ppg_feature)}", fontsize=9)
+    ax.grid(True, alpha=0.25)
+    ax.tick_params(labelsize=7)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(
+            handles,
+            labels,
+            fontsize=5.5,
+            loc="best",
+            framealpha=0.9,
+            handlelength=1.4,
+            borderpad=0.3,
+            labelspacing=0.25,
+        )
 
 
 def _scatter_title(row: pd.Series, *, dataset_id: str) -> str:
@@ -289,6 +414,147 @@ def write_cross_dataset_review_plots(
     return [table_path, bars_path]
 
 
+def _corr_lookup(
+    corr_tables: dict[str, pd.DataFrame],
+    *,
+    eeg_feature: str,
+    ppg_feature: str,
+    primary_method: str,
+) -> dict[str, CorrPairStats]:
+    out: dict[str, CorrPairStats] = {}
+    for dataset_id, corr_fdr in corr_tables.items():
+        focus = corr_fdr[
+            (corr_fdr["eeg_feature"].astype(str) == eeg_feature)
+            & (corr_fdr["ppg_feature"].astype(str) == ppg_feature)
+        ]
+        if "method" in focus.columns:
+            method_mask = focus["method"].astype(str).str.casefold() == primary_method.casefold()
+            if method_mask.any():
+                focus = focus.loc[method_mask]
+        if focus.empty:
+            continue
+        row = focus.iloc[0]
+        selected = row.get("selected_method", row.get("method", ""))
+        method = str(selected).strip() or str(row.get("method", "")).strip() or primary_method
+        out[dataset_id] = CorrPairStats(
+            correlation=float(row["correlation"]),
+            p_value=float(row["p_value"]),
+            method=method,
+            n=int(row["n"]),
+        )
+    return out
+
+
+def write_cross_dataset_scatter_grid(
+    *,
+    merged_by_dataset: dict[str, pd.DataFrame],
+    corr_tables: dict[str, pd.DataFrame],
+    eeg_features: list[str],
+    ppg_features: list[str],
+    compare_out: Path,
+    primary_method: str,
+) -> list[Path]:
+    import matplotlib.pyplot as plt
+
+    pairs = all_feature_pairs(eeg_features, ppg_features)
+    if not pairs:
+        return []
+
+    compare_out.mkdir(parents=True, exist_ok=True)
+    ncols = len(ppg_features)
+    nrows = len(eeg_features)
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(3.6 * ncols, 3.2 * nrows),
+        squeeze=False,
+    )
+
+    for index, (eeg_feature, ppg_feature) in enumerate(pairs):
+        row_idx, col_idx = divmod(index, ncols)
+        stats_by_dataset = _corr_lookup(
+            corr_tables,
+            eeg_feature=eeg_feature,
+            ppg_feature=ppg_feature,
+            primary_method=primary_method,
+        )
+        plot_cross_dataset_pair_scatter(
+            axes[row_idx][col_idx],
+            merged_by_dataset=merged_by_dataset,
+            eeg_feature=eeg_feature,
+            ppg_feature=ppg_feature,
+            stats_by_dataset=stats_by_dataset,
+        )
+
+    fig.suptitle(
+        "EEG–PPG scatter grid (one regression line per dataset)",
+        fontsize=13,
+        y=1.01,
+    )
+    fig.tight_layout()
+
+    grid_path = compare_out / CROSS_DATASET_SCATTER_GRID_FILE
+    fig.savefig(grid_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+    table_rows: list[dict[str, object]] = []
+    for eeg_feature, ppg_feature in pairs:
+        stats_by_dataset = _corr_lookup(
+            corr_tables,
+            eeg_feature=eeg_feature,
+            ppg_feature=ppg_feature,
+            primary_method=primary_method,
+        )
+        row: dict[str, object] = {
+            "eeg_feature": eeg_feature,
+            "ppg_feature": ppg_feature,
+        }
+        for dataset_id in merged_by_dataset:
+            stats = stats_by_dataset.get(dataset_id)
+            row[f"{dataset_id}_correlation"] = stats.correlation if stats else np.nan
+            row[f"{dataset_id}_p_value"] = stats.p_value if stats else np.nan
+            row[f"{dataset_id}_method"] = stats.method if stats else ""
+            row[f"{dataset_id}_n"] = stats.n if stats else int(len(merged_by_dataset[dataset_id]))
+        table_rows.append(row)
+
+    table_path = compare_out / "scatter_grid_25_cross_dataset.csv"
+    pd.DataFrame(table_rows).to_csv(table_path, index=False)
+    return [grid_path, table_path]
+
+
+def run_cross_dataset_scatter_grid(
+    configs: list[PipelineConfig],
+    *,
+    compare_out: Path,
+) -> list[Path]:
+    merged_by_dataset: dict[str, pd.DataFrame] = {}
+    corr_tables: dict[str, pd.DataFrame] = {}
+    eeg_features: list[str] | None = None
+    ppg_features: list[str] | None = None
+    primary_method = configs[0].correlation.primary_method
+
+    for cfg in configs:
+        for dataset_id in cfg.dataset_ids:
+            dataset_dir = dataset_output_dir(cfg, dataset_id)
+            merged_by_dataset[dataset_id] = load_merged_features(dataset_dir)
+            corr_tables[dataset_id] = load_correlations_fdr(dataset_dir)
+            if eeg_features is None:
+                eeg_features = list(cfg.features.eeg)
+                ppg_features = list(cfg.features.ppg)
+
+    if not merged_by_dataset or eeg_features is None or ppg_features is None:
+        return []
+
+    return write_cross_dataset_scatter_grid(
+        merged_by_dataset=merged_by_dataset,
+        corr_tables=corr_tables,
+        eeg_features=eeg_features,
+        ppg_features=ppg_features,
+        compare_out=compare_out,
+        primary_method=primary_method,
+    )
+
+
 def run_dataset_review(cfg: PipelineConfig, *, max_pairs: int) -> list[Path]:
     written: list[Path] = []
     for dataset_id in cfg.dataset_ids:
@@ -348,6 +614,22 @@ def main() -> None:
         help="Output folder for cross-dataset plots when multiple configs are passed.",
     )
     ap.add_argument(
+        "--cross-scatter-grid",
+        action="store_true",
+        help=(
+            "When multiple configs are passed, write a 5×5 cross-dataset scatter grid "
+            "with one regression line per dataset for every EEG×PPG feature pair."
+        ),
+    )
+    ap.add_argument(
+        "--cross-scatter-grid-only",
+        action="store_true",
+        help=(
+            "Read existing pipeline CSV outputs only and write the cross-dataset 25-panel "
+            "scatter grid. Skips per-dataset review plots."
+        ),
+    )
+    ap.add_argument(
         "--show",
         action="store_true",
         help="Open interactive plot windows after saving PNGs.",
@@ -356,14 +638,20 @@ def main() -> None:
 
     configs = [load_config(path) for path in args.config]
     written: list[Path] = []
-    for cfg in configs:
-        written.extend(run_dataset_review(cfg, max_pairs=args.max_pairs))
+    compare_out = Path(args.compare_out)
+    write_cross_grid = len(configs) > 1 and (args.cross_scatter_grid or args.cross_scatter_grid_only)
 
-    if len(configs) > 1:
+    if not args.cross_scatter_grid_only:
+        for cfg in configs:
+            written.extend(run_dataset_review(cfg, max_pairs=args.max_pairs))
+
+    if write_cross_grid:
+        written.extend(run_cross_dataset_scatter_grid(configs, compare_out=compare_out))
+    elif len(configs) > 1 and not args.cross_scatter_grid_only:
         written.extend(
             run_cross_dataset_review(
                 configs,
-                compare_out=Path(args.compare_out),
+                compare_out=compare_out,
                 max_pairs=args.max_pairs,
             )
         )

@@ -1,23 +1,30 @@
 dataset_ids:
-  - ds006848
-dataset_id: ds006848
+  - hiit
+dataset_id: hiit
 
 paths:
-  raw_root: ./data/raw/ds006848
-  out_root: ./derivatives/run_ds006848_fast
+  raw_root: ./data/raw/HIIT
+  out_root: ./derivatives/run_hiit_fast
 
 # Empty lists = all subjects / observations for this dataset.
 subjects: []
-# ds006848 sets condition_label equal to task_label.
 tasks:
   - rest
-  - verbalwm
+  - tetris
+# HIIT condition_label = {modality}_{timepoint}_{state}.
 conditions:
-  - rest
-  - verbalwm
-# ds006848 uses a single session label for all recordings.
+  - ph_pre_rest
+  - ph_pre_tetris
+  - ph_post_rest
+  - ph_post_tetris
+  - ps_pre_rest
+  - ps_pre_tetris
+  - ps_post_rest
+  - ps_post_tetris
+# HIIT session_label = modality (ph = photosensor, ps = pressure sensor).
 sessions:
-  - single
+  - ph
+  - ps
 
 eeg:
   l_freq: 1.0

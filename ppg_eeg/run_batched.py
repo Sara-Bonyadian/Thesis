@@ -361,7 +361,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--sleep-seconds",
         type=float,
-        default=20.0,
+        default=10.0,
         help="Cooldown between batches in seconds (default: 20).",
     )
     ap.add_argument(
