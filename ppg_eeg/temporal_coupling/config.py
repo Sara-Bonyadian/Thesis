@@ -57,11 +57,42 @@ class TemporalCouplingEegSectionConfig:
 
 
 @dataclass(frozen=True)
+class TemporalCouplingCardiacEcgConfig:
+    bandpass_hz: tuple[float, float] = (5.0, 30.0)
+    min_peak_distance_s: float = 0.45
+    prominence: str | float = "auto"
+    height: str | float = "auto"
+    test_inverted: bool = True
+
+
+@dataclass(frozen=True)
+class TemporalCouplingCardiacDebugPlotConfig:
+    enabled: bool = False
+    windows: tuple[tuple[float, float], ...] = ()
+    start_time_s: float | None = None
+    end_time_s: float | None = None
+    auto_window_s: float = 10.0
+    overview_window_s: float | None = 40.0
+    save_overview: bool = True
+    also_auto_window: bool = True
+    max_plots_per_subject: int = 5
+
+
+@dataclass(frozen=True)
 class TemporalCouplingCardiacConfig:
+    channel: str = "auto"
+    signal_type: str = "auto"
+    detector: str = "auto"
+    ecg: TemporalCouplingCardiacEcgConfig = TemporalCouplingCardiacEcgConfig()
     hr_window_s: float = 15.0
+    mean_rr_window_s: float | None = None
     hrv_window_s: float = 60.0
     hrv_step_s: float = 1.0
+    min_beats_hr: int = 5
     min_beats_hrv: int = 20
+    min_valid_hr_percent: float = 50.0
+    min_valid_hrv_percent: float = 30.0
+    debug_plot: TemporalCouplingCardiacDebugPlotConfig = TemporalCouplingCardiacDebugPlotConfig()
 
 
 @dataclass(frozen=True)
@@ -150,6 +181,22 @@ def _as_band_limits(value: Any, *, name: str) -> tuple[float, float]:
     return (low, high)
 
 
+def _as_plot_windows(value: Any) -> tuple[tuple[float, float], ...]:
+    if not value:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("temporal_coupling.cardiac.debug_plot.windows must be a list of [start_s, end_s] pairs.")
+    windows: list[tuple[float, float]] = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError("Each debug_plot window must be [start_s, end_s].")
+        start_s, end_s = float(item[0]), float(item[1])
+        if end_s <= start_s:
+            raise ValueError(f"Invalid debug_plot window: end_s must exceed start_s ({start_s}, {end_s}).")
+        windows.append((start_s, end_s))
+    return tuple(windows)
+
+
 def _as_roi_channels(value: Any, *, name: str) -> tuple[str, ...]:
     channels = tuple(ch.strip() for ch in _as_str_list(value))
     if not channels:
@@ -196,6 +243,9 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
     audit_raw = tc_raw.get("audit") or {}
     eeg_tc_raw = tc_raw.get("eeg") or {}
     cardiac_raw = tc_raw.get("cardiac") or {}
+    ecg_raw = cardiac_raw.get("ecg") or {}
+    debug_plot_raw = cardiac_raw.get("debug_plot") or {}
+    ecg_bandpass = ecg_raw.get("bandpass_hz") or [5.0, 30.0]
     resample_raw = tc_raw.get("resample") or {}
     xcorr_raw = tc_raw.get("cross_correlation") or {}
     events_raw = tc_raw.get("events") or {}
@@ -256,10 +306,38 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
                 ),
             ),
             cardiac=TemporalCouplingCardiacConfig(
+                channel=str(_get(cardiac_raw, "channel", "auto")),
+                signal_type=str(_get(cardiac_raw, "signal_type", "auto")),
+                detector=str(_get(cardiac_raw, "detector", "auto")),
+                ecg=TemporalCouplingCardiacEcgConfig(
+                    bandpass_hz=(
+                        float(ecg_bandpass[0]),
+                        float(ecg_bandpass[1]),
+                    ),
+                    min_peak_distance_s=float(_get(ecg_raw, "min_peak_distance_s", 0.45)),
+                    prominence=ecg_raw.get("prominence", "auto"),
+                    height=ecg_raw.get("height", "auto"),
+                    test_inverted=bool(_get(ecg_raw, "test_inverted", True)),
+                ),
                 hr_window_s=float(_get(cardiac_raw, "hr_window_s", 15.0)),
+                mean_rr_window_s=_as_optional_float(cardiac_raw.get("mean_rr_window_s")),
                 hrv_window_s=float(_get(cardiac_raw, "hrv_window_s", 60.0)),
                 hrv_step_s=float(_get(cardiac_raw, "hrv_step_s", 1.0)),
+                min_beats_hr=int(_get(cardiac_raw, "min_beats_hr", 5)),
                 min_beats_hrv=int(_get(cardiac_raw, "min_beats_hrv", 20)),
+                min_valid_hr_percent=float(_get(cardiac_raw, "min_valid_hr_percent", 50.0)),
+                min_valid_hrv_percent=float(_get(cardiac_raw, "min_valid_hrv_percent", 30.0)),
+                debug_plot=TemporalCouplingCardiacDebugPlotConfig(
+                    enabled=bool(_get(debug_plot_raw, "enabled", False)),
+                    windows=_as_plot_windows(debug_plot_raw.get("windows")),
+                    start_time_s=_as_optional_float(debug_plot_raw.get("start_time_s")),
+                    end_time_s=_as_optional_float(debug_plot_raw.get("end_time_s")),
+                    auto_window_s=float(_get(debug_plot_raw, "auto_window_s", 10.0)),
+                    overview_window_s=_as_optional_float(debug_plot_raw.get("overview_window_s")),
+                    save_overview=bool(_get(debug_plot_raw, "save_overview", True)),
+                    also_auto_window=bool(_get(debug_plot_raw, "also_auto_window", True)),
+                    max_plots_per_subject=int(_get(debug_plot_raw, "max_plots_per_subject", 5)),
+                ),
             ),
             resample=TemporalCouplingResampleConfig(
                 fs_hz=fs_hz,

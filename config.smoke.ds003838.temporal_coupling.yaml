@@ -35,7 +35,7 @@ ppg:
   peak_min_distance_s: 0.4
   peak_height: 0.3
   ibi_min_ms: 400.0
-  ibi_max_ms: 1200.0
+  ibi_max_ms: 1500.0
 
 temporal_coupling:
   audit:
@@ -55,10 +55,35 @@ temporal_coupling:
       beta: [Fz, FCz, Cz]
 
   cardiac:
+    # auto: score all cardiac-like channels (PPG + ECG) and both polarities; pick best coverage.
+    channel: auto
+    signal_type: auto
+    detector: auto
+    ecg:
+      bandpass_hz: [5, 30]
+      min_peak_distance_s: 0.45
+      prominence: auto
+      height: auto
+      test_inverted: true
     hr_window_s: 15.0
+    mean_rr_window_s: 15.0
     hrv_window_s: 60.0
-    hrv_step_s: 1.0
+    hrv_step_s: 2.0
+    min_beats_hr: 5
     min_beats_hrv: 20
+    min_valid_hr_percent: 50.0
+    min_valid_hrv_percent: 30.0
+    debug_plot:
+      enabled: true
+      windows:
+        - [35, 45]
+        - [50, 60]
+        - [65, 75]
+      auto_window_s: 10
+      overview_window_s: 40
+      save_overview: true
+      also_auto_window: true
+      max_plots_per_subject: 5
 
   resample:
     fs_hz: 1.0
