@@ -126,6 +126,12 @@ class TemporalCouplingCrossCorrelationConfig:
     lag_max_s: float
     lag_step_s: float
     n_permutations: int = 0
+    detrend: bool = False
+    rolling_detrend_window_s: float | None = None
+    edge_margin_s: float = 5.0
+    min_peak_distance_s: float | None = None
+    peak_prominence: str | float = "auto"
+    peak_height: str | float = "auto"
 
 
 @dataclass(frozen=True)
@@ -383,6 +389,12 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
                 lag_max_s=lag_max_s,
                 lag_step_s=lag_step_s,
                 n_permutations=int(_get(xcorr_raw, "n_permutations", 0)),
+                detrend=bool(_get(xcorr_raw, "detrend", False)),
+                rolling_detrend_window_s=_as_optional_float(xcorr_raw.get("rolling_detrend_window_s")),
+                edge_margin_s=float(_get(xcorr_raw, "edge_margin_s", 5.0)),
+                min_peak_distance_s=_as_optional_float(xcorr_raw.get("min_peak_distance_s")),
+                peak_prominence=xcorr_raw.get("peak_prominence", "auto"),
+                peak_height=xcorr_raw.get("peak_height", "auto"),
             ),
             events=TemporalCouplingEventsConfig(
                 enabled=bool(_get(events_raw, "enabled", False)),

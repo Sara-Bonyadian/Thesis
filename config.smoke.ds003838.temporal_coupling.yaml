@@ -105,6 +105,13 @@ temporal_coupling:
     lag_max_s: 60
     lag_step_s: 5
     n_permutations: 0
+    detrend: false
+    rolling_detrend_window_s: null
+    edge_margin_s: 0
+    # scipy.find_peaks on signed r (positive peaks), same style as cardiac detection
+    min_peak_distance_s: 10
+    peak_prominence: auto
+    peak_height: auto
 
   events:
     enabled: false
