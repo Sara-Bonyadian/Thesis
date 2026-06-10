@@ -118,6 +118,7 @@ class TemporalCouplingCardiacConfig:
 class TemporalCouplingResampleConfig:
     fs_hz: float
     z_score: bool = True
+    interpolate_max_gap_s: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -376,6 +377,7 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
             resample=TemporalCouplingResampleConfig(
                 fs_hz=fs_hz,
                 z_score=bool(_get(resample_raw, "z_score", True)),
+                interpolate_max_gap_s=float(_get(resample_raw, "interpolate_max_gap_s", 5.0)),
             ),
             cross_correlation=TemporalCouplingCrossCorrelationConfig(
                 lag_max_s=lag_max_s,

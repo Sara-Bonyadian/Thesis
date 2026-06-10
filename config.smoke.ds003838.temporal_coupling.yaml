@@ -99,6 +99,7 @@ temporal_coupling:
   resample:
     fs_hz: 1.0
     z_score: true
+    interpolate_max_gap_s: 5
 
   cross_correlation:
     lag_max_s: 60
