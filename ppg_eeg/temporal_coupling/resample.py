@@ -10,12 +10,13 @@ import numpy as np
 import pandas as pd
 
 from ..output_layout import safe_subject_dir_name
-from .cardiac_timeseries import CARDIAC_FILENAME
+from .cardiac_timeseries import CARDIAC_FILENAME, QC_GROUP_FILENAME as CARDIAC_QC_FILENAME
 from .config import TemporalCouplingConfig
-from .data_audit import audit_output_path
-from .eeg_envelope import ENVELOPE_FILENAME, UsableObservation
+from .data_audit import audit_output_path, group_output_dir, recommended_max_lag_s
+from .eeg_envelope import ENVELOPE_FILENAME, QC_GROUP_FILENAME as EEG_QC_FILENAME, UsableObservation
 
 ALIGNED_FILENAME = "features_temporal_aligned.csv"
+QC_GROUP_FILENAME = "alignment_qc.csv"
 
 EEG_ENVELOPE_COLUMNS = ("theta_env", "alpha_env", "beta_env")
 CARDIAC_COLUMNS = ("hr", "rmssd", "sdnn", "mean_rr")
@@ -37,6 +38,46 @@ class OverlapRange:
     end_s: float
 
 
+@dataclass(frozen=True)
+class AlignmentQcRecord:
+    subject_id: str
+    observation_id: str
+    aligned_start_s: float
+    aligned_end_s: float
+    aligned_duration_s: float
+    n_rows: int
+    fs_hz: float
+    missing_percent_hr: float
+    missing_percent_rmssd: float
+    missing_percent_sdnn: float
+    missing_percent_theta: float
+    missing_percent_alpha: float
+    missing_percent_beta: float
+    recommended_xcorr_lag_s: float
+    usable_for_xcorr: bool
+    warning: str
+
+    def to_row(self) -> dict[str, object]:
+        return {
+            "subject_id": self.subject_id,
+            "observation_id": self.observation_id,
+            "aligned_start_s": self.aligned_start_s,
+            "aligned_end_s": self.aligned_end_s,
+            "aligned_duration_s": self.aligned_duration_s,
+            "n_rows": self.n_rows,
+            "fs_hz": self.fs_hz,
+            "missing_percent_hr": self.missing_percent_hr,
+            "missing_percent_rmssd": self.missing_percent_rmssd,
+            "missing_percent_sdnn": self.missing_percent_sdnn,
+            "missing_percent_theta": self.missing_percent_theta,
+            "missing_percent_alpha": self.missing_percent_alpha,
+            "missing_percent_beta": self.missing_percent_beta,
+            "recommended_xcorr_lag_s": self.recommended_xcorr_lag_s,
+            "usable_for_xcorr": self.usable_for_xcorr,
+            "warning": self.warning,
+        }
+
+
 def subject_output_dir(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
     return Path(cfg.paths.out_root) / cfg.dataset_id / safe_subject_dir_name(subject_id)
 
@@ -51,6 +92,157 @@ def envelope_input_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
 
 def cardiac_input_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
     return subject_output_dir(cfg, subject_id) / CARDIAC_FILENAME
+
+
+def alignment_qc_group_path(cfg: TemporalCouplingConfig) -> Path:
+    return group_output_dir(cfg) / QC_GROUP_FILENAME
+
+
+def _missing_percent(series: pd.Series) -> float:
+    if series.empty:
+        return 100.0
+    return float(100.0 * series.isna().mean())
+
+
+def _load_upstream_qc_flags(cfg: TemporalCouplingConfig) -> dict[str, tuple[bool | None, bool | None]]:
+    """Map observation_id -> (usable_for_hr, usable_eeg_envelope)."""
+    group_dir = group_output_dir(cfg)
+    flags: dict[str, tuple[bool | None, bool | None]] = {}
+
+    cardiac_path = group_dir / CARDIAC_QC_FILENAME
+    if cardiac_path.is_file():
+        cardiac_df = pd.read_csv(cardiac_path)
+        for row in cardiac_df.itertuples(index=False):
+            obs_id = str(row.observation_id)
+            usable_hr = bool(row.usable_for_hr) if hasattr(row, "usable_for_hr") else None
+            prev = flags.get(obs_id, (None, None))
+            flags[obs_id] = (usable_hr, prev[1])
+
+    eeg_path = group_dir / EEG_QC_FILENAME
+    if eeg_path.is_file():
+        eeg_df = pd.read_csv(eeg_path)
+        for row in eeg_df.itertuples(index=False):
+            obs_id = str(row.observation_id)
+            usable_eeg = bool(row.usable_eeg_envelope) if hasattr(row, "usable_eeg_envelope") else None
+            prev = flags.get(obs_id, (None, None))
+            flags[obs_id] = (prev[0], usable_eeg)
+
+    return flags
+
+
+def build_alignment_qc(
+    obs: UsableObservation,
+    aligned_df: pd.DataFrame,
+    overlap: OverlapRange,
+    cfg: TemporalCouplingConfig,
+    *,
+    upstream_usable_for_hr: bool | None = None,
+    upstream_usable_eeg_envelope: bool | None = None,
+) -> AlignmentQcRecord:
+    resample_cfg = cfg.temporal_coupling.resample
+    cardiac_cfg = cfg.temporal_coupling.cardiac
+    audit_cfg = cfg.temporal_coupling.audit
+    lag_max_s = cfg.temporal_coupling.cross_correlation.lag_max_s
+
+    aligned_start_s = float(overlap.start_s)
+    aligned_end_s = float(overlap.end_s)
+    aligned_duration_s = max(0.0, aligned_end_s - aligned_start_s)
+    n_rows = len(aligned_df)
+    fs_hz = float(resample_cfg.fs_hz)
+
+    missing_hr = _missing_percent(aligned_df["hr"])
+    missing_rmssd = _missing_percent(aligned_df["rmssd"])
+    missing_sdnn = _missing_percent(aligned_df["sdnn"])
+    missing_theta = _missing_percent(aligned_df["theta_env"])
+    missing_alpha = _missing_percent(aligned_df["alpha_env"])
+    missing_beta = _missing_percent(aligned_df["beta_env"])
+
+    recommended_lag = recommended_max_lag_s(
+        overlap_duration_s=aligned_duration_s,
+        requested_lag_max_s=lag_max_s,
+    )
+
+    warnings_out: list[str] = []
+    if aligned_duration_s < audit_cfg.min_overlap_s:
+        warnings_out.append(
+            f"short_aligned_duration ({aligned_duration_s:.1f}s < {audit_cfg.min_overlap_s:.1f}s)"
+        )
+    if recommended_lag <= 0:
+        warnings_out.append("no_recommended_xcorr_lag")
+    if missing_hr > 100.0 - cardiac_cfg.min_valid_hr_percent:
+        warnings_out.append("high_missing_hr")
+    if missing_rmssd > 100.0 - cardiac_cfg.min_valid_hrv_percent:
+        warnings_out.append("high_missing_rmssd")
+    if missing_sdnn > 100.0 - cardiac_cfg.min_valid_hrv_percent:
+        warnings_out.append("high_missing_sdnn")
+    for band, pct in (
+        ("theta", missing_theta),
+        ("alpha", missing_alpha),
+        ("beta", missing_beta),
+    ):
+        if pct > 0:
+            warnings_out.append(f"high_missing_{band}")
+
+    if upstream_usable_for_hr is False:
+        warnings_out.append("upstream_not_usable_for_hr")
+    if upstream_usable_eeg_envelope is False:
+        warnings_out.append("upstream_not_usable_eeg_envelope")
+
+    if resample_cfg.z_score:
+        for z_col in ("hr_z", "rmssd_z", "sdnn_z", "theta_env_z", "alpha_env_z", "beta_env_z"):
+            if z_col not in aligned_df.columns:
+                continue
+            finite = aligned_df[z_col].dropna()
+            if finite.size < 2:
+                warnings_out.append(f"insufficient_finite_{z_col}")
+            elif float(finite.std(ddof=0)) <= 0:
+                warnings_out.append(f"flat_{z_col}")
+
+    usable = (
+        aligned_duration_s >= audit_cfg.min_overlap_s
+        and recommended_lag > 0
+        and missing_hr <= 100.0 - cardiac_cfg.min_valid_hr_percent
+        and missing_rmssd <= 100.0 - cardiac_cfg.min_valid_hrv_percent
+        and missing_sdnn <= 100.0 - cardiac_cfg.min_valid_hrv_percent
+        and missing_theta == 0.0
+        and missing_alpha == 0.0
+        and missing_beta == 0.0
+        and n_rows >= 10
+        and (upstream_usable_for_hr is not False)
+        and (upstream_usable_eeg_envelope is not False)
+        and not any(w.startswith("insufficient_finite_") or w.startswith("flat_") for w in warnings_out)
+    )
+
+    return AlignmentQcRecord(
+        subject_id=obs.subject_id,
+        observation_id=obs.observation_id,
+        aligned_start_s=aligned_start_s,
+        aligned_end_s=aligned_end_s,
+        aligned_duration_s=aligned_duration_s,
+        n_rows=n_rows,
+        fs_hz=fs_hz,
+        missing_percent_hr=missing_hr,
+        missing_percent_rmssd=missing_rmssd,
+        missing_percent_sdnn=missing_sdnn,
+        missing_percent_theta=missing_theta,
+        missing_percent_alpha=missing_alpha,
+        missing_percent_beta=missing_beta,
+        recommended_xcorr_lag_s=recommended_lag,
+        usable_for_xcorr=usable,
+        warning=";".join(dict.fromkeys(warnings_out)),
+    )
+
+
+def _print_alignment_qc_summary(qc: AlignmentQcRecord) -> None:
+    print(
+        f"[temporal_coupling]   QC {qc.subject_id}: "
+        f"aligned={qc.aligned_start_s:.1f}-{qc.aligned_end_s:.1f}s "
+        f"rows={qc.n_rows} missing_hr={qc.missing_percent_hr:.1f}% "
+        f"missing_rmssd={qc.missing_percent_rmssd:.1f}% "
+        f"lag={qc.recommended_xcorr_lag_s:.0f}s usable_for_xcorr={qc.usable_for_xcorr}"
+    )
+    if qc.warning:
+        warnings.warn(f"[temporal_coupling]   {qc.subject_id} alignment QC warning: {qc.warning}", stacklevel=2)
 
 
 def overlap_time_range(eeg_df: pd.DataFrame, cardiac_df: pd.DataFrame) -> OverlapRange:
@@ -239,6 +431,8 @@ def run_stage1c(cfg: TemporalCouplingConfig) -> list[Path]:
         return []
 
     written: list[Path] = []
+    qc_records: list[AlignmentQcRecord] = []
+    upstream_flags = _load_upstream_qc_flags(cfg)
     n_ok = 0
 
     for obs in observations:
@@ -265,23 +459,41 @@ def run_stage1c(cfg: TemporalCouplingConfig) -> list[Path]:
             eeg_df = pd.read_csv(eeg_path)
             cardiac_df = pd.read_csv(cardiac_path)
             aligned_df = align_observation(eeg_df, cardiac_df, cfg)
+            overlap = overlap_time_range(eeg_df, cardiac_df)
+            upstream_hr, upstream_eeg = upstream_flags.get(obs.observation_id, (None, None))
+            qc = build_alignment_qc(
+                obs,
+                aligned_df,
+                overlap,
+                cfg,
+                upstream_usable_for_hr=upstream_hr,
+                upstream_usable_eeg_envelope=upstream_eeg,
+            )
+            qc_records.append(qc)
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             aligned_df.to_csv(out_path, index=False)
             written.append(out_path)
             n_ok += 1
 
-            overlap = overlap_time_range(eeg_df, cardiac_df)
             print(
                 f"[temporal_coupling] stage=1c {obs.subject_id} task={obs.task}: "
                 f"overlap={overlap.start_s:.1f}-{overlap.end_s:.1f}s rows={len(aligned_df)} "
-                f"fs={cfg.temporal_coupling.resample.fs_hz:g}Hz -> {out_path}"
+                f"fs={cfg.temporal_coupling.resample.fs_hz:g}Hz usable_for_xcorr={qc.usable_for_xcorr} "
+                f"-> {out_path}"
             )
+            _print_alignment_qc_summary(qc)
         except Exception as exc:
             warnings.warn(
                 f"[temporal_coupling] stage=1c skipping {obs.subject_id} task={obs.task}: {exc}",
                 stacklevel=2,
             )
+
+    if qc_records:
+        qc_path = alignment_qc_group_path(cfg)
+        qc_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([record.to_row() for record in qc_records]).to_csv(qc_path, index=False)
+        print(f"[temporal_coupling] stage=1c wrote group QC -> {qc_path}")
 
     print(f"[temporal_coupling] stage=1c summary: wrote={n_ok}/{len(observations)}")
     return written
