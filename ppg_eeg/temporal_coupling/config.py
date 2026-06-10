@@ -53,6 +53,7 @@ class TemporalCouplingEegSectionConfig:
     bands: TemporalCouplingEegBandsConfig
     envelope_smooth_s: float
     rois: TemporalCouplingEegRoiConfig
+    envelope_output_fs_hz: float | None = None
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,7 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
                     beta=_as_band_limits(_get(bands_raw, "beta", [13.0, 30.0]), name="beta"),
                 ),
                 envelope_smooth_s=float(_get(eeg_tc_raw, "envelope_smooth_s", 2.0)),
+                envelope_output_fs_hz=_as_optional_float(eeg_tc_raw.get("envelope_output_fs_hz")),
                 rois=TemporalCouplingEegRoiConfig(
                     theta=_as_roi_channels(_get(rois_raw, "theta", []), name="theta"),
                     alpha=_as_roi_channels(_get(rois_raw, "alpha", []), name="alpha"),

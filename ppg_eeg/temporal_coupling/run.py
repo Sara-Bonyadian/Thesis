@@ -6,6 +6,8 @@ from pathlib import Path
 
 from ..datasets import CanonicalObservation, build_observations
 from .config import TemporalCouplingConfig
+from .data_audit import run_stage0_audit
+from .eeg_envelope import run_stage1a
 
 
 @dataclass(frozen=True)
@@ -100,14 +102,24 @@ def resolve_observations(cfg: TemporalCouplingConfig) -> ResolvedObservations:
     )
 
 
-def _run_stage_placeholder(
+def _run_stage(
     stage: str,
     cfg: TemporalCouplingConfig,
     resolved: ResolvedObservations,
 ) -> None:
+    if stage == "0":
+        run_stage0_audit(cfg)
+        return
+    if stage == "1a":
+        run_stage1a(cfg)
+        return
+
     n_obs = len(resolved.observations)
     print(f"[temporal_coupling] stage={stage} (skeleton — no computation yet)")
-    print(f"[temporal_coupling] dataset={cfg.dataset_id} observations={n_obs} skipped_subjects={len(resolved.skipped_subjects)}")
+    print(
+        f"[temporal_coupling] dataset={cfg.dataset_id} observations={n_obs} "
+        f"skipped_subjects={len(resolved.skipped_subjects)}"
+    )
     if n_obs == 0:
         print("[temporal_coupling] no usable observations; stage skipped safely.")
 
@@ -128,9 +140,11 @@ def run_temporal_coupling(cfg: TemporalCouplingConfig, *, stage: str) -> None:
         print("[temporal_coupling] usable subjects (0): none")
 
     for step in _stages_to_run(stage):
-        _run_stage_placeholder(step, cfg, resolved)
+        _run_stage(step, cfg, resolved)
 
     if stage == "all":
-        print("[temporal_coupling] completed all stages (skeleton).")
+        print("[temporal_coupling] completed all requested stages.")
+    elif stage in {"0", "1a"}:
+        print(f"[temporal_coupling] completed stage={stage!r}.")
     else:
         print(f"[temporal_coupling] completed stage={stage!r} (skeleton).")

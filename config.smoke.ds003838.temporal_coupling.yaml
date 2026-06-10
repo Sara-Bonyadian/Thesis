@@ -48,6 +48,7 @@ temporal_coupling:
       alpha: [8.0, 13.0]
       beta: [13.0, 30.0]
     envelope_smooth_s: 2.0
+    envelope_output_fs_hz: 10
     rois:
       theta: [Fz, FCz, Cz]
       alpha: [Pz, POz, Oz]
