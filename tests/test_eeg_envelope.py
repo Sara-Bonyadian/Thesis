@@ -55,7 +55,14 @@ class TestEegEnvelope(unittest.TestCase):
             "alpha": np.cos(2.0 * np.pi * 0.5 * time_s),
             "beta": np.sin(2.0 * np.pi * 1.0 * time_s),
         }
-        result = BandEnvelopeResult(time_s=time_s, envelopes=envelopes, warnings=())
+        result = BandEnvelopeResult(
+            time_s=time_s,
+            envelopes=envelopes,
+            roi_channels_used={"theta": ("Fz",), "alpha": ("Pz",), "beta": ("Fz",)},
+            warnings=(),
+            sfreq=sfreq,
+            duration_s=duration_s,
+        )
 
         downsampled = downsample_envelope_result(result, output_fs_hz=10.0)
         step = float(np.median(np.diff(downsampled.time_s)))

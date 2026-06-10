@@ -53,6 +53,17 @@ temporal_coupling:
       theta: [Fz, FCz, Cz]
       alpha: [Pz, POz, Oz]
       beta: [Fz, FCz, Cz]
+    debug_plot:
+      enabled: true
+      start_time_s: 40
+      end_time_s: 60
+      auto_window_s: 20
+      also_auto_window: true
+      save_psd: true
+      channels:
+        theta: Fz
+        alpha: Pz
+        beta: Fz
 
   cardiac:
     # auto: score all cardiac-like channels (PPG + ECG) and both polarities; pick best coverage.

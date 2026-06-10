@@ -37,40 +37,86 @@ We do this **separately for each person**, then combine results at the group lev
 
 ---
 
+## Implementation Status
+
+| Stage | Description | Status |
+|-------|-------------|--------|
+| **0** | Data audit (preflight) | ✅ Done |
+| **1a** | EEG Hilbert envelopes + QC plots | ✅ Done |
+| **1b** | Cardiac HR/HRV time series + peak-detection QC | ✅ Done |
+| **1c** | Merge, resample, z-score → aligned CSV | ⏳ Not yet |
+| **2** | Lagged cross-correlation | ⏳ Not yet |
+| **3** | Group summary | ⏳ Not yet |
+| **4** | Event-triggered analysis | ⏳ Not yet |
+
+Smoke-tested on **ds003838 rest** (sub-033, sub-036, sub-038).
+
+---
+
 ## Pipeline Stages (Plain English)
 
-### Stage 0 — Data audit (preflight)
+### Stage 0 — Data audit (preflight) ✅
 
-Check each observation has enough continuous EEG + PPG overlap and beats before processing.
+Check each observation has enough continuous EEG + cardiac overlap before processing.
+
+**Output:** `group/data_audit.csv` — durations, sfreq, `usable`, `recommended_max_lag_s`.
 
 ---
 
 ### Stage 1 — Temporal feature extraction (three CSVs)
 
-**Goal:** Turn raw signals into aligned, comparable time series. This is one stage that writes **three files** per subject×observation (like Phase 1 Stage 1 writes base CSVs).
+**Goal:** Turn raw signals into aligned, comparable time series. This is one stage that writes **three files** per subject×observation.
 
-| Step | What | Output file |
-|------|------|-------------|
-| 1a | Raw EEG → Hilbert band envelopes (theta/alpha/beta) | `features_temporal_eeg_envelope.csv` |
-| 1b | Raw PPG/ECG → HR + sliding-window RMSSD/SDNN | `features_temporal_cardiac.csv` |
-| 1c | Merge, resample to 2 Hz, z-score within subject | `features_temporal_aligned.csv` |
+| Step | What | Output file | Status |
+|------|------|-------------|--------|
+| 1a | Raw EEG → Hilbert band envelopes (theta/alpha/beta) | `features_temporal_eeg_envelope.csv` | ✅ |
+| 1b | Raw ECG/PPG → HR + sliding-window RMSSD/SDNN | `features_temporal_cardiac.csv` | ✅ |
+| 1c | Merge, resample, z-score within subject | `features_temporal_aligned.csv` | ⏳ |
 
-**`features_temporal_aligned.csv` columns (z-scored):**
+Stages 2–4 will read `features_temporal_aligned.csv` — no raw I/O needed to rerun analysis.
+
+#### Stage 1a QC (implemented)
+
+Per subject:
+
+- `eeg_envelope_debug_user_window.png` — raw / filtered / envelope panels (theta, alpha, beta)
+- `eeg_envelope_debug_auto_window.png` — auto-selected representative window
+- `eeg_envelope_timeseries.png` — full-recording ROI-averaged envelopes
+- `eeg_psd_debug.png` — optional PSD with band regions shaded
+
+Group: `group/eeg_envelope_qc.csv`
+
+Envelopes are downsampled before write (smoke: **10 Hz**) to keep CSVs small.
+
+#### Stage 1b QC (implemented)
+
+Per subject:
+
+- `cardiac_channel_inventory.csv`, `cardiac_channel_preview.png`
+- `peak_detector_comparison.csv` — simple vs `ecg_rpeak` vs `ppg_peak`
+- `detected_peaks.csv`
+- `cardiac_peak_detection_debug_10s_user_window.png`
+- `cardiac_peak_detection_debug_10s_auto_window.png`
+- `cardiac_peak_detection_debug_40s_overview.png`
+
+Group: `group/cardiac_qc.csv`
+
+Auto mode selects channel, detector, and polarity by quality score. ECG uses **5–30 Hz bandpass + prominence-based R-peak detection**.
+
+**`features_temporal_aligned.csv` columns (planned, z-scored):**
 
 `dataset_id | subject_id | observation_id | time_s | hr_z | rmssd_z | sdnn_z | mean_rr_z | theta_env_z | alpha_env_z | beta_env_z`
 
-Stages 2–4 read only this file — no raw I/O needed to rerun analysis.
-
 ---
 
-### Stage 2 — Lagged cross-correlation (per subject)
+### Stage 2 — Lagged cross-correlation (per subject) ⏳
 
 **Goal:** For each brain–heart pair, find the best time alignment.
 
 For each pair (e.g. HR ↔ theta envelope):
-1. Compute correlation at lags up to **±recommended_max_lag_s** (typically ±60 s for 4-min recordings, not ±300 s).
+1. Compute correlation at lags up to **±recommended_max_lag_s** (typically ±60 s for 4-min recordings).
 2. Record peak signed r, peak lag, and direction.
-3. **Permutation check:** circularly shift one signal many times; compare observed peak |r| to null — avoids false peaks from searching many lags.
+3. **Permutation check:** circularly shift one signal many times; compare observed peak |r| to null.
 
 **Lag sign cheat sheet:**
 
@@ -82,25 +128,17 @@ For each pair (e.g. HR ↔ theta envelope):
 
 ---
 
-### Stage 3 — Group summary
+### Stage 3 — Group summary ⏳
 
 **Goal:** See if patterns repeat across people.
 
-Collect one row per subject per pair:
-
-| subject | pair | peak_r | peak_lag_s |
-|---------|------|--------|------------|
-| sub-001 | HR-Theta | … | … |
-
-Then test:
-- Is peak correlation consistently ≠ 0?
-- Is peak lag consistently positive or negative?
+Collect one row per subject per pair, then test whether peak correlation and peak lag are consistently non-zero.
 
 **Deliverables:** mean cross-correlation curves, histograms of peak lags and peak r values.
 
 ---
 
-### Stage 4 — Event-triggered analysis
+### Stage 4 — Event-triggered analysis ⏳
 
 **Goal:** Zoom in on dramatic moments.
 
@@ -111,8 +149,6 @@ Then test:
 **Brain-led events (on z-scored envelopes):**
 - Theta burst / alpha suppression / beta burst (±2 SD for ≥ 2 s).
 - Average HR trajectory in ±60 s epochs.
-
-This often gives a clearer picture than correlation alone.
 
 ---
 
@@ -128,17 +164,24 @@ flowchart TD
     raw1 --> stage1 --> stage2 --> xsub
   end
 
-  subgraph phase2 ["Phase 2 (this project)"]
+  subgraph phase2 ["Phase 2 (in progress)"]
     raw2["Raw EEG + PPG/ECG"]
-    stage1tc["Stage 1: 3 temporal CSVs"]
-    xcorr["Stage 2: Lagged xcorr"]
-    events["Stage 4: Event averages"]
-    group["Stage 3+4: Group plots"]
-    raw2 --> stage1tc --> xcorr --> group
-    stage1tc --> events --> group
+    s0["Stage 0 audit"]
+    s1a["Stage 1a EEG envelopes"]
+    s1b["Stage 1b cardiac series"]
+    s1c["Stage 1c align + z-score"]
+    xcorr["Stage 2 xcorr"]
+    events["Stage 4 events"]
+    group["Stage 3+4 group"]
+    raw2 --> s0 --> s1a
+    s0 --> s1b
+    s1a --> s1c
+    s1b --> s1c
+    s1c --> xcorr --> group
+    s1c --> events --> group
   end
 
-  stage1 -.->|"observation index only"| stage1tc
+  stage1 -.->|"observation index only"| s0
 ```
 
 | Phase | Question | Unit of analysis |
@@ -151,49 +194,92 @@ flowchart TD
 ## Directory Layout
 
 ```
-temporal_coupling/          ← you are here (docs + plan)
+temporal_coupling/          ← you are here (docs)
   README.md                 ← ELI10 overview (this file)
   IMPLEMENTATION_PLAN.md    ← technical build plan
 
-config.run.ds003838.temporal_coupling.yaml   ← run config (repo root)
+config.smoke.ds003838.temporal_coupling.yaml   ← 3-subject smoke test
+config.run.ds003838.temporal_coupling.yaml    ← full-dataset run config
 
-ppg_eeg/temporal_coupling/  ← Python module (to be implemented)
-  ...
+ppg_eeg/temporal_coupling/  ← Python module
+  __main__.py               ← CLI entry
+  config.py
+  run.py
+  data_audit.py             ← Stage 0
+  eeg_envelope.py           ← Stage 1a
+  cardiac_common.py         ← shared peak/IBI helpers
+  cardiac_detectors.py      ← ECG R-peak / PPG detectors
+  cardiac_timeseries.py     ← Stage 1b
+  resample.py               ← Stage 1c (planned)
+  cross_correlation.py      ← Stage 2 (planned)
+  group_summary.py          ← Stage 3 (planned)
+  events.py                 ← Stage 4 (planned)
 
-derivatives/run_ds003838_temporal_coupling/  ← outputs (gitignored)
+derivatives/smoke_ds003838_temporal_coupling/  ← smoke outputs
   ds003838/
-    sub-001/
+    sub-033/
       features_temporal_eeg_envelope.csv
       features_temporal_cardiac.csv
-      features_temporal_aligned.csv
-      cross_correlation_peaks.csv
+      detected_peaks.csv
+      eeg_envelope_debug_*.png
+      eeg_envelope_timeseries.png
+      cardiac_peak_detection_debug_*.png
       ...
     group/
-      mean_xcorr_curves.png
-      peak_lag_distribution.png
-      event_triggered_hr_increase.png
-      summary_table.csv
+      data_audit.csv
+      eeg_envelope_qc.csv
+      cardiac_qc.csv
 ```
 
 ---
 
-## Running (once implemented)
+## Running
 
 ```bash
-# Start with ds003838 (same raw data as Phase 1)
-python -m ppg_eeg.temporal_coupling --config config.run.ds003838.temporal_coupling.yaml
+# Smoke test (3 subjects, ds003838 rest)
+python -m ppg_eeg.temporal_coupling \
+  --config config.smoke.ds003838.temporal_coupling.yaml \
+  --stage 0
+
+python -m ppg_eeg.temporal_coupling \
+  --config config.smoke.ds003838.temporal_coupling.yaml \
+  --stage 1a
+
+python -m ppg_eeg.temporal_coupling \
+  --config config.smoke.ds003838.temporal_coupling.yaml \
+  --stage 1b
+
+# Full dataset (once Stage 1c+ are implemented)
+python -m ppg_eeg.temporal_coupling \
+  --config config.run.ds003838.temporal_coupling.yaml \
+  --stage all
 ```
 
-Outputs land under `derivatives/run_ds003838_temporal_coupling/`.
+**Valid `--stage` values:** `0`, `1`, `1a`, `1b`, `1c`, `2`, `3`, `4`, `all`
+
+Stage `1` runs 1a + 1b + 1c together (1c not yet available).
+
+---
+
+## Smoke Test Results (ds003838 rest)
+
+| Subject | EEG usable | Cardiac channel | Detector | Median HR | Usable HR/HRV |
+|---------|------------|-----------------|----------|-----------|---------------|
+| sub-033 | yes | ECG (inverted) | ecg_rpeak | 79 bpm | yes / yes |
+| sub-036 | yes | ECG (normal) | ecg_rpeak | 78 bpm | yes / yes |
+| sub-038 | yes | ECG (normal) | ecg_rpeak | 71 bpm | yes / yes |
+
+EEG envelopes: 0% NaNs, non-flat; FCz missing from montage (Fz+Cz used for theta/beta).
 
 ---
 
 ## Key Deliverables (per dataset)
 
-- [ ] Mean cross-correlation curves across subjects
-- [ ] Distribution of peak lags
-- [ ] Distribution of peak correlation strengths
-- [ ] Event-triggered average plots (HR-led and brain-led)
-- [ ] Summary table: theta leads HR? HR leads theta? alpha suppression with HR spikes? beta tracks autonomic activation?
+- [ ] `features_temporal_aligned.csv` (Stage 1c)
+- [ ] Mean cross-correlation curves across subjects (Stage 3)
+- [ ] Distribution of peak lags (Stage 3)
+- [ ] Distribution of peak correlation strengths (Stage 3)
+- [ ] Event-triggered average plots — HR-led and brain-led (Stage 4)
+- [ ] Summary table: theta leads HR? HR leads theta? alpha suppression with HR spikes?
 
-See [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) for module breakdown, parameters, and build order.
+See [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) for module breakdown, parameters, QC file schemas, and build order.

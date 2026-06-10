@@ -49,11 +49,30 @@ class TemporalCouplingEegRoiConfig:
 
 
 @dataclass(frozen=True)
+class TemporalCouplingEegDebugPlotChannelsConfig:
+    theta: str = "Fz"
+    alpha: str = "Pz"
+    beta: str = "Fz"
+
+
+@dataclass(frozen=True)
+class TemporalCouplingEegDebugPlotConfig:
+    enabled: bool = False
+    start_time_s: float | None = None
+    end_time_s: float | None = None
+    auto_window_s: float = 20.0
+    also_auto_window: bool = True
+    save_psd: bool = False
+    channels: TemporalCouplingEegDebugPlotChannelsConfig = TemporalCouplingEegDebugPlotChannelsConfig()
+
+
+@dataclass(frozen=True)
 class TemporalCouplingEegSectionConfig:
     bands: TemporalCouplingEegBandsConfig
     envelope_smooth_s: float
     rois: TemporalCouplingEegRoiConfig
     envelope_output_fs_hz: float | None = None
+    debug_plot: TemporalCouplingEegDebugPlotConfig = TemporalCouplingEegDebugPlotConfig()
 
 
 @dataclass(frozen=True)
@@ -242,6 +261,8 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
 
     audit_raw = tc_raw.get("audit") or {}
     eeg_tc_raw = tc_raw.get("eeg") or {}
+    eeg_debug_raw = eeg_tc_raw.get("debug_plot") or {}
+    eeg_debug_channels_raw = eeg_debug_raw.get("channels") or {}
     cardiac_raw = tc_raw.get("cardiac") or {}
     ecg_raw = cardiac_raw.get("ecg") or {}
     debug_plot_raw = cardiac_raw.get("debug_plot") or {}
@@ -303,6 +324,19 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
                     theta=_as_roi_channels(_get(rois_raw, "theta", []), name="theta"),
                     alpha=_as_roi_channels(_get(rois_raw, "alpha", []), name="alpha"),
                     beta=_as_roi_channels(_get(rois_raw, "beta", []), name="beta"),
+                ),
+                debug_plot=TemporalCouplingEegDebugPlotConfig(
+                    enabled=bool(_get(eeg_debug_raw, "enabled", False)),
+                    start_time_s=_as_optional_float(eeg_debug_raw.get("start_time_s")),
+                    end_time_s=_as_optional_float(eeg_debug_raw.get("end_time_s")),
+                    auto_window_s=float(_get(eeg_debug_raw, "auto_window_s", 20.0)),
+                    also_auto_window=bool(_get(eeg_debug_raw, "also_auto_window", True)),
+                    save_psd=bool(_get(eeg_debug_raw, "save_psd", False)),
+                    channels=TemporalCouplingEegDebugPlotChannelsConfig(
+                        theta=str(_get(eeg_debug_channels_raw, "theta", "Fz")),
+                        alpha=str(_get(eeg_debug_channels_raw, "alpha", "Pz")),
+                        beta=str(_get(eeg_debug_channels_raw, "beta", "Fz")),
+                    ),
                 ),
             ),
             cardiac=TemporalCouplingCardiacConfig(
