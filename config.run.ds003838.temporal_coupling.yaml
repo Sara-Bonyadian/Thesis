@@ -1,0 +1,73 @@
+# Temporal EEG–cardiac coupling analysis for ds003838.
+# See temporal_coupling/README.md and IMPLEMENTATION_PLAN.md.
+
+dataset_ids:
+  - ds003838
+dataset_id: ds003838
+
+paths:
+  raw_root: ./data/raw/ds003838
+  out_root: ./derivatives/run_ds003838_temporal_coupling
+  # Reuse Phase 1 base tables (IBI peaks) when available.
+  base_root: ./derivatives/run_ds003838_fast
+
+subjects: []
+tasks:
+  - rest
+  - memory
+conditions:
+  - rest
+  - memory
+sessions:
+  - single
+
+eeg:
+  l_freq: 1.0
+  h_freq: 60.0
+  bad_channel_variance_z: 3.0
+  reference: average
+
+ppg:
+  # null = use full EEG/ECG overlap; set explicit window to match Phase 1.
+  start_time_s: null
+  end_time_s: null
+  peak_min_distance_s: 0.4
+  peak_height: 0.3
+  ibi_min_ms: 400.0
+  ibi_max_ms: 1200.0
+
+temporal_coupling:
+  eeg:
+    bands:
+      theta: [4.0, 8.0]
+      alpha: [8.0, 13.0]
+      beta: [13.0, 30.0]
+    envelope_smooth_s: 2.0
+    channels:
+      theta: frontal_midline
+      alpha: global_mean
+      beta: global_mean
+
+  cardiac:
+    hr_window_s: 20.0
+    hrv_window_s: 60.0
+    hrv_step_s: 1.0
+
+  resample:
+    fs_hz: 2.0
+    z_score: true
+
+  cross_correlation:
+    lag_min_s: -300
+    lag_max_s: 300
+    lag_step_s: auto
+
+  events:
+    hr_percentile: 10
+    eeg_threshold_sd: 2.0
+    epoch_pre_s: 300
+    epoch_post_s: 300
+
+  output:
+    save_curves: true
+    save_plots: true
