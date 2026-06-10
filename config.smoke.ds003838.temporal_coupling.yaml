@@ -1,0 +1,80 @@
+# Smoke config for temporal EEG–cardiac coupling (ds003838 rest).
+# See temporal_coupling/README.md and IMPLEMENTATION_PLAN.md.
+
+dataset_id: ds003838
+
+paths:
+  raw_root: ./data/raw/ds003838
+  out_root: ./derivatives/smoke_ds003838_temporal_coupling
+  base_root: ./derivatives/run_ds003838_fast
+
+subjects:
+  - sub-033
+  - sub-036
+  - sub-038
+
+tasks:
+  - rest
+
+conditions:
+  - rest
+
+sessions:
+  - single
+
+eeg:
+  l_freq: 1.0
+  h_freq: 60.0
+  bad_channel_variance_z: 3.0
+  reference: average
+
+ppg:
+  # null = use full EEG/ECG overlap
+  start_time_s: null
+  end_time_s: null
+  peak_min_distance_s: 0.4
+  peak_height: 0.3
+  ibi_min_ms: 400.0
+  ibi_max_ms: 1200.0
+
+temporal_coupling:
+  audit:
+    min_overlap_s: 120
+    min_clean_beats: 30
+
+  eeg:
+    bands:
+      theta: [4.0, 8.0]
+      alpha: [8.0, 13.0]
+      beta: [13.0, 30.0]
+    envelope_smooth_s: 2.0
+    rois:
+      theta: [Fz, FCz, Cz]
+      alpha: [Pz, POz, Oz]
+      beta: [Fz, FCz, Cz]
+
+  cardiac:
+    hr_window_s: 15.0
+    hrv_window_s: 60.0
+    hrv_step_s: 1.0
+    min_beats_hrv: 20
+
+  resample:
+    fs_hz: 1.0
+    z_score: true
+
+  cross_correlation:
+    lag_max_s: 60
+    lag_step_s: 5
+    n_permutations: 0
+
+  events:
+    enabled: false
+    hr_percentile: 10
+    eeg_threshold_sd: 2.0
+    epoch_pre_s: 60
+    epoch_post_s: 60
+
+  output:
+    save_curves: true
+    save_plots: true
