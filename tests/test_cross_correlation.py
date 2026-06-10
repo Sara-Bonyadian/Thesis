@@ -159,9 +159,9 @@ class TestCrossCorrelation(unittest.TestCase):
             self.assertGreaterEqual(peak["raw_peak_abs_r"], 0.0)
             self.assertLessEqual(peak["raw_peak_abs_r"], 1.0)
             self.assertIn("preferred_peak_source", peak)
-            self.assertEqual(peak["peak_lag_s"], peak["preferred_peak_lag_s"])
-            self.assertEqual(peak["peak_signed_r"], peak["preferred_peak_signed_r"])
-            self.assertEqual(peak["peak_abs_r"], peak["preferred_peak_abs_r"])
+            self.assertEqual(peak["peak_lag_s"], peak["raw_peak_lag_s"])
+            self.assertEqual(peak["peak_signed_r"], peak["raw_peak_signed_r"])
+            self.assertEqual(peak["peak_abs_r"], peak["raw_peak_abs_r"])
             self.assertEqual(peak["peak_at_lag_edge"], peak["raw_peak_at_edge"])
 
         xcorr_cfg = cfg.temporal_coupling.cross_correlation
