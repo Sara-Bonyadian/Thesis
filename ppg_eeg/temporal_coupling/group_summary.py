@@ -1,0 +1,1091 @@
+"""Stage 3: group-level summary of cross-correlation peaks and mean curves."""
+
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+import numpy as np
+import pandas as pd
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
+
+from .config import TemporalCouplingConfig
+from .cross_correlation import (
+    CARDIAC_LABELS,
+    CARDIAC_VARS,
+    EEG_LABELS,
+    EEG_VARS,
+    group_curves_output_path,
+    group_peaks_output_path,
+    variable_pairs,
+)
+from .data_audit import group_output_dir
+
+PEAK_SUMMARY_FILENAME = "peak_correlation_summary.csv"
+SUMMARY_FILENAME = "group_cross_correlation_summary.csv"
+MEAN_CURVES_FILENAME = "mean_cross_correlation_curves.csv"
+MEAN_SEM_GRID_PLOT = "group_cross_correlation_mean_sem_grid.png"
+PEAK_HEATMAP_PLOT = "group_peak_summary_heatmap.png"
+EDGE_HEATMAP_PLOT = "group_edge_peak_rate_heatmap.png"
+PEAK_LAG_DIST_PLOT = "peak_lag_distribution.png"
+PEAK_R_DIST_PLOT = "peak_r_distribution.png"
+INTERPRETATION_NOTES_FILENAME = "stage3_interpretation_notes.txt"
+
+STAGE3_OUTPUT_FILENAMES = (
+    PEAK_SUMMARY_FILENAME,
+    SUMMARY_FILENAME,
+    MEAN_CURVES_FILENAME,
+    INTERPRETATION_NOTES_FILENAME,
+    MEAN_SEM_GRID_PLOT,
+    PEAK_HEATMAP_PLOT,
+    EDGE_HEATMAP_PLOT,
+    PEAK_LAG_DIST_PLOT,
+    PEAK_R_DIST_PLOT,
+)
+
+AUTO_NORMALITY_ALPHA = 0.05
+FDR_ALPHA = 0.05
+FDR_METHOD = "fdr_bh"
+MIN_N_FORMAL = 5
+HIGH_EDGE_PEAK_RATE_PERCENT = 50.0
+
+WEAK_COUPLING_THRESHOLD = 0.1
+MODERATE_COUPLING_THRESHOLD = 0.3
+
+PEAK_SUMMARY_COLUMNS = (
+    "pair",
+    "cardiac_var",
+    "eeg_var",
+    "n_subjects",
+    "median_raw_peak_lag_s",
+    "mean_raw_peak_lag_s",
+    "sem_raw_peak_lag_s",
+    "median_raw_peak_signed_r",
+    "mean_raw_peak_signed_r",
+    "sem_raw_peak_signed_r",
+    "median_raw_peak_abs_r",
+    "mean_raw_peak_abs_r",
+    "n_negative_lag_peaks",
+    "n_positive_lag_peaks",
+    "test_peak_signed_r_method",
+    "test_peak_signed_r_p",
+    "test_peak_lag_method",
+    "test_peak_lag_p",
+    "q_value_peak_signed_r",
+    "q_value_peak_lag",
+    "sig_peak_signed_r_fdr",
+    "sig_peak_lag_fdr",
+    "n_edge_peaks",
+    "percent_edge_peaks",
+    "median_p_perm",
+    "n_with_p_perm",
+    "warning",
+)
+
+SUMMARY_COLUMNS = (
+    "pair",
+    "cardiac_var",
+    "eeg_var",
+    "n_subjects",
+    "median_raw_peak_lag_s",
+    "mean_raw_peak_lag_s",
+    "mean_raw_peak_signed_r",
+    "median_raw_peak_abs_r",
+    "mean_raw_peak_abs_r",
+    "likely_direction",
+    "coupling_strength",
+    "median_lag_s",
+    "q_value_peak_signed_r",
+    "q_value_peak_lag",
+    "sig_peak_signed_r_fdr",
+    "sig_peak_lag_fdr",
+    "n_edge_peaks",
+    "percent_edge_peaks",
+    "warning",
+)
+
+MEAN_CURVES_COLUMNS = (
+    "pair",
+    "lag_s",
+    "mean_r",
+    "sem_r",
+    "n_subjects",
+    "total_subjects",
+    "in_common_lag_range",
+)
+
+
+def peak_summary_output_path(cfg: TemporalCouplingConfig) -> Path:
+    return group_output_dir(cfg) / PEAK_SUMMARY_FILENAME
+
+
+def summary_output_path(cfg: TemporalCouplingConfig) -> Path:
+    return group_output_dir(cfg) / SUMMARY_FILENAME
+
+
+def mean_curves_output_path(cfg: TemporalCouplingConfig) -> Path:
+    return group_output_dir(cfg) / MEAN_CURVES_FILENAME
+
+
+def interpretation_notes_output_path(cfg: TemporalCouplingConfig) -> Path:
+    return group_output_dir(cfg) / INTERPRETATION_NOTES_FILENAME
+
+
+def stage3_output_paths(cfg: TemporalCouplingConfig) -> list[Path]:
+    group_dir = group_output_dir(cfg)
+    return [group_dir / name for name in STAGE3_OUTPUT_FILENAMES]
+
+
+def clear_stage3_outputs(cfg: TemporalCouplingConfig) -> list[Path]:
+    removed: list[Path] = []
+    for path in stage3_output_paths(cfg):
+        if path.is_file():
+            path.unlink()
+            removed.append(path)
+    return removed
+
+
+def _validate_stage3_inputs(peaks_df: pd.DataFrame, curves_df: pd.DataFrame | None) -> int:
+    n_subjects = int(peaks_df["subject_id"].nunique()) if not peaks_df.empty else 0
+    n_peak_rows = len(peaks_df)
+    expected_rows = n_subjects * len(variable_pairs())
+    if n_peak_rows != expected_rows:
+        raise ValueError(
+            f"Stage 3 input peaks rows={n_peak_rows}, expected {expected_rows} "
+            f"({n_subjects} subjects × {len(variable_pairs())} pairs)."
+        )
+    if curves_df is not None:
+        curve_subjects = int(curves_df["subject_id"].nunique())
+        if curve_subjects != n_subjects:
+            raise ValueError(
+                f"Stage 3 input mismatch: peaks subjects={n_subjects}, "
+                f"curves subjects={curve_subjects}."
+            )
+    return n_subjects
+
+
+def _validate_stage3_outputs(
+    cfg: TemporalCouplingConfig,
+    *,
+    expected_subjects: int,
+) -> None:
+    peak_summary = pd.read_csv(peak_summary_output_path(cfg))
+    group_summary = pd.read_csv(summary_output_path(cfg))
+    notes_path = interpretation_notes_output_path(cfg)
+    notes_text = notes_path.read_text(encoding="utf-8")
+
+    if len(peak_summary) != len(variable_pairs()):
+        raise ValueError(
+            f"peak_correlation_summary.csv rows={len(peak_summary)}, "
+            f"expected {len(variable_pairs())}."
+        )
+    if not (peak_summary["n_subjects"] == expected_subjects).all():
+        bad = peak_summary.loc[peak_summary["n_subjects"] != expected_subjects, "pair"].tolist()
+        raise ValueError(f"peak_correlation_summary.csv has unexpected n_subjects for pairs: {bad}")
+    if not (group_summary["n_subjects"] == expected_subjects).all():
+        bad = group_summary.loc[group_summary["n_subjects"] != expected_subjects, "pair"].tolist()
+        raise ValueError(
+            f"group_cross_correlation_summary.csv has unexpected n_subjects for pairs: {bad}"
+        )
+    if f"n_subjects_in_peaks: {expected_subjects}" not in notes_text:
+        raise ValueError(
+            f"stage3_interpretation_notes.txt missing n_subjects_in_peaks: {expected_subjects}."
+        )
+
+    mean_curves_path = mean_curves_output_path(cfg)
+    if mean_curves_path.is_file():
+        mean_curves = pd.read_csv(mean_curves_path)
+        if int(mean_curves["total_subjects"].max()) != expected_subjects:
+            raise ValueError(
+                "mean_cross_correlation_curves.csv total_subjects does not match input cohort."
+            )
+
+
+def _shapiro_pvalue(values: np.ndarray) -> float:
+    if values.size < 3:
+        return float("nan")
+    try:
+        return float(stats.shapiro(values).pvalue)
+    except Exception:
+        return float("nan")
+
+
+def _test_vs_zero(
+    values: np.ndarray,
+    *,
+    prefer_wilcoxon: bool,
+) -> tuple[str, float]:
+    finite = values[np.isfinite(values)]
+    n = finite.size
+    if n == 0:
+        return "insufficient_data", float("nan")
+    if n == 1:
+        return "exploratory_n1", float("nan")
+
+    if prefer_wilcoxon:
+        method = "wilcoxon"
+    else:
+        shapiro_p = _shapiro_pvalue(finite)
+        method = "ttest_1samp" if np.isfinite(shapiro_p) and shapiro_p > AUTO_NORMALITY_ALPHA else "wilcoxon"
+
+    try:
+        if method == "ttest_1samp":
+            result = stats.ttest_1samp(finite, popmean=0.0, nan_policy="omit")
+            return method, float(result.pvalue)
+        result = stats.wilcoxon(finite, alternative="two-sided")
+        return method, float(result.pvalue)
+    except Exception:
+        return method, float("nan")
+
+
+def _apply_bh_fdr(p_values: list[float]) -> list[float]:
+    if not p_values:
+        return []
+    arr = np.asarray(p_values, dtype=float)
+    valid = np.isfinite(arr)
+    q_values = np.full(arr.shape, np.nan, dtype=float)
+    if valid.sum() == 0:
+        return q_values.tolist()
+    _, qvals, _, _ = multipletests(arr[valid], alpha=FDR_ALPHA, method=FDR_METHOD)
+    q_values[valid] = qvals
+    return q_values.tolist()
+
+
+def _coupling_strength(median_abs_r: float) -> str:
+    if not np.isfinite(median_abs_r):
+        return "unknown"
+    if median_abs_r < WEAK_COUPLING_THRESHOLD:
+        return "weak"
+    if median_abs_r < MODERATE_COUPLING_THRESHOLD:
+        return "moderate"
+    return "strong"
+
+
+def _likely_direction(median_lag_s: float, *, lag_step_s: float) -> str:
+    if not np.isfinite(median_lag_s):
+        return "unknown"
+    threshold = lag_step_s / 2.0
+    if abs(median_lag_s) <= threshold:
+        return "near_zero_shared"
+    if median_lag_s < 0:
+        return "eeg_leads"
+    return "cardiac_leads"
+
+
+def _direction_label(direction: str) -> str:
+    return {
+        "eeg_leads": "EEG leads",
+        "cardiac_leads": "cardiac leads",
+        "near_zero_shared": "near-zero/shared timing",
+        "unknown": "unknown",
+    }.get(direction, direction)
+
+
+def _pair_warnings(
+    *,
+    n_subjects: int,
+    n_negative: int,
+    n_positive: int,
+    n_edge: int,
+    lag_step_s: float,
+    n_permutations: int,
+) -> str:
+    warnings_out: list[str] = []
+    if n_subjects < 3:
+        warnings_out.append("few_subjects")
+    if n_subjects < MIN_N_FORMAL:
+        warnings_out.append("exploratory_small_n")
+
+    if n_subjects > 0 and (100.0 * n_edge / n_subjects) > HIGH_EDGE_PEAK_RATE_PERCENT:
+        warnings_out.append("high_edge_peak_rate")
+
+    threshold = lag_step_s / 2.0
+    if n_negative > 0 and n_positive > 0:
+        warnings_out.append("mixed_peak_lag_direction")
+
+    if n_permutations == 0:
+        warnings_out.append("no_permutation_test")
+
+    return ";".join(dict.fromkeys(warnings_out))
+
+
+def _sem(values: pd.Series) -> float:
+    finite = values.astype(float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size < 2:
+        return float("nan")
+    return float(finite.std(ddof=1) / np.sqrt(finite.size))
+
+
+def _load_peaks(cfg: TemporalCouplingConfig) -> pd.DataFrame:
+    peaks_path = group_peaks_output_path(cfg)
+    if not peaks_path.is_file():
+        raise FileNotFoundError(
+            f"Missing {peaks_path.name}. Run --stage 2 first to write group peak results."
+        )
+    peaks_df = pd.read_csv(peaks_path)
+    if peaks_df.empty:
+        warnings.warn(
+            "[temporal_coupling] stage=3: peak table is empty; summary will contain NaNs.",
+            stacklevel=2,
+        )
+    return peaks_df
+
+
+def _load_curves(cfg: TemporalCouplingConfig) -> pd.DataFrame | None:
+    curves_path = group_curves_output_path(cfg)
+    if not curves_path.is_file():
+        return None
+    curves_df = pd.read_csv(curves_path)
+    if curves_df.empty:
+        return None
+    return curves_df
+
+
+def build_peak_correlation_summary(
+    peaks_df: pd.DataFrame,
+    cfg: TemporalCouplingConfig,
+) -> list[dict[str, object]]:
+    lag_step_s = cfg.temporal_coupling.cross_correlation.lag_step_s
+    n_permutations = cfg.temporal_coupling.cross_correlation.n_permutations
+    threshold = lag_step_s / 2.0
+    summary_rows: list[dict[str, object]] = []
+
+    for pair in variable_pairs():
+        pair_rows = peaks_df.loc[peaks_df["pair"] == pair.pair].copy()
+        n_subjects = len(pair_rows)
+
+        if n_subjects:
+            lags = pair_rows["raw_peak_lag_s"].astype(float)
+            signed_r = pair_rows["raw_peak_signed_r"].astype(float)
+            abs_r = pair_rows["raw_peak_abs_r"].astype(float)
+            p_perm = pair_rows["p_perm"].astype(float) if "p_perm" in pair_rows.columns else pd.Series(dtype=float)
+            median_raw_peak_lag_s = float(lags.median())
+            mean_raw_peak_lag_s = float(lags.mean())
+            sem_raw_peak_lag_s = _sem(lags)
+            median_raw_peak_signed_r = float(signed_r.median())
+            mean_raw_peak_signed_r = float(signed_r.mean())
+            sem_raw_peak_signed_r = _sem(signed_r)
+            median_raw_peak_abs_r = float(abs_r.median())
+            mean_raw_peak_abs_r = float(abs_r.mean())
+            n_negative = int((lags < -threshold).sum())
+            n_positive = int((lags > threshold).sum())
+            n_edge = int(pair_rows["raw_peak_at_edge"].astype(bool).sum())
+            percent_edge = float(100.0 * n_edge / n_subjects)
+            finite_p_perm = p_perm[np.isfinite(p_perm)]
+            median_p_perm = float(finite_p_perm.median()) if finite_p_perm.size else float("nan")
+            n_with_p_perm = int(finite_p_perm.size)
+            signed_r_values = signed_r.to_numpy(dtype=float)
+            lag_values = lags.to_numpy(dtype=float)
+        else:
+            median_raw_peak_lag_s = float("nan")
+            mean_raw_peak_lag_s = float("nan")
+            sem_raw_peak_lag_s = float("nan")
+            median_raw_peak_signed_r = float("nan")
+            mean_raw_peak_signed_r = float("nan")
+            sem_raw_peak_signed_r = float("nan")
+            median_raw_peak_abs_r = float("nan")
+            mean_raw_peak_abs_r = float("nan")
+            n_negative = 0
+            n_positive = 0
+            n_edge = 0
+            percent_edge = float("nan")
+            median_p_perm = float("nan")
+            n_with_p_perm = 0
+            signed_r_values = np.array([], dtype=float)
+            lag_values = np.array([], dtype=float)
+
+        signed_r_method, signed_r_p = _test_vs_zero(signed_r_values, prefer_wilcoxon=False)
+        lag_method, lag_p = _test_vs_zero(lag_values, prefer_wilcoxon=True)
+
+        summary_rows.append(
+            {
+                "pair": pair.pair,
+                "cardiac_var": pair.cardiac_var,
+                "eeg_var": pair.eeg_var,
+                "n_subjects": n_subjects,
+                "median_raw_peak_lag_s": median_raw_peak_lag_s,
+                "mean_raw_peak_lag_s": mean_raw_peak_lag_s,
+                "sem_raw_peak_lag_s": sem_raw_peak_lag_s,
+                "median_raw_peak_signed_r": median_raw_peak_signed_r,
+                "mean_raw_peak_signed_r": mean_raw_peak_signed_r,
+                "sem_raw_peak_signed_r": sem_raw_peak_signed_r,
+                "median_raw_peak_abs_r": median_raw_peak_abs_r,
+                "mean_raw_peak_abs_r": mean_raw_peak_abs_r,
+                "n_negative_lag_peaks": n_negative,
+                "n_positive_lag_peaks": n_positive,
+                "test_peak_signed_r_method": signed_r_method,
+                "test_peak_signed_r_p": signed_r_p,
+                "test_peak_lag_method": lag_method,
+                "test_peak_lag_p": lag_p,
+                "q_value_peak_signed_r": float("nan"),
+                "q_value_peak_lag": float("nan"),
+                "sig_peak_signed_r_fdr": False,
+                "sig_peak_lag_fdr": False,
+                "n_edge_peaks": n_edge,
+                "percent_edge_peaks": percent_edge,
+                "median_p_perm": median_p_perm,
+                "n_with_p_perm": n_with_p_perm,
+                "warning": _pair_warnings(
+                    n_subjects=n_subjects,
+                    n_negative=n_negative,
+                    n_positive=n_positive,
+                    n_edge=n_edge,
+                    lag_step_s=lag_step_s,
+                    n_permutations=n_permutations,
+                ),
+            }
+        )
+
+    signed_r_q = _apply_bh_fdr([float(row["test_peak_signed_r_p"]) for row in summary_rows])
+    lag_q = _apply_bh_fdr([float(row["test_peak_lag_p"]) for row in summary_rows])
+    for idx, row in enumerate(summary_rows):
+        row["q_value_peak_signed_r"] = signed_r_q[idx]
+        row["q_value_peak_lag"] = lag_q[idx]
+        row["sig_peak_signed_r_fdr"] = bool(
+            np.isfinite(signed_r_q[idx]) and signed_r_q[idx] <= FDR_ALPHA
+        )
+        row["sig_peak_lag_fdr"] = bool(np.isfinite(lag_q[idx]) and lag_q[idx] <= FDR_ALPHA)
+
+    return summary_rows
+
+
+def build_group_interpretation_summary(
+    peak_summary_rows: list[dict[str, object]],
+    *,
+    lag_step_s: float,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for peak in peak_summary_rows:
+        median_lag = float(peak["median_raw_peak_lag_s"])
+        median_abs_r = float(peak["median_raw_peak_abs_r"])
+        rows.append(
+            {
+                "pair": peak["pair"],
+                "cardiac_var": peak["cardiac_var"],
+                "eeg_var": peak["eeg_var"],
+                "n_subjects": peak["n_subjects"],
+                "median_raw_peak_lag_s": median_lag,
+                "mean_raw_peak_lag_s": peak["mean_raw_peak_lag_s"],
+                "mean_raw_peak_signed_r": peak["mean_raw_peak_signed_r"],
+                "median_raw_peak_abs_r": median_abs_r,
+                "mean_raw_peak_abs_r": peak["mean_raw_peak_abs_r"],
+                "likely_direction": _likely_direction(median_lag, lag_step_s=lag_step_s),
+                "coupling_strength": _coupling_strength(median_abs_r),
+                "median_lag_s": median_lag,
+                "q_value_peak_signed_r": peak["q_value_peak_signed_r"],
+                "q_value_peak_lag": peak["q_value_peak_lag"],
+                "sig_peak_signed_r_fdr": peak["sig_peak_signed_r_fdr"],
+                "sig_peak_lag_fdr": peak["sig_peak_lag_fdr"],
+                "n_edge_peaks": peak["n_edge_peaks"],
+                "percent_edge_peaks": peak["percent_edge_peaks"],
+                "warning": peak["warning"],
+            }
+        )
+    return rows
+
+
+def _total_subjects(curves_df: pd.DataFrame) -> int:
+    return int(curves_df["subject_id"].nunique())
+
+
+def _common_lag_bounds(curves_df: pd.DataFrame, *, pair: str) -> tuple[float, float] | None:
+    pair_curves = curves_df.loc[curves_df["pair"] == pair]
+    if pair_curves.empty:
+        return None
+    total = int(pair_curves["subject_id"].nunique())
+    lag_counts = pair_curves.groupby("lag_s")["subject_id"].nunique()
+    common_lags = lag_counts[lag_counts == total].index.astype(float)
+    if common_lags.empty:
+        return None
+    return float(common_lags.min()), float(common_lags.max())
+
+
+def _global_common_lag_bounds(curves_df: pd.DataFrame) -> tuple[float, float] | None:
+    bounds: list[tuple[float, float]] = []
+    for pair in variable_pairs():
+        pair_bounds = _common_lag_bounds(curves_df, pair=pair.pair)
+        if pair_bounds is not None:
+            bounds.append(pair_bounds)
+    if not bounds:
+        return None
+    return max(lo for lo, _ in bounds), min(hi for _, hi in bounds)
+
+
+def build_mean_curves(curves_df: pd.DataFrame) -> pd.DataFrame:
+    total_subjects = _total_subjects(curves_df)
+    rows: list[dict[str, object]] = []
+    for pair in variable_pairs():
+        pair_curves = curves_df.loc[curves_df["pair"] == pair.pair]
+        if pair_curves.empty:
+            continue
+        pair_bounds = _common_lag_bounds(curves_df, pair=pair.pair)
+        grouped = pair_curves.groupby("lag_s", as_index=False)
+        for lag_s, lag_rows in grouped:
+            values = lag_rows["r"].astype(float)
+            finite = values[np.isfinite(values)]
+            n_subjects = int(finite.size)
+            mean_r = float(finite.mean()) if n_subjects else float("nan")
+            sem_r = float(finite.std(ddof=1) / np.sqrt(n_subjects)) if n_subjects > 1 else float("nan")
+            in_common = False
+            if pair_bounds is not None:
+                in_common = pair_bounds[0] <= float(lag_s) <= pair_bounds[1] and n_subjects == total_subjects
+            rows.append(
+                {
+                    "pair": pair.pair,
+                    "lag_s": float(lag_s),
+                    "mean_r": mean_r,
+                    "sem_r": sem_r,
+                    "n_subjects": n_subjects,
+                    "total_subjects": total_subjects,
+                    "in_common_lag_range": in_common,
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=list(MEAN_CURVES_COLUMNS))
+    return pd.DataFrame(rows).sort_values(["pair", "lag_s"]).reset_index(drop=True)
+
+
+def _curve_plot_frame(
+    mean_curves_df: pd.DataFrame,
+    *,
+    pair: str,
+    plot_common_lag_only: bool,
+) -> pd.DataFrame:
+    pair_df = mean_curves_df.loc[mean_curves_df["pair"] == pair].sort_values("lag_s")
+    if pair_df.empty:
+        return pair_df
+    if plot_common_lag_only:
+        return pair_df.loc[pair_df["in_common_lag_range"]].copy()
+    return pair_df.copy()
+
+
+def _shade_partial_n_regions(
+    ax: plt.Axes,
+    pair_df: pd.DataFrame,
+    *,
+    lag_step_s: float,
+) -> None:
+    if pair_df.empty:
+        return
+    total = int(pair_df["total_subjects"].iloc[0])
+    partial = pair_df.loc[pair_df["n_subjects"] < total].sort_values("lag_s")
+    if partial.empty:
+        return
+    half_step = lag_step_s / 2.0
+    for lag_s in partial["lag_s"].astype(float):
+        ax.axvspan(lag_s - half_step, lag_s + half_step, color="0.85", alpha=0.55, zorder=0)
+
+
+def _plot_mean_sem_grid(
+    mean_curves_df: pd.DataFrame,
+    output_path: Path,
+    *,
+    plot_common_lag_only: bool,
+    lag_step_s: float,
+    global_common_bounds: tuple[float, float] | None,
+) -> None:
+    fig, axes = plt.subplots(3, 3, figsize=(14, 10), sharex=False, sharey=True)
+    pairs = variable_pairs()
+    mode_note = (
+        f"common lag range [{global_common_bounds[0]:g}, {global_common_bounds[1]:g}] s"
+        if plot_common_lag_only and global_common_bounds is not None
+        else "partial-n lags shaded gray"
+    )
+
+    for idx, pair in enumerate(pairs):
+        row = idx // 3
+        col = idx % 3
+        ax = axes[row, col]
+        full_pair_df = mean_curves_df.loc[mean_curves_df["pair"] == pair.pair].sort_values("lag_s")
+        plot_df = _curve_plot_frame(
+            mean_curves_df,
+            pair=pair.pair,
+            plot_common_lag_only=plot_common_lag_only,
+        )
+
+        if plot_df.empty:
+            ax.set_title(f"{pair.pair}\n(no plottable curve data)")
+            ax.axvline(0.0, color="0.7", linewidth=0.8, linestyle="--")
+            continue
+
+        if not plot_common_lag_only:
+            _shade_partial_n_regions(ax, full_pair_df, lag_step_s=lag_step_s)
+
+        x = plot_df["lag_s"].to_numpy(dtype=float)
+        y = plot_df["mean_r"].to_numpy(dtype=float)
+        sem = plot_df["sem_r"].to_numpy(dtype=float)
+        n_subjects = plot_df["n_subjects"].astype(int)
+        ax.plot(x, y, color="#1f77b4", linewidth=1.8, zorder=3)
+        sem_finite = np.isfinite(sem)
+        if sem_finite.any():
+            ax.fill_between(
+                x,
+                y - sem,
+                y + sem,
+                where=sem_finite,
+                color="#1f77b4",
+                alpha=0.25,
+                linewidth=0,
+                zorder=2,
+            )
+
+        min_n = int(n_subjects.min())
+        max_n = int(n_subjects.max())
+        total_n = int(plot_df["total_subjects"].iloc[0])
+        n_note = f"n={total_n}" if min_n == max_n == total_n else f"n={min_n}-{max_n}/{total_n}"
+        ax.set_title(f"{pair.pair}\n{n_note}", fontsize=9)
+        ax.axvline(0.0, color="0.7", linewidth=0.8, linestyle="--", zorder=1)
+
+        if plot_common_lag_only and global_common_bounds is not None:
+            ax.set_xlim(global_common_bounds[0], global_common_bounds[1])
+
+        if col == 0:
+            ax.set_ylabel(f"{CARDIAC_LABELS[row]}\nr")
+        if row == 2:
+            ax.set_xlabel("Lag (s)")
+
+    handles = [
+        Line2D([0], [0], color="#1f77b4", linewidth=1.8, label="mean r"),
+        Line2D([0], [0], color="#1f77b4", alpha=0.25, linewidth=6, label="± SEM"),
+        Line2D([0], [0], color="0.7", linestyle="--", linewidth=0.8, label="lag 0"),
+    ]
+    if not plot_common_lag_only:
+        handles.append(Patch(facecolor="0.85", edgecolor="none", alpha=0.55, label="n < all subjects"))
+    fig.legend(handles=handles, loc="upper center", ncol=len(handles), fontsize=9, frameon=False)
+    fig.suptitle(f"Group mean cross-correlation curves (± SEM)\n{mode_note}", fontsize=12, y=0.99)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+
+
+def _pair_matrix_indices() -> dict[str, tuple[int, int]]:
+    cardiac_idx = {name: idx for idx, name in enumerate(CARDIAC_VARS)}
+    eeg_idx = {name: idx for idx, name in enumerate(EEG_VARS)}
+    return {
+        pair.pair: (cardiac_idx[pair.cardiac_var], eeg_idx[pair.eeg_var])
+        for pair in variable_pairs()
+    }
+
+
+def _plot_peak_summary_heatmap(
+    peak_summary_rows: list[dict[str, object]],
+    output_path: Path,
+) -> None:
+    matrix_shape = (len(CARDIAC_VARS), len(EEG_VARS))
+    signed_r = np.full(matrix_shape, np.nan)
+    lag_s = np.full(matrix_shape, np.nan)
+    edge_flag = np.full(matrix_shape, False, dtype=bool)
+    indices = _pair_matrix_indices()
+
+    for row in peak_summary_rows:
+        idx = indices[str(row["pair"])]
+        signed_r[idx] = float(row["median_raw_peak_signed_r"])
+        lag_s[idx] = float(row["median_raw_peak_lag_s"])
+        edge_flag[idx] = bool(
+            np.isfinite(float(row["percent_edge_peaks"]))
+            and float(row["percent_edge_peaks"]) > HIGH_EDGE_PEAK_RATE_PERCENT
+        )
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    for ax, values, title, cmap, fmt in (
+        (axes[0], signed_r, "Median raw peak signed r", "RdBu_r", "{:+.2f}"),
+        (axes[1], lag_s, "Median raw peak lag (s)", "coolwarm", "{:.0f}"),
+    ):
+        masked = np.ma.array(values, mask=~np.isfinite(values))
+        im = ax.imshow(masked, cmap=cmap, aspect="auto")
+        ax.set_xticks(range(len(EEG_LABELS)))
+        ax.set_xticklabels(EEG_LABELS)
+        ax.set_yticks(range(len(CARDIAC_LABELS)))
+        ax.set_yticklabels(CARDIAC_LABELS)
+        ax.set_title(title)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        for (row_i, col_j), value in np.ndenumerate(values):
+            if not np.isfinite(value):
+                continue
+            marker = "*" if edge_flag[row_i, col_j] else ""
+            ax.text(
+                col_j,
+                row_i,
+                fmt.format(value) + marker,
+                ha="center",
+                va="center",
+                color="black" if abs(value) < 0.35 else "white",
+                fontsize=9,
+            )
+
+    fig.suptitle("* = >50% raw peaks at lag edge", fontsize=10, y=1.02)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_edge_peak_rate_heatmap(
+    peak_summary_rows: list[dict[str, object]],
+    output_path: Path,
+) -> None:
+    matrix_shape = (len(CARDIAC_VARS), len(EEG_VARS))
+    edge_pct = np.full(matrix_shape, np.nan)
+    indices = _pair_matrix_indices()
+
+    for row in peak_summary_rows:
+        idx = indices[str(row["pair"])]
+        edge_pct[idx] = float(row["percent_edge_peaks"])
+
+    fig, ax = plt.subplots(figsize=(5.5, 4.5))
+    masked = np.ma.array(edge_pct, mask=~np.isfinite(edge_pct))
+    im = ax.imshow(masked, cmap="YlOrRd", aspect="auto", vmin=0, vmax=100)
+    ax.set_xticks(range(len(EEG_LABELS)))
+    ax.set_xticklabels(EEG_LABELS)
+    ax.set_yticks(range(len(CARDIAC_LABELS)))
+    ax.set_yticklabels(CARDIAC_LABELS)
+    ax.set_title("Percent raw peaks at lag edge by pair")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="% edge peaks")
+    for (row_i, col_j), value in np.ndenumerate(edge_pct):
+        if not np.isfinite(value):
+            continue
+        suffix = "*" if value > HIGH_EDGE_PEAK_RATE_PERCENT else ""
+        ax.text(col_j, row_i, f"{value:.0f}{suffix}", ha="center", va="center", fontsize=9)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_peak_lag_distribution(peaks_df: pd.DataFrame, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(12, 5))
+    pairs = [pair.pair for pair in variable_pairs()]
+    x_positions = {pair: idx for idx, pair in enumerate(pairs)}
+
+    for row in peaks_df.itertuples(index=False):
+        is_edge = bool(getattr(row, "raw_peak_at_edge", False))
+        ax.scatter(
+            x_positions[str(row.pair)],
+            float(row.raw_peak_lag_s),
+            color="#d62728" if is_edge else "#1f77b4",
+            marker="X" if is_edge else "o",
+            s=70 if is_edge else 50,
+            linewidths=0.8,
+            zorder=3 if is_edge else 2,
+        )
+
+    ax.axhline(0.0, color="0.5", linewidth=0.8)
+    ax.set_xticks(range(len(pairs)))
+    ax.set_xticklabels(pairs, rotation=45, ha="right")
+    ax.set_ylabel("Raw peak lag (s)")
+    ax.set_title("Group raw peak lag distribution by pair")
+    ax.legend(
+        handles=[
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor="#1f77b4",
+                markersize=8,
+                label="raw peak lag (non-edge)",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="X",
+                color="#d62728",
+                linestyle="None",
+                markersize=9,
+                label="raw peak at lag edge",
+            ),
+        ],
+        loc="best",
+        fontsize=9,
+    )
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+
+
+def _plot_peak_r_distribution(peaks_df: pd.DataFrame, output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(12, 5))
+    pairs = [pair.pair for pair in variable_pairs()]
+    x_positions = {pair: idx for idx, pair in enumerate(pairs)}
+
+    for row in peaks_df.itertuples(index=False):
+        is_edge = bool(getattr(row, "raw_peak_at_edge", False))
+        ax.scatter(
+            x_positions[str(row.pair)],
+            float(row.raw_peak_signed_r),
+            color="#d62728" if is_edge else "#1f77b4",
+            marker="X" if is_edge else "o",
+            s=70 if is_edge else 50,
+            linewidths=0.8,
+            zorder=3 if is_edge else 2,
+        )
+
+    ax.axhline(0.0, color="0.5", linewidth=0.8)
+    ax.set_xticks(range(len(pairs)))
+    ax.set_xticklabels(pairs, rotation=45, ha="right")
+    ax.set_ylabel("raw_peak_signed_r")
+    ax.set_title("Group raw peak correlation strength by pair")
+    ax.legend(
+        handles=[
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor="#1f77b4",
+                markersize=8,
+                label="raw_peak_signed_r (non-edge)",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="X",
+                color="#d62728",
+                linestyle="None",
+                markersize=9,
+                label="raw peak at lag edge",
+            ),
+        ],
+        loc="best",
+        fontsize=9,
+    )
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140)
+    plt.close(fig)
+
+
+def _format_float(value: object, *, precision: int = 1) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "nan"
+    if not np.isfinite(number):
+        return "nan"
+    return f"{number:.{precision}f}"
+
+
+def _write_interpretation_notes(
+    cfg: TemporalCouplingConfig,
+    *,
+    peak_summary_rows: list[dict[str, object]],
+    interpretation_rows: list[dict[str, object]],
+    global_common_bounds: tuple[float, float] | None,
+    total_subjects: int | None,
+    output_path: Path,
+) -> None:
+    lines: list[str] = [
+        "Stage 3 temporal coupling interpretation notes",
+        "============================================",
+        f"dataset_id: {cfg.dataset_id}",
+        f"n_subjects_in_peaks: {total_subjects if total_subjects is not None else 'unknown'}",
+        "",
+        "Plot settings",
+        f"  plot_common_lag_only: {cfg.temporal_coupling.group.plot_common_lag_only}",
+    ]
+    if global_common_bounds is not None:
+        lines.append(
+            f"  common lag range used for mean curves: "
+            f"[{global_common_bounds[0]:g}, {global_common_bounds[1]:g}] s"
+        )
+    else:
+        lines.append("  common lag range: unavailable (subjects may have non-overlapping lag grids)")
+
+    lines.extend(
+        [
+            "",
+            "Caveats",
+            "  - Negative lag means EEG leads cardiac; positive lag means cardiac leads EEG.",
+            "  - Heatmaps use median RAW peak values (not preferred/interior peaks).",
+            "  - Asterisks in heatmaps mark pairs with >50% raw peaks at the lag edge.",
+            "  - Group p/q values are exploratory when n is small or permutation nulls were not run.",
+            "  - mean_cross_correlation_curves.csv may show n_subjects < cohort size at lags",
+            "    outside the common lag range; use total_subjects and in_common_lag_range columns.",
+            "",
+            "Per-pair summary",
+        ]
+    )
+
+    for peak, interp in zip(peak_summary_rows, interpretation_rows, strict=True):
+        direction = _direction_label(str(interp["likely_direction"]))
+        exploratory = " [EXPLORATORY]" if "exploratory_small_n" in str(peak["warning"]) else ""
+        sig_r = "significant" if peak["sig_peak_signed_r_fdr"] else "not significant"
+        sig_lag = "significant" if peak["sig_peak_lag_fdr"] else "not significant"
+        lines.extend(
+            [
+                "",
+                f"{peak['pair']}{exploratory}",
+                f"  n_subjects={peak['n_subjects']}",
+                f"  median raw peak lag={_format_float(peak['median_raw_peak_lag_s'])} s",
+                f"  median raw peak signed r={_format_float(peak['median_raw_peak_signed_r'], precision=3)}",
+                f"  coupling_strength={interp['coupling_strength']}",
+                f"  likely_direction={direction}",
+                f"  edge_peaks={peak['n_edge_peaks']} ({_format_float(peak['percent_edge_peaks'], precision=0)}%)",
+                f"  peak_signed_r FDR q={_format_float(peak['q_value_peak_signed_r'], precision=3)} ({sig_r})",
+                f"  peak_lag FDR q={_format_float(peak['q_value_peak_lag'], precision=3)} ({sig_lag})",
+                f"  warnings={peak['warning'] or 'none'}",
+            ]
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _print_summary_report(interpretation_rows: list[dict[str, object]]) -> None:
+    print("[temporal_coupling] stage=3 group summary:")
+    for row in interpretation_rows:
+        direction = _direction_label(str(row["likely_direction"]))
+        exploratory = " [EXPLORATORY]" if "exploratory_small_n" in str(row["warning"]) else ""
+        sig_r = "sig" if row["sig_peak_signed_r_fdr"] else "n.s."
+        sig_lag = "sig" if row["sig_peak_lag_fdr"] else "n.s."
+        print(
+            f"[temporal_coupling]   {row['pair']}: n={row['n_subjects']} "
+            f"median_lag={_format_float(row['median_lag_s'])}s "
+            f"coupling={row['coupling_strength']} "
+            f"direction={direction}{exploratory} "
+            f"(peak_r {sig_r} q={_format_float(row['q_value_peak_signed_r'], precision=3)}, "
+            f"peak_lag {sig_lag} q={_format_float(row['q_value_peak_lag'], precision=3)})"
+        )
+        if row["warning"]:
+            print(f"[temporal_coupling]     warning: {row['warning']}")
+
+
+def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
+    lag_step_s = cfg.temporal_coupling.cross_correlation.lag_step_s
+    plot_common_lag_only = cfg.temporal_coupling.group.plot_common_lag_only
+    group_dir = group_output_dir(cfg)
+    group_dir.mkdir(parents=True, exist_ok=True)
+
+    peaks_path = group_peaks_output_path(cfg)
+    curves_path = group_curves_output_path(cfg)
+    print(f"[temporal_coupling] stage=3 reading peaks -> {peaks_path}")
+    print(f"[temporal_coupling] stage=3 reading curves -> {curves_path}")
+
+    removed = clear_stage3_outputs(cfg)
+    if removed:
+        print(
+            f"[temporal_coupling] stage=3 removed {len(removed)} prior Stage 3 outputs "
+            f"from {group_dir}"
+        )
+
+    peaks_df = _load_peaks(cfg)
+    curves_df = _load_curves(cfg)
+    n_subjects = _validate_stage3_inputs(peaks_df, curves_df)
+    print(
+        f"[temporal_coupling] stage=3 input cohort: subjects={n_subjects} "
+        f"peak_rows={len(peaks_df)} curve_rows={0 if curves_df is None else len(curves_df)}"
+    )
+
+    peak_summary_rows = build_peak_correlation_summary(peaks_df, cfg)
+    interpretation_rows = build_group_interpretation_summary(
+        peak_summary_rows,
+        lag_step_s=lag_step_s,
+    )
+
+    peak_summary_path = peak_summary_output_path(cfg)
+    pd.DataFrame(peak_summary_rows, columns=list(PEAK_SUMMARY_COLUMNS)).to_csv(
+        peak_summary_path,
+        index=False,
+    )
+    written: list[Path] = [peak_summary_path]
+    print(f"[temporal_coupling] stage=3 wrote peak summary -> {peak_summary_path}")
+
+    summary_path = summary_output_path(cfg)
+    pd.DataFrame(interpretation_rows, columns=list(SUMMARY_COLUMNS)).to_csv(summary_path, index=False)
+    written.append(summary_path)
+    print(f"[temporal_coupling] stage=3 wrote interpretation summary -> {summary_path}")
+
+    total_subjects = n_subjects
+    global_common_bounds: tuple[float, float] | None = None
+    if curves_df is not None:
+        mean_curves_df = build_mean_curves(curves_df)
+        global_common_bounds = _global_common_lag_bounds(curves_df)
+        mean_curves_path = mean_curves_output_path(cfg)
+        mean_curves_df.to_csv(mean_curves_path, index=False)
+        written.append(mean_curves_path)
+        print(
+            f"[temporal_coupling] stage=3 wrote mean curves -> {mean_curves_path} "
+            f"rows={len(mean_curves_df)}"
+        )
+        if global_common_bounds is not None:
+            print(
+                "[temporal_coupling] stage=3 common lag range for all subjects: "
+                f"[{global_common_bounds[0]:g}, {global_common_bounds[1]:g}] s"
+            )
+
+        if cfg.temporal_coupling.output.save_plots and not mean_curves_df.empty:
+            plot_path = group_dir / MEAN_SEM_GRID_PLOT
+            _plot_mean_sem_grid(
+                mean_curves_df,
+                plot_path,
+                plot_common_lag_only=plot_common_lag_only,
+                lag_step_s=lag_step_s,
+                global_common_bounds=global_common_bounds,
+            )
+            written.append(plot_path)
+            print(f"[temporal_coupling] stage=3 wrote mean SEM grid -> {plot_path}")
+    else:
+        print(
+            "[temporal_coupling] stage=3: no group curves CSV found; "
+            "skipping mean curve outputs."
+        )
+
+    if cfg.temporal_coupling.output.save_plots and peak_summary_rows:
+        heatmap_path = group_dir / PEAK_HEATMAP_PLOT
+        edge_heatmap_path = group_dir / EDGE_HEATMAP_PLOT
+        _plot_peak_summary_heatmap(peak_summary_rows, heatmap_path)
+        _plot_edge_peak_rate_heatmap(peak_summary_rows, edge_heatmap_path)
+        written.extend([heatmap_path, edge_heatmap_path])
+        print(
+            f"[temporal_coupling] stage=3 wrote heatmaps -> "
+            f"{heatmap_path.name}, {edge_heatmap_path.name}"
+        )
+
+    if cfg.temporal_coupling.output.save_plots and not peaks_df.empty:
+        lag_plot_path = group_dir / PEAK_LAG_DIST_PLOT
+        r_plot_path = group_dir / PEAK_R_DIST_PLOT
+        _plot_peak_lag_distribution(peaks_df, lag_plot_path)
+        _plot_peak_r_distribution(peaks_df, r_plot_path)
+        written.extend([lag_plot_path, r_plot_path])
+        print(
+            f"[temporal_coupling] stage=3 wrote peak distribution plots -> "
+            f"{lag_plot_path.name}, {r_plot_path.name}"
+        )
+
+    notes_path = interpretation_notes_output_path(cfg)
+    _write_interpretation_notes(
+        cfg,
+        peak_summary_rows=peak_summary_rows,
+        interpretation_rows=interpretation_rows,
+        global_common_bounds=global_common_bounds,
+        total_subjects=total_subjects,
+        output_path=notes_path,
+    )
+    written.append(notes_path)
+    print(f"[temporal_coupling] stage=3 wrote interpretation notes -> {notes_path}")
+
+    if cfg.temporal_coupling.cross_correlation.n_permutations == 0:
+        warnings.warn(
+            "[temporal_coupling] stage=3: permutation null not run (n_permutations=0). "
+            "Group p/q values are exploratory only.",
+            stacklevel=2,
+        )
+
+    _validate_stage3_outputs(cfg, expected_subjects=n_subjects)
+    print(
+        f"[temporal_coupling] stage=3 validation OK: "
+        f"{len(variable_pairs())} pair summaries, n_subjects={n_subjects} throughout"
+    )
+
+    _print_summary_report(interpretation_rows)
+    return written

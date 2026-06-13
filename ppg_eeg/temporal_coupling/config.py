@@ -150,6 +150,11 @@ class TemporalCouplingOutputConfig:
 
 
 @dataclass(frozen=True)
+class TemporalCouplingGroupConfig:
+    plot_common_lag_only: bool = True
+
+
+@dataclass(frozen=True)
 class TemporalCouplingAuditConfig:
     min_overlap_s: float = 120.0
     min_clean_beats: int = 30
@@ -164,6 +169,7 @@ class TemporalCouplingSectionConfig:
     cross_correlation: TemporalCouplingCrossCorrelationConfig
     events: TemporalCouplingEventsConfig
     output: TemporalCouplingOutputConfig
+    group: TemporalCouplingGroupConfig
 
 
 @dataclass(frozen=True)
@@ -278,6 +284,7 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
     xcorr_raw = tc_raw.get("cross_correlation") or {}
     events_raw = tc_raw.get("events") or {}
     output_raw = tc_raw.get("output") or {}
+    group_raw = tc_raw.get("group") or {}
 
     bands_raw = eeg_tc_raw.get("bands") or {}
     rois_raw = eeg_tc_raw.get("rois") or eeg_tc_raw.get("channels") or {}
@@ -406,6 +413,9 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
             output=TemporalCouplingOutputConfig(
                 save_curves=bool(_get(output_raw, "save_curves", True)),
                 save_plots=bool(_get(output_raw, "save_plots", True)),
+            ),
+            group=TemporalCouplingGroupConfig(
+                plot_common_lag_only=bool(_get(group_raw, "plot_common_lag_only", True)),
             ),
         ),
     )
