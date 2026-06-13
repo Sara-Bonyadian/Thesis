@@ -104,6 +104,15 @@ temporal_coupling:
     eeg_threshold_sd: 2.0
     epoch_pre_s: 60
     epoch_post_s: 60
+    min_event_distance_s: 10
+    min_total_events: 10
+    min_contributing_subjects: 4
+    theta_burst_method: percentile
+    theta_burst_percentile: 90
+    alpha_suppression_method: percentile
+    alpha_suppression_percentile: 10
+    beta_burst_method: percentile
+    beta_burst_percentile: 90
 
   output:
     save_curves: true

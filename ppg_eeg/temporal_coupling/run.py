@@ -9,6 +9,7 @@ from .config import TemporalCouplingConfig
 from .cardiac_timeseries import run_stage1b
 from .cross_correlation import run_stage2
 from .data_audit import run_stage0_audit
+from .events import run_stage4
 from .group_summary import run_stage3
 from .eeg_envelope import run_stage1a
 from .resample import run_stage1c
@@ -129,6 +130,9 @@ def _run_stage(
     if stage == "3":
         run_stage3(cfg)
         return
+    if stage == "4":
+        run_stage4(cfg)
+        return
 
     n_obs = len(resolved.observations)
     print(f"[temporal_coupling] stage={stage} (skeleton — no computation yet)")
@@ -160,7 +164,7 @@ def run_temporal_coupling(cfg: TemporalCouplingConfig, *, stage: str) -> None:
 
     if stage == "all":
         print("[temporal_coupling] completed all requested stages.")
-    elif stage in {"0", "1a", "1b", "1c", "1", "2", "3"}:
+    elif stage in {"0", "1a", "1b", "1c", "1", "2", "3", "4"}:
         print(f"[temporal_coupling] completed stage={stage!r}.")
     else:
         print(f"[temporal_coupling] completed stage={stage!r} (skeleton).")

@@ -137,10 +137,23 @@ class TemporalCouplingCrossCorrelationConfig:
 @dataclass(frozen=True)
 class TemporalCouplingEventsConfig:
     enabled: bool = False
-    hr_percentile: float = 10.0
-    eeg_threshold_sd: float = 2.0
+    hr_delta_window_s: float = 15.0
     epoch_pre_s: float = 60.0
     epoch_post_s: float = 60.0
+    event_percentile: float | None = None
+    hr_percentile: float = 10.0
+    eeg_event_threshold_z: float = 2.0
+    eeg_threshold_sd: float = 2.0
+    min_event_duration_s: float = 2.0
+    min_event_distance_s: float = 10.0
+    min_total_events: int = 10
+    min_contributing_subjects: int = 4
+    theta_burst_method: str = "percentile"
+    theta_burst_percentile: float = 90.0
+    alpha_suppression_method: str = "percentile"
+    alpha_suppression_percentile: float = 10.0
+    beta_burst_method: str = "percentile"
+    beta_burst_percentile: float = 90.0
 
 
 @dataclass(frozen=True)
@@ -405,10 +418,29 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
             ),
             events=TemporalCouplingEventsConfig(
                 enabled=bool(_get(events_raw, "enabled", False)),
-                hr_percentile=float(_get(events_raw, "hr_percentile", 10.0)),
-                eeg_threshold_sd=float(_get(events_raw, "eeg_threshold_sd", 2.0)),
+                hr_delta_window_s=float(_get(events_raw, "hr_delta_window_s", 15.0)),
                 epoch_pre_s=float(_get(events_raw, "epoch_pre_s", 60.0)),
                 epoch_post_s=float(_get(events_raw, "epoch_post_s", 60.0)),
+                event_percentile=_as_optional_float(events_raw.get("event_percentile")),
+                hr_percentile=float(_get(events_raw, "hr_percentile", 10.0)),
+                eeg_event_threshold_z=float(
+                    _get(
+                        events_raw,
+                        "eeg_event_threshold_z",
+                        _get(events_raw, "eeg_threshold_sd", 2.0),
+                    )
+                ),
+                eeg_threshold_sd=float(_get(events_raw, "eeg_threshold_sd", 2.0)),
+                min_event_duration_s=float(_get(events_raw, "min_event_duration_s", 2.0)),
+                min_event_distance_s=float(_get(events_raw, "min_event_distance_s", 10.0)),
+                min_total_events=int(_get(events_raw, "min_total_events", 10)),
+                min_contributing_subjects=int(_get(events_raw, "min_contributing_subjects", 4)),
+                theta_burst_method=str(_get(events_raw, "theta_burst_method", "percentile")),
+                theta_burst_percentile=float(_get(events_raw, "theta_burst_percentile", 90.0)),
+                alpha_suppression_method=str(_get(events_raw, "alpha_suppression_method", "percentile")),
+                alpha_suppression_percentile=float(_get(events_raw, "alpha_suppression_percentile", 10.0)),
+                beta_burst_method=str(_get(events_raw, "beta_burst_method", "percentile")),
+                beta_burst_percentile=float(_get(events_raw, "beta_burst_percentile", 90.0)),
             ),
             output=TemporalCouplingOutputConfig(
                 save_curves=bool(_get(output_raw, "save_curves", True)),
