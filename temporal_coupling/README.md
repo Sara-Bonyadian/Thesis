@@ -52,6 +52,7 @@ We do this **separately for each person**, then combine results at the group lev
 Validated on **ds003838 rest**:
 - Smoke: sub-033, sub-036, sub-038 (`config.smoke.ds003838.temporal_coupling.yaml`)
 - Validation: 8 subjects (`config.validation.ds003838.temporal_coupling.yaml`)
+- **Next:** full ds003838 rest cohort (`config.run.ds003838.temporal_coupling.yaml`)
 
 Stages 2–4 read `features_temporal_aligned.csv` only — no raw EEG/cardiac reload needed to rerun analysis.
 
@@ -83,6 +84,8 @@ Per subject: envelope debug plots, timeseries, optional PSD. Group: `group/eeg_e
 
 Envelopes are downsampled before write (smoke: **10 Hz**) to keep CSVs small.
 
+**ROIs:** configurable per band (ds003838 smoke uses expanded frontal/parietal lists). Missing montage channels are skipped; envelopes average over available requested channels. `eeg_envelope_qc.csv` reports `*_roi_channels_used` and any `missing_roi_channel` warnings.
+
 #### Stage 1b QC
 
 Per subject: channel inventory, peak-detector comparison, detected peaks, debug plots. Group: `group/cardiac_qc.csv`.
@@ -103,8 +106,10 @@ Group: `group/alignment_qc.csv`
 
 For each pair (e.g. HR ↔ theta envelope):
 1. Compute correlation at lags up to `lag_max_s` (typically ±60 s for short rest).
-2. Record peak signed r, peak lag, edge flags, optional permutation null.
-3. Write per-subject peaks/curves and group aggregates.
+2. **Raw peak** = lag where |r| is maximum; `peak_lag_s` / `peak_signed_r` / `peak_abs_r` match `raw_peak_*` columns.
+3. Interior/preferred peaks are QC-only diagnostics (e.g. edge alternatives); they do not replace the primary peak in group summaries.
+4. Optional permutation null (`p_perm`).
+5. Write per-subject peaks/curves and group aggregates.
 
 **Lag sign cheat sheet:**
 
@@ -327,7 +332,7 @@ Stage `1` runs 1a + 1b + 1c together.
 | sub-036 | yes | ECG (normal) | ecg_rpeak | 78 bpm | yes / yes |
 | sub-038 | yes | ECG (normal) | ecg_rpeak | 71 bpm | yes / yes |
 
-EEG envelopes: 0% NaNs, non-flat; FCz missing from montage (Fz+Cz used for theta/beta).
+EEG envelopes: 0% NaNs, non-flat. ROI channels are taken from the configured list; missing channels (e.g. FCz on some montages) are skipped and reported in `group/eeg_envelope_qc.csv` (`*_roi_channels_used`, `missing_roi_channel` warnings).
 
 ---
 

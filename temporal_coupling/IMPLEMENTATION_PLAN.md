@@ -100,11 +100,13 @@ Three outputs per subject×observation. Run individually: `--stage 1a`, `--stage
 
 **ROI defaults (ds003838):**
 
-| Band | Requested ROI | Notes |
-|------|---------------|-------|
-| Theta | Fz, FCz, Cz | FCz often missing → uses Fz, Cz |
-| Alpha | Pz, POz, Oz | |
-| Beta | Fz, FCz, Cz | FCz often missing → uses Fz, Cz |
+| Band | Requested ROI |
+|------|---------------|
+| Theta | Fz, F1, F2, FCz, FC1, FC2, Cz |
+| Alpha | Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2 |
+| Beta | Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4 |
+
+Missing requested channels are skipped; envelopes average over **available** requested channels only. `group/eeg_envelope_qc.csv` records `*_roi_channels_used` and warnings such as `missing_roi_channel`.
 
 Z-scoring deferred to Stage 1c aligned CSV.
 
@@ -190,6 +192,21 @@ Build **rest task first**; memory task separately (task events confound coupling
 **9 pairs:** HR/RMSSD/SDNN × theta/alpha/beta
 
 **Lag:** per-subject `recommended_xcorr_lag_s` from alignment QC (capped by config `lag_max_s`; smoke/validation: ±60 s)
+
+#### Peak selection rule (primary)
+
+**Raw peak** = lag where **|r| is maximum** on the lag grid (after optional local-peak detection via `scipy.find_peaks` on signed r).
+
+Primary output columns mirror the raw peak:
+
+| Primary column | Equals |
+|----------------|--------|
+| `peak_lag_s` | `raw_peak_lag_s` |
+| `peak_signed_r` | `raw_peak_signed_r` |
+| `peak_abs_r` | `raw_peak_abs_r` |
+| `peak_at_lag_edge` | `raw_peak_at_edge` |
+
+**Interior** and **preferred** peak columns (`interior_peak_*`, `preferred_peak_*`) are **QC diagnostics only** — e.g. edge-flagged raw peaks with same-sign interior alternatives. They do **not** replace the primary peak in Stage 3 group summaries or main plots.
 
 **Per-subject outputs:**
 - `cross_correlation_peaks.csv` — peak lag, signed r, edge flags, optional `p_perm`
@@ -303,10 +320,12 @@ Below threshold → `usable_for_group_plot: false`, marked exploratory in QC and
 
 ### Events config reference
 
+`events.enabled` defaults to **`false`** in smoke configs (Stage 4 is opt-in during development). For validation and full-dataset runs that include event-triggered analysis, set **`enabled: true`**.
+
 ```yaml
 temporal_coupling:
   events:
-    enabled: false
+    enabled: false   # set true for validation/full Stage 4 runs
     hr_delta_window_s: 15
     epoch_pre_s: 60
     epoch_post_s: 60
@@ -328,9 +347,10 @@ temporal_coupling:
 
 ## Dataset Order
 
-1. **ds003838 rest** — ~3–4 min, ±60 s lag, separate EEG/ECG files — **pipeline complete (smoke + validation)**
-2. **ds006848** — longer rest; next validation target
-3. **HIIT** — ~5 min epochs only; separate PRE/POST × rest/tetris × ph/ps
+1. **ds003838 rest** — ~3–4 min, ±60 s lag, separate EEG/ECG files — **pipeline validated (smoke + 8-subject validation)**
+2. **ds003838 rest full cohort** — `config.run.ds003838.temporal_coupling.yaml` — **next scale-up**
+3. **ds006848** — longer rest; cross-dataset validation after ds003838 full
+4. **HIIT** — ~5 min epochs only; separate PRE/POST × rest/tetris × ph/ps
 
 ---
 
@@ -402,8 +422,10 @@ temporal_coupling:
 | 9 | `group_summary.py` (Stage 3) | ✅ |
 | 10 | `events.py` (Stage 4) | ✅ |
 | 11 | Validation 8 subjects (Stages 2–4) | ✅ |
-| 12 | ds006848 → HIIT full cohort | ⏳ **next** |
-| 13 | Full-cohort biological interpretation | ⏳ |
+| 12 | ds003838 rest full cohort (`config.run.ds003838.temporal_coupling.yaml`) | ⏳ **next** |
+| 13 | ds006848 rest | ⏳ |
+| 14 | HIIT full cohort | ⏳ |
+| 15 | Full-cohort biological interpretation | ⏳ |
 
 ---
 
