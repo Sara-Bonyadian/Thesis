@@ -165,6 +165,7 @@ class TemporalCouplingOutputConfig:
 @dataclass(frozen=True)
 class TemporalCouplingGroupConfig:
     plot_common_lag_only: bool = True
+    n_group_permutations: int = 100
 
 
 @dataclass(frozen=True)
@@ -448,6 +449,7 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
             ),
             group=TemporalCouplingGroupConfig(
                 plot_common_lag_only=bool(_get(group_raw, "plot_common_lag_only", True)),
+                n_group_permutations=int(_get(group_raw, "n_group_permutations", 500)),
             ),
         ),
     )

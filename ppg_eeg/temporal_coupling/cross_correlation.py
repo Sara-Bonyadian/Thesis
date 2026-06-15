@@ -581,6 +581,121 @@ def _circular_shift(values: np.ndarray, shift: int, rng: np.random.Generator) ->
     return out
 
 
+@dataclass(frozen=True)
+class SubjectPairData:
+    subject_id: str
+    cardiac: np.ndarray
+    eeg: np.ndarray
+    lag_grid_s: np.ndarray
+
+
+def null_peak_abs_r_from_shift(
+    cardiac: np.ndarray,
+    eeg: np.ndarray,
+    *,
+    lag_grid_s: np.ndarray,
+    cfg: TemporalCouplingConfig,
+    rng: np.random.Generator,
+) -> float:
+    """Circularly shift EEG, recompute lag curve, return raw peak |r| (same rules as Stage 2)."""
+    xcorr_cfg = cfg.temporal_coupling.cross_correlation
+    fs_hz = cfg.temporal_coupling.resample.fs_hz
+    shifted = _circular_shift(eeg, 0, rng)
+    curve = compute_correlation_curve(
+        cardiac,
+        shifted,
+        lag_grid_s=lag_grid_s,
+        fs_hz=fs_hz,
+    )
+    peak = extract_peaks(
+        curve,
+        lag_step_s=xcorr_cfg.lag_step_s,
+        lag_grid_s=lag_grid_s,
+        edge_margin_s=xcorr_cfg.edge_margin_s,
+        min_peak_distance_s=xcorr_cfg.min_peak_distance_s,
+        peak_prominence=xcorr_cfg.peak_prominence,
+        peak_height=xcorr_cfg.peak_height,
+    )
+    return float(peak.raw_peak_abs_r)
+
+
+def load_subject_pair_datasets(
+    cfg: TemporalCouplingConfig,
+    *,
+    pair: VariablePair,
+    subject_ids: list[str],
+    alignment_qc: pd.DataFrame | None,
+) -> list[SubjectPairData]:
+    """Load aligned cardiac/EEG series and lag grids for one pair across subjects."""
+    from .resample import aligned_output_path
+
+    xcorr_cfg = cfg.temporal_coupling.cross_correlation
+    fs_hz = cfg.temporal_coupling.resample.fs_hz
+    datasets: list[SubjectPairData] = []
+
+    for subject_id in subject_ids:
+        aligned_path = aligned_output_path(cfg, subject_id)
+        if not aligned_path.is_file():
+            continue
+        aligned_df = pd.read_csv(aligned_path)
+        lag_max_s = _resolve_lag_max_s(cfg, subject_id=subject_id, alignment_qc=alignment_qc)
+        lag_grid_s = build_lag_grid(lag_max_s=lag_max_s, lag_step_s=xcorr_cfg.lag_step_s)
+        cardiac = _prepare_series(
+            aligned_df[pair.cardiac_var].to_numpy(dtype=float),
+            xcorr_cfg,
+            fs_hz=fs_hz,
+        )
+        eeg = _prepare_series(
+            aligned_df[pair.eeg_var].to_numpy(dtype=float),
+            xcorr_cfg,
+            fs_hz=fs_hz,
+        )
+        datasets.append(
+            SubjectPairData(
+                subject_id=subject_id,
+                cardiac=cardiac,
+                eeg=eeg,
+                lag_grid_s=lag_grid_s,
+            )
+        )
+    return datasets
+
+
+def group_permutation_p_value(
+    subject_data: list[SubjectPairData],
+    *,
+    observed_group_stat: float,
+    n_group_permutations: int,
+    cfg: TemporalCouplingConfig,
+    rng: np.random.Generator,
+) -> float | None:
+    """Empirical p-value: fraction of null median peak |r| >= observed group median."""
+    if n_group_permutations <= 0 or not np.isfinite(observed_group_stat) or not subject_data:
+        return None
+
+    null_stats: list[float] = []
+    for _ in range(n_group_permutations):
+        subject_nulls: list[float] = []
+        for data in subject_data:
+            abs_r = null_peak_abs_r_from_shift(
+                data.cardiac,
+                data.eeg,
+                lag_grid_s=data.lag_grid_s,
+                cfg=cfg,
+                rng=rng,
+            )
+            if np.isfinite(abs_r):
+                subject_nulls.append(abs_r)
+        if subject_nulls:
+            null_stats.append(float(np.median(subject_nulls)))
+
+    if not null_stats:
+        return None
+
+    exceed = sum(1 for value in null_stats if value >= observed_group_stat)
+    return float((exceed + 1) / (len(null_stats) + 1))
+
+
 def permutation_p_value(
     cardiac: np.ndarray,
     eeg: np.ndarray,

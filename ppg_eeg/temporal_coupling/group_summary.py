@@ -22,8 +22,11 @@ from .cross_correlation import (
     CARDIAC_VARS,
     EEG_LABELS,
     EEG_VARS,
+    _load_alignment_qc,
     group_curves_output_path,
     group_peaks_output_path,
+    group_permutation_p_value,
+    load_subject_pair_datasets,
     variable_pairs,
 )
 from .data_audit import group_output_dir
@@ -86,6 +89,10 @@ PEAK_SUMMARY_COLUMNS = (
     "percent_edge_peaks",
     "median_p_perm",
     "n_with_p_perm",
+    "group_perm_stat",
+    "group_perm_p",
+    "group_perm_q",
+    "sig_group_perm_fdr",
     "warning",
 )
 
@@ -316,6 +323,88 @@ def _pair_warnings(
     return ";".join(dict.fromkeys(warnings_out))
 
 
+def _append_group_perm_warning(warning: str, *, n_group_permutations: int) -> str:
+    if n_group_permutations <= 0:
+        extra = "no_group_permutation_test"
+        if extra in warning.split(";"):
+            return warning
+        return f"{warning};{extra}" if warning else extra
+    return warning
+
+
+def apply_group_permutation_tests(
+    peak_summary_rows: list[dict[str, object]],
+    peaks_df: pd.DataFrame,
+    cfg: TemporalCouplingConfig,
+) -> list[dict[str, object]]:
+    """Add group-level circular-shift permutation p-values for each pair."""
+    n_group_permutations = cfg.temporal_coupling.group.n_group_permutations
+    rng = np.random.default_rng(42)
+    alignment_qc = _load_alignment_qc(cfg)
+
+    for row in peak_summary_rows:
+        row["group_perm_stat"] = float("nan")
+        row["group_perm_p"] = float("nan")
+        row["group_perm_q"] = float("nan")
+        row["sig_group_perm_fdr"] = False
+        row["warning"] = _append_group_perm_warning(
+            str(row.get("warning", "")),
+            n_group_permutations=n_group_permutations,
+        )
+
+    if n_group_permutations <= 0:
+        return peak_summary_rows
+
+    pair_p_values: list[float] = []
+    pair_indices: list[int] = []
+
+    for idx, row in enumerate(peak_summary_rows):
+        pair_name = str(row["pair"])
+        pair = next(vp for vp in variable_pairs() if vp.pair == pair_name)
+        pair_rows = peaks_df.loc[peaks_df["pair"] == pair_name]
+        subject_ids = sorted(pair_rows["subject_id"].astype(str).unique())
+        observed_stat = float(row["median_raw_peak_abs_r"])
+        row["group_perm_stat"] = observed_stat
+
+        if not subject_ids or not np.isfinite(observed_stat):
+            pair_p_values.append(float("nan"))
+            pair_indices.append(idx)
+            continue
+
+        subject_data = load_subject_pair_datasets(
+            cfg,
+            pair=pair,
+            subject_ids=subject_ids,
+            alignment_qc=alignment_qc,
+        )
+        if len(subject_data) < len(subject_ids):
+            warnings.warn(
+                f"[temporal_coupling] stage=3 group perm {pair_name}: "
+                f"loaded {len(subject_data)}/{len(subject_ids)} aligned subjects.",
+                stacklevel=2,
+            )
+
+        p_value = group_permutation_p_value(
+            subject_data,
+            observed_group_stat=observed_stat,
+            n_group_permutations=n_group_permutations,
+            cfg=cfg,
+            rng=rng,
+        )
+        row["group_perm_p"] = float("nan") if p_value is None else float(p_value)
+        pair_p_values.append(row["group_perm_p"])
+        pair_indices.append(idx)
+
+    q_values = _apply_bh_fdr(pair_p_values)
+    for idx, q_value in zip(pair_indices, q_values, strict=True):
+        peak_summary_rows[idx]["group_perm_q"] = q_value
+        peak_summary_rows[idx]["sig_group_perm_fdr"] = bool(
+            np.isfinite(q_value) and q_value <= FDR_ALPHA
+        )
+
+    return peak_summary_rows
+
+
 def _sem(values: pd.Series) -> float:
     finite = values.astype(float)
     finite = finite[np.isfinite(finite)]
@@ -433,6 +522,10 @@ def build_peak_correlation_summary(
                 "percent_edge_peaks": percent_edge,
                 "median_p_perm": median_p_perm,
                 "n_with_p_perm": n_with_p_perm,
+                "group_perm_stat": float("nan"),
+                "group_perm_p": float("nan"),
+                "group_perm_q": float("nan"),
+                "sig_group_perm_fdr": False,
                 "warning": _pair_warnings(
                     n_subjects=n_subjects,
                     n_negative=n_negative,
@@ -904,11 +997,19 @@ def _write_interpretation_notes(
     lines.extend(
         [
             "",
+            "Statistical inference layers",
+            "  1. Selected peak signed-r vs zero (group one-sample test; BH-FDR across pairs).",
+            "     Does not control for selecting the maximum peak across lags.",
+            "  2. Permutation-controlled group peak strength (circular-shift EEG null;",
+            "     median raw peak |r| across subjects; BH-FDR across pairs).",
+            "     Controls lag-search selection bias at the group level.",
+            "  3. Peak lag direction vs zero (group Wilcoxon; BH-FDR across pairs).",
+            "",
             "Caveats",
             "  - Negative lag means EEG leads cardiac; positive lag means cardiac leads EEG.",
             "  - Heatmaps use median RAW peak values (not preferred/interior peaks).",
             "  - Asterisks in heatmaps mark pairs with >50% raw peaks at the lag edge.",
-            "  - Group p/q values are exploratory when n is small or permutation nulls were not run.",
+            "  - Selected peak-r vs zero and peak-lag tests are exploratory when n is small.",
             "  - mean_cross_correlation_curves.csv may show n_subjects < cohort size at lags",
             "    outside the common lag range; use total_subjects and in_common_lag_range columns.",
             "",
@@ -921,6 +1022,7 @@ def _write_interpretation_notes(
         exploratory = " [EXPLORATORY]" if "exploratory_small_n" in str(peak["warning"]) else ""
         sig_r = "significant" if peak["sig_peak_signed_r_fdr"] else "not significant"
         sig_lag = "significant" if peak["sig_peak_lag_fdr"] else "not significant"
+        sig_group = "significant" if peak["sig_group_perm_fdr"] else "not significant"
         lines.extend(
             [
                 "",
@@ -931,8 +1033,13 @@ def _write_interpretation_notes(
                 f"  coupling_strength={interp['coupling_strength']}",
                 f"  likely_direction={direction}",
                 f"  edge_peaks={peak['n_edge_peaks']} ({_format_float(peak['percent_edge_peaks'], precision=0)}%)",
-                f"  peak_signed_r FDR q={_format_float(peak['q_value_peak_signed_r'], precision=3)} ({sig_r})",
-                f"  peak_lag FDR q={_format_float(peak['q_value_peak_lag'], precision=3)} ({sig_lag})",
+                "  [1] selected peak-r vs zero:",
+                f"      FDR q={_format_float(peak['q_value_peak_signed_r'], precision=3)} ({sig_r})",
+                "  [2] permutation-controlled group peak strength:",
+                f"      group_perm_stat(median |r|)={_format_float(peak['group_perm_stat'], precision=3)}",
+                f"      FDR q={_format_float(peak['group_perm_q'], precision=3)} ({sig_group})",
+                "  [3] peak-lag direction vs zero:",
+                f"      FDR q={_format_float(peak['q_value_peak_lag'], precision=3)} ({sig_lag})",
                 f"  warnings={peak['warning'] or 'none'}",
             ]
         )
@@ -941,19 +1048,23 @@ def _write_interpretation_notes(
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _print_summary_report(interpretation_rows: list[dict[str, object]]) -> None:
+def _print_summary_report(interpretation_rows: list[dict[str, object]], peak_summary_rows: list[dict[str, object]]) -> None:
+    peak_by_pair = {str(row["pair"]): row for row in peak_summary_rows}
     print("[temporal_coupling] stage=3 group summary:")
     for row in interpretation_rows:
         direction = _direction_label(str(row["likely_direction"]))
         exploratory = " [EXPLORATORY]" if "exploratory_small_n" in str(row["warning"]) else ""
         sig_r = "sig" if row["sig_peak_signed_r_fdr"] else "n.s."
         sig_lag = "sig" if row["sig_peak_lag_fdr"] else "n.s."
+        peak_row = peak_by_pair.get(str(row["pair"]), {})
+        sig_group = "sig" if peak_row.get("sig_group_perm_fdr") else "n.s."
         print(
             f"[temporal_coupling]   {row['pair']}: n={row['n_subjects']} "
             f"median_lag={_format_float(row['median_lag_s'])}s "
             f"coupling={row['coupling_strength']} "
             f"direction={direction}{exploratory} "
             f"(peak_r {sig_r} q={_format_float(row['q_value_peak_signed_r'], precision=3)}, "
+            f"group_perm {sig_group} q={_format_float(peak_row.get('group_perm_q'), precision=3)}, "
             f"peak_lag {sig_lag} q={_format_float(row['q_value_peak_lag'], precision=3)})"
         )
         if row["warning"]:
@@ -987,6 +1098,13 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
     )
 
     peak_summary_rows = build_peak_correlation_summary(peaks_df, cfg)
+    n_group_perms = cfg.temporal_coupling.group.n_group_permutations
+    if n_group_perms > 0:
+        print(
+            f"[temporal_coupling] stage=3 running group permutation tests "
+            f"(n_group_permutations={n_group_perms})"
+        )
+    peak_summary_rows = apply_group_permutation_tests(peak_summary_rows, peaks_df, cfg)
     interpretation_rows = build_group_interpretation_summary(
         peak_summary_rows,
         lag_step_s=lag_step_s,
@@ -1087,5 +1205,5 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
         f"{len(variable_pairs())} pair summaries, n_subjects={n_subjects} throughout"
     )
 
-    _print_summary_report(interpretation_rows)
+    _print_summary_report(interpretation_rows, peak_summary_rows)
     return written

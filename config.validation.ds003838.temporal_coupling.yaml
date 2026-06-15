@@ -1,5 +1,5 @@
-# Validation config for temporal EEG–cardiac coupling (ds003838 rest).
-# Larger n + permutation null for Stage 2/3 checks before Stage 4.
+# Validation / scale-up config for temporal EEG–cardiac coupling (ds003838 rest).
+# Full rest cohort; permutation null (n=100) for Stage 2/3; Stage 4 event-triggered averages.
 
 dataset_id: ds003838
 
@@ -8,16 +8,8 @@ paths:
   out_root: ./derivatives/validation_ds003838_temporal_coupling
   base_root: ./derivatives/run_ds003838_fast
 
-# Eight rest subjects with paired EEG+ECG (includes smoke trio for stability checks).
-subjects:
-  - sub-032
-  - sub-033
-  - sub-036
-  - sub-034
-  - sub-035
-  - sub-038
-  - sub-039
-  - sub-040
+# Empty list = all available subjects matching task/filters (no subject limit).
+subjects: []
 
 tasks:
   - rest
@@ -99,7 +91,7 @@ temporal_coupling:
     peak_height: auto
 
   events:
-    enabled: false
+    enabled: true
     hr_percentile: 10
     eeg_threshold_sd: 2.0
     epoch_pre_s: 60
@@ -120,3 +112,4 @@ temporal_coupling:
 
   group:
     plot_common_lag_only: true
+    n_group_permutations: 100

@@ -15,11 +15,16 @@ from ppg_eeg.temporal_coupling.group_summary import (
     PEAK_SUMMARY_COLUMNS,
     SUMMARY_COLUMNS,
     _global_common_lag_bounds,
+    apply_group_permutation_tests,
     build_group_interpretation_summary,
     build_mean_curves,
     build_peak_correlation_summary,
     run_stage3,
     summary_output_path,
+)
+from ppg_eeg.temporal_coupling.cross_correlation import (
+    SubjectPairData,
+    group_permutation_p_value,
 )
 
 
@@ -78,6 +83,8 @@ class TestGroupSummary(unittest.TestCase):
         )
         self.assertEqual(len(peak_rows), len(variable_pairs()))
         self.assertEqual(list(peak_rows[0].keys())[:4], list(PEAK_SUMMARY_COLUMNS[:4]))
+        self.assertIn("group_perm_stat", peak_rows[0])
+        self.assertIn("sig_group_perm_fdr", peak_rows[0])
 
         hr_theta_peak = next(row for row in peak_rows if row["pair"] == "hr__theta")
         hr_theta_interp = next(row for row in interp_rows if row["pair"] == "hr__theta")
@@ -143,6 +150,10 @@ class TestGroupSummary(unittest.TestCase):
                     raw_root=Path("/nonexistent/raw"),
                     out_root=out_root,
                 ),
+                temporal_coupling=replace(
+                    cfg.temporal_coupling,
+                    group=replace(cfg.temporal_coupling.group, n_group_permutations=0),
+                ),
             )
             group_dir = out_root / cfg.dataset_id / "group"
             group_dir.mkdir(parents=True)
@@ -165,3 +176,81 @@ class TestGroupSummary(unittest.TestCase):
             self.assertTrue((group_dir / "peak_lag_distribution.png").is_file())
             self.assertTrue((group_dir / "peak_r_distribution.png").is_file())
             self.assertTrue((group_dir / "stage3_interpretation_notes.txt").is_file())
+            notes = (group_dir / "stage3_interpretation_notes.txt").read_text(encoding="utf-8")
+            self.assertIn("Statistical inference layers", notes)
+            self.assertIn("permutation-controlled group peak strength", notes)
+
+    def test_group_permutation_stronger_than_null(self) -> None:
+        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = replace(
+            cfg,
+            temporal_coupling=replace(
+                cfg.temporal_coupling,
+                group=replace(cfg.temporal_coupling.group, n_group_permutations=200),
+            ),
+        )
+        n = 150
+        lag_grid_s = np.arange(-20.0, 21.0, 5.0)
+        rng = np.random.default_rng(123)
+
+        subject_data: list[SubjectPairData] = []
+        observed_peaks: list[float] = []
+        for idx in range(5):
+            cardiac = rng.standard_normal(n)
+            eeg = cardiac.copy()
+            subject_data.append(
+                SubjectPairData(
+                    subject_id=f"sub-{idx:03d}",
+                    cardiac=cardiac,
+                    eeg=eeg,
+                    lag_grid_s=lag_grid_s,
+                )
+            )
+            from ppg_eeg.temporal_coupling.cross_correlation import compute_correlation_curve, extract_peaks
+
+            curve = compute_correlation_curve(
+                cardiac,
+                eeg,
+                lag_grid_s=lag_grid_s,
+                fs_hz=cfg.temporal_coupling.resample.fs_hz,
+            )
+            peak = extract_peaks(
+                curve,
+                lag_step_s=cfg.temporal_coupling.cross_correlation.lag_step_s,
+                lag_grid_s=lag_grid_s,
+                edge_margin_s=cfg.temporal_coupling.cross_correlation.edge_margin_s,
+                min_peak_distance_s=cfg.temporal_coupling.cross_correlation.min_peak_distance_s,
+                peak_prominence=cfg.temporal_coupling.cross_correlation.peak_prominence,
+                peak_height=cfg.temporal_coupling.cross_correlation.peak_height,
+            )
+            observed_peaks.append(float(peak.raw_peak_abs_r))
+
+        observed = float(np.median(observed_peaks))
+        self.assertGreater(observed, 0.9)
+
+        p_value = group_permutation_p_value(
+            subject_data,
+            observed_group_stat=observed,
+            n_group_permutations=200,
+            cfg=cfg,
+            rng=np.random.default_rng(0),
+        )
+        self.assertIsNotNone(p_value)
+        assert p_value is not None
+        self.assertLess(p_value, 0.05)
+
+    def test_apply_group_permutation_adds_columns(self) -> None:
+        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = replace(
+            cfg,
+            temporal_coupling=replace(
+                cfg.temporal_coupling,
+                group=replace(cfg.temporal_coupling.group, n_group_permutations=0),
+            ),
+        )
+        peaks_df = _synthetic_peaks(n_subjects=3)
+        peak_rows = build_peak_correlation_summary(peaks_df, cfg)
+        enriched = apply_group_permutation_tests(peak_rows, peaks_df, cfg)
+        self.assertEqual(len(enriched), len(variable_pairs()))
+        self.assertTrue(all("no_group_permutation_test" in str(row["warning"]) for row in enriched))
+        self.assertTrue(all(not row["sig_group_perm_fdr"] for row in enriched))
