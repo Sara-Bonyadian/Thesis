@@ -21,10 +21,12 @@ def group_output_dir(cfg: TemporalCouplingConfig, partition: str | None = None) 
 
 
 def hiit_condition_from_observation_id(observation_id: str) -> str | None:
-    """Parse hiit-01-ph-pre-rest -> ph_pre_rest."""
+    """Parse hiit-01-ph-pre-rest -> ph_pre_rest or hiit-01-ps-pre -> ps_pre."""
     parts = observation_id.split("-")
     if len(parts) >= 5 and parts[0].casefold() == "hiit":
         return f"{parts[2]}_{parts[3]}_{parts[4]}"
+    if len(parts) == 4 and parts[0].casefold() == "hiit":
+        return f"{parts[2]}_{parts[3]}"
     return None
 
 

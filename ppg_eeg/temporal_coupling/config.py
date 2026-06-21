@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-VALID_STAGES: frozenset[str] = frozenset({"0", "1", "1a", "1b", "1c", "2", "3", "4", "all"})
+VALID_STAGES: frozenset[str] = frozenset({"0", "1", "1a", "1b", "1c", "1d", "2", "3", "4", "all", "prepost"})
 
 
 @dataclass(frozen=True)
@@ -14,6 +14,7 @@ class TemporalPathsConfig:
     raw_root: Path
     out_root: Path
     base_root: Path | None = None
+    source_out_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -279,6 +280,8 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
     out_root = Path(str(_get(paths_raw, "out_root", "./derivatives")))
     base_root_value = paths_raw.get("base_root")
     base_root = Path(str(base_root_value)) if base_root_value else None
+    source_out_value = paths_raw.get("source_out_root")
+    source_out_root = Path(str(source_out_value)) if source_out_value else None
 
     eeg_raw = data.get("eeg") or {}
     ppg_raw = data.get("ppg") or {}
@@ -316,7 +319,12 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
 
     cfg = TemporalCouplingConfig(
         dataset_id=dataset_id,
-        paths=TemporalPathsConfig(raw_root=raw_root, out_root=out_root, base_root=base_root),
+        paths=TemporalPathsConfig(
+            raw_root=raw_root,
+            out_root=out_root,
+            base_root=base_root,
+            source_out_root=source_out_root,
+        ),
         subjects=_as_str_list(data.get("subjects")),
         tasks=_as_str_list(data.get("tasks")),
         conditions=_as_str_list(data.get("conditions")),

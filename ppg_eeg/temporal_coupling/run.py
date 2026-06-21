@@ -12,6 +12,7 @@ from .data_audit import run_stage0_audit
 from .events import run_stage4
 from .group_summary import run_stage3
 from .eeg_envelope import run_stage1a
+from .hiit_combine import run_stage1d
 from .resample import run_stage1c
 
 
@@ -27,6 +28,8 @@ def _stages_to_run(stage: str) -> list[str]:
         return ["0", "1a", "1b", "1c", "2", "3", "4"]
     if stage == "1":
         return ["1a", "1b", "1c"]
+    if stage == "prepost":
+        return ["1d", "2", "3", "4"]
     return [stage]
 
 
@@ -124,6 +127,9 @@ def _run_stage(
     if stage == "1c":
         run_stage1c(cfg)
         return
+    if stage == "1d":
+        run_stage1d(cfg)
+        return
     if stage == "2":
         run_stage2(cfg)
         return
@@ -164,7 +170,7 @@ def run_temporal_coupling(cfg: TemporalCouplingConfig, *, stage: str) -> None:
 
     if stage == "all":
         print("[temporal_coupling] completed all requested stages.")
-    elif stage in {"0", "1a", "1b", "1c", "1", "2", "3", "4"}:
+    elif stage in {"0", "1a", "1b", "1c", "1d", "1", "2", "3", "4", "prepost"}:
         print(f"[temporal_coupling] completed stage={stage!r}.")
     else:
         print(f"[temporal_coupling] completed stage={stage!r} (skeleton).")
