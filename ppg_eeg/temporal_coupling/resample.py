@@ -9,11 +9,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..output_layout import safe_subject_dir_name
 from .cardiac_timeseries import CARDIAC_FILENAME, QC_GROUP_FILENAME as CARDIAC_QC_FILENAME
 from .config import TemporalCouplingConfig
 from .data_audit import audit_output_path, group_output_dir, recommended_max_lag_s
-from .eeg_envelope import ENVELOPE_FILENAME, QC_GROUP_FILENAME as EEG_QC_FILENAME, UsableObservation
+from .eeg_envelope import ENVELOPE_FILENAME, QC_GROUP_FILENAME as EEG_QC_FILENAME, UsableObservation, load_usable_observations
+from .paths import observation_output_dir
 
 ALIGNED_FILENAME = "features_temporal_aligned.csv"
 QC_GROUP_FILENAME = "alignment_qc.csv"
@@ -78,20 +78,16 @@ class AlignmentQcRecord:
         }
 
 
-def subject_output_dir(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return Path(cfg.paths.out_root) / cfg.dataset_id / safe_subject_dir_name(subject_id)
+def aligned_output_path(cfg: TemporalCouplingConfig, observation_id: str) -> Path:
+    return observation_output_dir(cfg, observation_id) / ALIGNED_FILENAME
 
 
-def aligned_output_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return subject_output_dir(cfg, subject_id) / ALIGNED_FILENAME
+def envelope_input_path(cfg: TemporalCouplingConfig, observation_id: str) -> Path:
+    return observation_output_dir(cfg, observation_id) / ENVELOPE_FILENAME
 
 
-def envelope_input_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return subject_output_dir(cfg, subject_id) / ENVELOPE_FILENAME
-
-
-def cardiac_input_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return subject_output_dir(cfg, subject_id) / CARDIAC_FILENAME
+def cardiac_input_path(cfg: TemporalCouplingConfig, observation_id: str) -> Path:
+    return observation_output_dir(cfg, observation_id) / CARDIAC_FILENAME
 
 
 def alignment_qc_group_path(cfg: TemporalCouplingConfig) -> Path:
@@ -354,10 +350,18 @@ def align_observation(
     grid_times = build_time_grid(overlap.start_s, overlap.end_s, resample_cfg.fs_hz)
 
     row0 = eeg_df.iloc[0]
+    car0 = cardiac_df.iloc[0]
+    if "condition" in eeg_df.columns and pd.notna(row0["condition"]):
+        condition = str(row0["condition"])
+    elif "condition" in cardiac_df.columns and pd.notna(car0["condition"]):
+        condition = str(car0["condition"])
+    else:
+        condition = str(row0["task"])
     aligned: dict[str, object] = {
         "dataset_id": row0["dataset_id"],
         "subject_id": row0["subject_id"],
         "task": row0["task"],
+        "condition": condition,
         "observation_id": row0["observation_id"],
         "time_s": grid_times,
     }
@@ -387,6 +391,7 @@ def align_observation(
         "dataset_id",
         "subject_id",
         "task",
+        "condition",
         "observation_id",
         "time_s",
         *CARDIAC_COLUMNS,
@@ -394,34 +399,6 @@ def align_observation(
         *Z_COLUMNS,
     ]
     return pd.DataFrame(aligned)[columns]
-
-
-def load_usable_observations(cfg: TemporalCouplingConfig) -> list[UsableObservation]:
-    audit_path = audit_output_path(cfg)
-    if not audit_path.is_file():
-        raise FileNotFoundError(
-            f"{audit_path} not found. Run --stage 0 first, or ensure Stage 1a/1b outputs exist."
-        )
-
-    audit_df = pd.read_csv(audit_path)
-    if audit_df.empty:
-        return []
-
-    usable_mask = audit_df["usable"].astype(str).str.lower().isin({"true", "1", "yes"})
-    rows = audit_df.loc[usable_mask]
-    observations: list[UsableObservation] = []
-    for row in rows.itertuples(index=False):
-        eeg_file = Path(str(row.eeg_file))
-        observations.append(
-            UsableObservation(
-                dataset_id=str(row.dataset_id),
-                subject_id=str(row.subject_id),
-                task=str(row.task),
-                observation_id=str(row.observation_id),
-                eeg_file=eeg_file,
-            )
-        )
-    return observations
 
 
 def run_stage1c(cfg: TemporalCouplingConfig) -> list[Path]:
@@ -436,9 +413,9 @@ def run_stage1c(cfg: TemporalCouplingConfig) -> list[Path]:
     n_ok = 0
 
     for obs in observations:
-        eeg_path = envelope_input_path(cfg, obs.subject_id)
-        cardiac_path = cardiac_input_path(cfg, obs.subject_id)
-        out_path = aligned_output_path(cfg, obs.subject_id)
+        eeg_path = envelope_input_path(cfg, obs.observation_id)
+        cardiac_path = cardiac_input_path(cfg, obs.observation_id)
+        out_path = aligned_output_path(cfg, obs.observation_id)
 
         if not eeg_path.is_file():
             warnings.warn(

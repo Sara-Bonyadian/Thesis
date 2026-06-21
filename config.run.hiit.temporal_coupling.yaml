@@ -1,28 +1,34 @@
-# Temporal EEG–cardiac coupling for ds003838 (all tasks, analyzed separately).
-# Same pipeline settings as config.validation.ds003838.temporal_coupling.yaml,
-# extended to both rest and memory (65 subjects × 2 tasks = 130 observations).
+# Temporal EEG–cardiac coupling for HIIT (all conditions, analyzed separately in group outputs).
+# Reference pipeline: config.validation.ds003838.temporal_coupling.yaml
 
-dataset_id: ds003838
+dataset_id: hiit
 
 paths:
-  raw_root: ./data/raw/ds003838
-  out_root: ./derivatives/run_ds003838_temporal_coupling
-  base_root: ./derivatives/run_ds003838_fast
+  raw_root: ./data/raw/HIIT
+  out_root: ./derivatives/run_hiit_temporal_coupling
+  base_root: ./derivatives/run_hiit_fast
 
-# Empty list = all available subjects matching task/filters.
 subjects: []
 
-# ds003838 sets condition_label equal to task_label.
 tasks:
   - rest
-  - memory
+  - tetris
 
+# HIIT condition_label = {modality}_{timepoint}_{state}.
 conditions:
-  - rest
-  - memory
+  - ph_pre_rest
+  - ph_pre_tetris
+  - ph_post_rest
+  - ph_post_tetris
+  - ps_pre_rest
+  - ps_pre_tetris
+  - ps_post_rest
+  - ps_post_tetris
 
+# HIIT session_label = modality (ph = photosensor, ps = pressure sensor).
 sessions:
-  - single
+  - ph
+  - ps
 
 eeg:
   l_freq: 1.0
@@ -31,7 +37,7 @@ eeg:
   reference: average
 
 ppg:
-  # null = use full EEG/ECG overlap; audit caps lag by overlap/3.
+  # null = use full EEG/embedded-PPG overlap; audit caps lag by overlap/3.
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4

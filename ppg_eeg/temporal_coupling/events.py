@@ -15,7 +15,7 @@ import pandas as pd
 
 from .config import TemporalCouplingConfig, TemporalCouplingEventsConfig
 from .cross_correlation import CARDIAC_LABELS, CARDIAC_VARS, EEG_LABELS, EEG_VARS
-from .data_audit import group_output_dir
+from .paths import group_output_dir, partition_key_from_row
 from .resample import (
     QC_GROUP_FILENAME as ALIGNMENT_QC_FILENAME,
     aligned_output_path,
@@ -268,14 +268,37 @@ def _load_alignment_qc(cfg: TemporalCouplingConfig) -> pd.DataFrame | None:
     return pd.read_csv(qc_path)
 
 
-def _usable_subject_ids(alignment_qc: pd.DataFrame | None, subject_ids: list[str]) -> set[str]:
+def _discover_observation_ids(
+    cfg: TemporalCouplingConfig,
+    alignment_qc: pd.DataFrame | None,
+) -> list[str]:
+    if alignment_qc is not None and not alignment_qc.empty and "observation_id" in alignment_qc.columns:
+        return sorted(alignment_qc["observation_id"].astype(str).unique())
+    dataset_dir = Path(cfg.paths.out_root) / cfg.dataset_id
+    if not dataset_dir.is_dir():
+        return []
+    return sorted(
+        path.name
+        for path in dataset_dir.iterdir()
+        if path.is_dir()
+        and path.name != "group"
+        and (path / "features_temporal_aligned.csv").is_file()
+    )
+
+
+def _usable_observation_ids(
+    alignment_qc: pd.DataFrame | None,
+    observation_ids: list[str],
+) -> set[str]:
     if alignment_qc is None or alignment_qc.empty:
-        return set(subject_ids)
+        return set(observation_ids)
     if "usable_for_xcorr" not in alignment_qc.columns:
-        return set(subject_ids)
+        return set(observation_ids)
     usable = alignment_qc.loc[
         alignment_qc["usable_for_xcorr"].astype(str).str.lower().isin({"true", "1", "yes"})
     ]
+    if "observation_id" in usable.columns:
+        return set(usable["observation_id"].astype(str))
     return set(usable["subject_id"].astype(str))
 
 
@@ -1091,12 +1114,19 @@ def _write_stage4_notes(
     qc_rows: list[EventTypeQc],
     n_subjects_processed: int,
     output_path: Path,
+    *,
+    partition: str | None = None,
 ) -> None:
     qc_lookup = _qc_lookup(qc_rows)
     lines: list[str] = [
         "Stage 4 temporal coupling interpretation notes",
         "============================================",
         f"dataset_id: {cfg.dataset_id}",
+    ]
+    if partition:
+        lines.append(f"partition: {partition}")
+    lines.extend(
+        [
         f"n_subjects_processed: {n_subjects_processed}",
         "",
         "Averaging method",
@@ -1111,7 +1141,8 @@ def _write_stage4_notes(
         f"  min_subjects_required: {cfg.temporal_coupling.events.min_contributing_subjects}",
         "",
         "Event-type status (this run)",
-    ]
+        ]
+    )
 
     for event_type in ALL_EVENT_TYPES:
         qc = qc_lookup[event_type]
@@ -1142,68 +1173,21 @@ def _write_stage4_notes(
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_stage4(cfg: TemporalCouplingConfig) -> list[Path]:
-    events_cfg = cfg.temporal_coupling.events
-    fs_hz = float(cfg.temporal_coupling.resample.fs_hz)
-    epoch_times = _build_epoch_times(events_cfg, fs_hz)
-
-    alignment_qc = _load_alignment_qc(cfg)
-    if alignment_qc is not None and not alignment_qc.empty:
-        subject_ids = sorted(alignment_qc["subject_id"].astype(str).unique())
-    else:
-        dataset_dir = Path(cfg.paths.out_root) / cfg.dataset_id
-        subject_ids = sorted(
-            path.name
-            for path in dataset_dir.iterdir()
-            if path.is_dir() and path.name != "group" and (path / "features_temporal_aligned.csv").is_file()
-        )
-
-    if not subject_ids:
-        print("[temporal_coupling] stage=4: no aligned observations found.")
-        return []
-
-    usable_ids = _usable_subject_ids(alignment_qc, subject_ids)
-    subject_results: list[SubjectEventResult] = []
-    written: list[Path] = []
-
-    for subject_id in subject_ids:
-        if subject_id not in usable_ids:
-            warnings.warn(
-                f"[temporal_coupling] stage=4 skipping {subject_id}: usable_for_xcorr=False.",
-                stacklevel=2,
-            )
-            continue
-
-        aligned_path = aligned_output_path(cfg, subject_id)
-        if not aligned_path.is_file():
-            warnings.warn(
-                f"[temporal_coupling] stage=4 skipping {subject_id}: missing {aligned_path.name}. "
-                "Run --stage 1c first.",
-                stacklevel=2,
-            )
-            continue
-
-        aligned_df = pd.read_csv(aligned_path)
-        result = _process_subject(aligned_df, cfg, epoch_times)
-        subject_results.append(result)
-        print(
-            f"[temporal_coupling] stage=4 {subject_id}: "
-            f"hr_increase={result.counts.hr_increase} hr_decrease={result.counts.hr_decrease} "
-            f"theta_burst={result.counts.theta_burst} "
-            f"alpha_suppression={result.counts.alpha_suppression} "
-            f"beta_burst={result.counts.beta_burst}"
-        )
-
-    if not subject_results:
-        print("[temporal_coupling] stage=4: no subjects processed.")
-        return []
-
-    group_dir = group_output_dir(cfg)
+def _run_stage4_partition(
+    cfg: TemporalCouplingConfig,
+    subject_results: list[SubjectEventResult],
+    *,
+    group_dir: Path,
+    epoch_times: np.ndarray,
+    events_cfg: TemporalCouplingEventsConfig,
+    partition: str | None = None,
+) -> list[Path]:
     group_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
 
     counts_rows = [result.counts.to_row() for result in subject_results]
     counts_df = pd.DataFrame(counts_rows, columns=list(EVENT_COUNTS_COLUMNS))
-    counts_path = event_counts_output_path(cfg)
+    counts_path = group_dir / EVENT_COUNTS_FILENAME
     counts_df.to_csv(counts_path, index=False)
     written.append(counts_path)
 
@@ -1212,30 +1196,31 @@ def run_stage4(cfg: TemporalCouplingConfig) -> list[Path]:
         [record.to_row() for record in all_event_records],
         columns=list(EVENT_LIST_COLUMNS),
     )
-    event_list_path = event_list_output_path(cfg)
+    event_list_path = group_dir / EVENT_LIST_FILENAME
     event_list_df.to_csv(event_list_path, index=False)
     written.append(event_list_path)
 
     qc_rows = _build_event_qc(counts_df, events_cfg)
     qc_lookup = _qc_lookup(qc_rows)
     qc_df = pd.DataFrame([row.to_row() for row in qc_rows], columns=list(EVENT_QC_COLUMNS))
-    qc_path = event_qc_output_path(cfg)
+    qc_path = group_dir / EVENT_QC_FILENAME
     qc_df.to_csv(qc_path, index=False)
     written.append(qc_path)
 
     hr_to_eeg_rows = _build_hr_to_eeg_rows(subject_results, epoch_times)
     hr_to_eeg_df = pd.DataFrame(hr_to_eeg_rows, columns=list(HR_TO_EEG_COLUMNS))
-    hr_to_eeg_path = hr_to_eeg_output_path(cfg)
+    hr_to_eeg_path = group_dir / HR_TO_EEG_FILENAME
     hr_to_eeg_df.to_csv(hr_to_eeg_path, index=False)
     written.append(hr_to_eeg_path)
 
     eeg_to_hr_rows = _build_eeg_to_hr_rows(subject_results, epoch_times)
     eeg_to_hr_df = pd.DataFrame(eeg_to_hr_rows, columns=list(EEG_TO_HR_COLUMNS))
-    eeg_to_hr_path = eeg_to_hr_output_path(cfg)
+    eeg_to_hr_path = group_dir / EEG_TO_HR_FILENAME
     eeg_to_hr_df.to_csv(eeg_to_hr_path, index=False)
     written.append(eeg_to_hr_path)
 
-    print("[temporal_coupling] stage=4 event QC:")
+    label = f"partition={partition!r} " if partition else ""
+    print(f"[temporal_coupling] stage=4 {label}event QC:")
     print(
         f"[temporal_coupling]   averaging: {AVERAGING_METHOD} "
         f"(subject_balanced_average=true)"
@@ -1248,16 +1233,22 @@ def run_stage4(cfg: TemporalCouplingConfig) -> list[Path]:
             + (f" warning={qc.warning}" if qc.warning else "")
         )
 
-    notes_path = interpretation_notes_output_path(cfg)
-    _write_stage4_notes(cfg, qc_rows, len(subject_results), notes_path)
+    notes_path = group_dir / INTERPRETATION_NOTES_FILENAME
+    _write_stage4_notes(
+        cfg,
+        qc_rows,
+        len(subject_results),
+        notes_path,
+        partition=partition,
+    )
     written.append(notes_path)
-    print(f"[temporal_coupling] stage=4 wrote interpretation notes -> {notes_path}")
+    print(f"[temporal_coupling] stage=4 {label}wrote interpretation notes -> {notes_path}")
 
     if cfg.temporal_coupling.output.save_plots:
         hr_plot_path = _plot_hr_to_eeg(
             hr_to_eeg_df,
             qc_lookup,
-            hr_to_eeg_plot_path(cfg),
+            group_dir / HR_TO_EEG_PLOT,
             events_cfg,
             epoch_pre_s=events_cfg.epoch_pre_s,
             epoch_post_s=events_cfg.epoch_post_s,
@@ -1267,12 +1258,96 @@ def run_stage4(cfg: TemporalCouplingConfig) -> list[Path]:
         eeg_plot_path = _plot_eeg_to_hr(
             eeg_to_hr_df,
             qc_lookup,
-            eeg_to_hr_plot_path(cfg),
+            group_dir / EEG_TO_HR_PLOT,
             events_cfg,
             epoch_pre_s=events_cfg.epoch_pre_s,
             epoch_post_s=events_cfg.epoch_post_s,
         )
         written.append(eeg_plot_path)
+
+    return written
+
+
+def run_stage4(cfg: TemporalCouplingConfig) -> list[Path]:
+    events_cfg = cfg.temporal_coupling.events
+    fs_hz = float(cfg.temporal_coupling.resample.fs_hz)
+    epoch_times = _build_epoch_times(events_cfg, fs_hz)
+
+    alignment_qc = _load_alignment_qc(cfg)
+    observation_ids = _discover_observation_ids(cfg, alignment_qc)
+
+    if not observation_ids:
+        print("[temporal_coupling] stage=4: no aligned observations found.")
+        return []
+
+    usable_ids = _usable_observation_ids(alignment_qc, observation_ids)
+    partitioned_results: dict[str, list[SubjectEventResult]] = {}
+
+    for observation_id in observation_ids:
+        if observation_id not in usable_ids:
+            warnings.warn(
+                f"[temporal_coupling] stage=4 skipping {observation_id}: usable_for_xcorr=False.",
+                stacklevel=2,
+            )
+            continue
+
+        aligned_path = aligned_output_path(cfg, observation_id)
+        if not aligned_path.is_file():
+            warnings.warn(
+                f"[temporal_coupling] stage=4 skipping {observation_id}: missing {aligned_path.name}. "
+                "Run --stage 1c first.",
+                stacklevel=2,
+            )
+            continue
+
+        aligned_df = pd.read_csv(aligned_path)
+        task = str(aligned_df["task"].iloc[0])
+        condition = (
+            str(aligned_df["condition"].iloc[0])
+            if "condition" in aligned_df.columns and pd.notna(aligned_df["condition"].iloc[0])
+            else task
+        )
+        partition = partition_key_from_row(
+            dataset_id=cfg.dataset_id,
+            task=task,
+            condition=condition,
+            observation_id=observation_id,
+        )
+        result = _process_subject(aligned_df, cfg, epoch_times)
+        partitioned_results.setdefault(partition, []).append(result)
+        print(
+            f"[temporal_coupling] stage=4 {observation_id} (partition={partition}): "
+            f"hr_increase={result.counts.hr_increase} hr_decrease={result.counts.hr_decrease} "
+            f"theta_burst={result.counts.theta_burst} "
+            f"alpha_suppression={result.counts.alpha_suppression} "
+            f"beta_burst={result.counts.beta_burst}"
+        )
+
+    if not partitioned_results:
+        print("[temporal_coupling] stage=4: no observations processed.")
+        return []
+
+    group_base = group_output_dir(cfg)
+    n_partitions = len(partitioned_results)
+    if n_partitions > 1:
+        print(
+            f"[temporal_coupling] stage=4: {n_partitions} partitions detected "
+            f"({', '.join(sorted(partitioned_results))}); summarizing each separately."
+        )
+
+    written: list[Path] = []
+    for partition in sorted(partitioned_results):
+        out_dir = group_base if n_partitions == 1 else group_output_dir(cfg, partition)
+        written.extend(
+            _run_stage4_partition(
+                cfg,
+                partitioned_results[partition],
+                group_dir=out_dir,
+                epoch_times=epoch_times,
+                events_cfg=events_cfg,
+                partition=partition if n_partitions > 1 else None,
+            )
+        )
 
     print(f"[temporal_coupling] stage=4: {EXPLORATORY_NOTE}")
     return written

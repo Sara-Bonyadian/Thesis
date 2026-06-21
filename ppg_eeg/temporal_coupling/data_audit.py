@@ -7,10 +7,22 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..datasets import build_observations
+from ..datasets import CanonicalObservation, build_observations
 from .config import TemporalCouplingConfig
+from .paths import group_output_dir  # re-exported for stage modules
 
 AUDIT_FILENAME = "data_audit.csv"
+
+__all__ = [
+    "AUDIT_FILENAME",
+    "audit_output_path",
+    "compute_overlap_duration_s",
+    "group_output_dir",
+    "list_configured_observations",
+    "read_signal_metadata",
+    "recommended_max_lag_s",
+    "run_stage0_audit",
+]
 
 
 @dataclass(frozen=True)
@@ -25,9 +37,13 @@ class AuditRecord:
     dataset_id: str
     subject_id: str
     task: str
+    condition: str
     observation_id: str
     eeg_file: str
+    eeg_format: str
     cardiac_file: str
+    cardiac_format: str
+    ppg_source: str
     eeg_exists: bool
     cardiac_exists: bool
     eeg_duration_s: float
@@ -44,9 +60,13 @@ class AuditRecord:
             "dataset_id": self.dataset_id,
             "subject_id": self.subject_id,
             "task": self.task,
+            "condition": self.condition,
             "observation_id": self.observation_id,
             "eeg_file": self.eeg_file,
+            "eeg_format": self.eeg_format,
             "cardiac_file": self.cardiac_file,
+            "cardiac_format": self.cardiac_format,
+            "ppg_source": self.ppg_source,
             "eeg_exists": self.eeg_exists,
             "cardiac_exists": self.cardiac_exists,
             "eeg_duration_s": self.eeg_duration_s,
@@ -60,17 +80,13 @@ class AuditRecord:
         }
 
 
-def group_output_dir(cfg: TemporalCouplingConfig) -> Path:
-    return Path(cfg.paths.out_root) / cfg.dataset_id / "group"
-
-
 def audit_output_path(cfg: TemporalCouplingConfig) -> Path:
     return group_output_dir(cfg) / AUDIT_FILENAME
 
 
 def _resolve_dataset_root(raw_root: Path, dataset_id: str) -> Path | None:
     raw_root = Path(raw_root)
-    if raw_root.name == dataset_id and raw_root.is_dir():
+    if raw_root.name.casefold() == dataset_id.casefold() and raw_root.is_dir():
         return raw_root
     candidate = raw_root / dataset_id
     if candidate.is_dir():
@@ -80,11 +96,8 @@ def _resolve_dataset_root(raw_root: Path, dataset_id: str) -> Path | None:
     return None
 
 
-def _observation_id(dataset_id: str, subject_id: str, task: str) -> str:
-    return f"{dataset_id}-{subject_id}-task-{task}"
-
-
 def _find_signal_file(dataset_root: Path, subject_id: str, task: str, modality: str) -> Path | None:
+    """BIDS EEGLAB fallback used by ds003838."""
     modality_dir = dataset_root / subject_id / modality
     if not modality_dir.is_dir():
         return None
@@ -120,14 +133,25 @@ def _read_bids_sidecar_metadata(path: Path) -> SignalMetadata | None:
     return SignalMetadata(duration_s=duration_s, sfreq=sfreq_hz, source="bids_json")
 
 
-def _read_mne_metadata(path: Path) -> SignalMetadata | None:
+def _read_mne_metadata(path: Path, data_format: str | None = None) -> SignalMetadata | None:
     try:
         import mne
     except ImportError:
         return None
 
+    fmt = (data_format or "").casefold()
+    suffix = path.suffix.casefold()
+    if not fmt:
+        if suffix == ".vhdr":
+            fmt = "brainvision"
+        elif suffix == ".set":
+            fmt = "eeglab"
+
     try:
-        raw = mne.io.read_raw_eeglab(str(path), preload=False, verbose=False)
+        if fmt == "brainvision":
+            raw = mne.io.read_raw_brainvision(str(path), preload=False, verbose=False)
+        else:
+            raw = mne.io.read_raw_eeglab(str(path), preload=False, verbose=False)
     except Exception:
         return None
 
@@ -138,10 +162,10 @@ def _read_mne_metadata(path: Path) -> SignalMetadata | None:
     return SignalMetadata(duration_s=duration_s, sfreq=sfreq, source="mne_header")
 
 
-def read_signal_metadata(path: Path | None) -> SignalMetadata | None:
+def read_signal_metadata(path: Path | None, *, data_format: str | None = None) -> SignalMetadata | None:
     if path is None or not path.is_file():
         return None
-    return _read_bids_sidecar_metadata(path) or _read_mne_metadata(path)
+    return _read_bids_sidecar_metadata(path) or _read_mne_metadata(path, data_format)
 
 
 def _overlap_window(cfg: TemporalCouplingConfig, eeg_duration_s: float, cardiac_duration_s: float) -> tuple[float, float]:
@@ -211,6 +235,74 @@ def _evaluate_usability(
     return True, ""
 
 
+def _cardiac_paths_for_observation(obs: CanonicalObservation) -> tuple[Path | None, str]:
+    if obs.ppg_source == "embedded_eeg":
+        return obs.eeg_path, obs.eeg_format
+    if obs.ppg_path is not None and obs.ppg_path.is_file():
+        return obs.ppg_path, obs.ppg_format or "eeglab"
+    return None, ""
+
+
+def audit_canonical_observation(cfg: TemporalCouplingConfig, obs: CanonicalObservation) -> AuditRecord:
+    requested_lag_max_s = cfg.temporal_coupling.cross_correlation.lag_max_s
+
+    eeg_path = obs.eeg_path
+    cardiac_path, cardiac_format = _cardiac_paths_for_observation(obs)
+    eeg_exists = eeg_path.is_file()
+    cardiac_exists = cardiac_path is not None and cardiac_path.is_file()
+
+    eeg_meta = read_signal_metadata(eeg_path, data_format=obs.eeg_format) if eeg_exists else None
+    cardiac_meta = (
+        read_signal_metadata(cardiac_path, data_format=cardiac_format) if cardiac_exists else None
+    )
+
+    eeg_duration_s = eeg_meta.duration_s if eeg_meta is not None else float("nan")
+    cardiac_duration_s = cardiac_meta.duration_s if cardiac_meta is not None else float("nan")
+    eeg_sfreq = eeg_meta.sfreq if eeg_meta is not None else float("nan")
+    cardiac_sfreq = cardiac_meta.sfreq if cardiac_meta is not None else float("nan")
+
+    overlap_duration_s = compute_overlap_duration_s(
+        cfg,
+        eeg_duration_s=eeg_duration_s if eeg_meta is not None else 0.0,
+        cardiac_duration_s=cardiac_duration_s if cardiac_meta is not None else 0.0,
+    )
+    rec_lag = recommended_max_lag_s(
+        overlap_duration_s=overlap_duration_s,
+        requested_lag_max_s=requested_lag_max_s,
+    )
+    usable, skip_reason = _evaluate_usability(
+        cfg,
+        eeg_exists=eeg_exists,
+        cardiac_exists=cardiac_exists,
+        eeg_meta=eeg_meta,
+        cardiac_meta=cardiac_meta,
+        overlap_duration_s=overlap_duration_s,
+    )
+
+    return AuditRecord(
+        dataset_id=obs.dataset_id,
+        subject_id=obs.subject_id,
+        task=obs.task_label,
+        condition=obs.condition_label,
+        observation_id=obs.observation_id,
+        eeg_file=str(eeg_path),
+        eeg_format=obs.eeg_format,
+        cardiac_file=str(cardiac_path) if cardiac_path is not None else "",
+        cardiac_format=cardiac_format,
+        ppg_source=obs.ppg_source,
+        eeg_exists=eeg_exists,
+        cardiac_exists=cardiac_exists,
+        eeg_duration_s=eeg_duration_s,
+        cardiac_duration_s=cardiac_duration_s,
+        overlap_duration_s=overlap_duration_s,
+        eeg_sfreq=eeg_sfreq,
+        cardiac_sfreq=cardiac_sfreq,
+        usable=usable,
+        skip_reason=skip_reason,
+        recommended_max_lag_s=rec_lag,
+    )
+
+
 def audit_observation(
     cfg: TemporalCouplingConfig,
     *,
@@ -218,8 +310,9 @@ def audit_observation(
     task: str,
     dataset_root: Path | None,
 ) -> AuditRecord:
+    """Legacy BIDS-only audit path retained for ds003838 compatibility."""
     dataset_id = cfg.dataset_id
-    observation_id = _observation_id(dataset_id, subject_id, task)
+    observation_id = f"{dataset_id}-{subject_id}-task-{task}"
     requested_lag_max_s = cfg.temporal_coupling.cross_correlation.lag_max_s
 
     eeg_path: Path | None = None
@@ -231,8 +324,8 @@ def audit_observation(
     eeg_exists = eeg_path is not None and eeg_path.is_file()
     cardiac_exists = cardiac_path is not None and cardiac_path.is_file()
 
-    eeg_meta = read_signal_metadata(eeg_path) if eeg_exists else None
-    cardiac_meta = read_signal_metadata(cardiac_path) if cardiac_exists else None
+    eeg_meta = read_signal_metadata(eeg_path, data_format="eeglab") if eeg_exists else None
+    cardiac_meta = read_signal_metadata(cardiac_path, data_format="eeglab") if cardiac_exists else None
 
     eeg_duration_s = eeg_meta.duration_s if eeg_meta is not None else float("nan")
     cardiac_duration_s = cardiac_meta.duration_s if cardiac_meta is not None else float("nan")
@@ -261,9 +354,13 @@ def audit_observation(
         dataset_id=dataset_id,
         subject_id=subject_id,
         task=task,
+        condition=task,
         observation_id=observation_id,
         eeg_file=str(eeg_path) if eeg_path is not None else "",
+        eeg_format="eeglab",
         cardiac_file=str(cardiac_path) if cardiac_path is not None else "",
+        cardiac_format="eeglab",
+        ppg_source="separate_ecg",
         eeg_exists=eeg_exists,
         cardiac_exists=cardiac_exists,
         eeg_duration_s=eeg_duration_s,
@@ -277,31 +374,36 @@ def audit_observation(
     )
 
 
-def _planned_subject_tasks(cfg: TemporalCouplingConfig) -> list[tuple[str, str]]:
-    tasks = cfg.tasks or ["rest"]
-    if cfg.subjects:
-        return [(subject_id, task) for subject_id in cfg.subjects for task in tasks]
-
-    observations = build_observations(
+def list_configured_observations(cfg: TemporalCouplingConfig) -> list[CanonicalObservation]:
+    return build_observations(
         cfg.dataset_id,
         cfg.paths.raw_root,
-        subjects=None,
+        subjects=cfg.subjects or None,
         tasks=cfg.tasks or None,
         conditions=cfg.conditions or None,
         sessions=cfg.sessions or None,
     )
-    pairs = sorted({(obs.subject_id, obs.task_label) for obs in observations})
-    return [(subject_id, task) for subject_id, task in pairs]
 
 
 def run_stage0_audit(cfg: TemporalCouplingConfig) -> Path:
-    dataset_root = _resolve_dataset_root(cfg.paths.raw_root, cfg.dataset_id)
+    observations = list_configured_observations(cfg)
     records: list[AuditRecord] = []
 
-    for subject_id, task in _planned_subject_tasks(cfg):
-        records.append(
-            audit_observation(cfg, subject_id=subject_id, task=task, dataset_root=dataset_root)
-        )
+    if observations:
+        for obs in observations:
+            records.append(audit_canonical_observation(cfg, obs))
+    else:
+        dataset_root = _resolve_dataset_root(cfg.paths.raw_root, cfg.dataset_id)
+        tasks = cfg.tasks or ["rest"]
+        subjects = cfg.subjects or []
+        if subjects:
+            pairs = [(subject_id, task) for subject_id in subjects for task in tasks]
+        else:
+            pairs = []
+        for subject_id, task in pairs:
+            records.append(
+                audit_observation(cfg, subject_id=subject_id, task=task, dataset_root=dataset_root)
+            )
 
     out_path = audit_output_path(cfg)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -314,8 +416,9 @@ def run_stage0_audit(cfg: TemporalCouplingConfig) -> Path:
     print(f"[temporal_coupling] audit summary: usable={n_usable}/{n_total}")
     for record in records:
         status = "OK" if record.usable else f"SKIP ({record.skip_reason})"
+        label = record.condition if record.condition != record.task else record.task
         print(
-            f"[temporal_coupling]   {record.subject_id} task={record.task}: "
+            f"[temporal_coupling]   {record.subject_id} task={record.task} condition={label}: "
             f"overlap={record.overlap_duration_s:.1f}s "
             f"recommended_max_lag_s={record.recommended_max_lag_s:.0f} -> {status}"
         )

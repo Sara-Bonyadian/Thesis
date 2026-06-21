@@ -29,7 +29,7 @@ from .cross_correlation import (
     load_subject_pair_datasets,
     variable_pairs,
 )
-from .data_audit import group_output_dir
+from .paths import group_output_dir, partition_key_from_row
 
 PEAK_SUMMARY_FILENAME = "peak_correlation_summary.csv"
 SUMMARY_FILENAME = "group_cross_correlation_summary.csv"
@@ -156,36 +156,105 @@ def clear_stage3_outputs(cfg: TemporalCouplingConfig) -> list[Path]:
         if path.is_file():
             path.unlink()
             removed.append(path)
+    group_base = group_output_dir(cfg)
+    if group_base.is_dir():
+        for subdir in group_base.iterdir():
+            if not subdir.is_dir():
+                continue
+            for name in STAGE3_OUTPUT_FILENAMES:
+                path = subdir / name
+                if path.is_file():
+                    path.unlink()
+                    removed.append(path)
     return removed
 
 
-def _validate_stage3_inputs(peaks_df: pd.DataFrame, curves_df: pd.DataFrame | None) -> int:
+def _row_partition_key(row: pd.Series, *, dataset_id: str) -> str:
+    task = str(row["task"])
+    condition = str(row["condition"]) if "condition" in row.index and pd.notna(row["condition"]) else task
+    observation_id = str(row["observation_id"]) if "observation_id" in row.index and pd.notna(row["observation_id"]) else None
+    return partition_key_from_row(
+        dataset_id=dataset_id,
+        task=task,
+        condition=condition,
+        observation_id=observation_id,
+    )
+
+
+def _partition_keys(peaks_df: pd.DataFrame, *, dataset_id: str) -> list[str]:
+    if peaks_df.empty:
+        return []
+    keys = peaks_df.apply(lambda row: _row_partition_key(row, dataset_id=dataset_id), axis=1)
+    return sorted(keys.unique())
+
+
+def _filter_by_partition(
+    df: pd.DataFrame | None,
+    *,
+    partition: str,
+    dataset_id: str,
+) -> pd.DataFrame | None:
+    if df is None or df.empty:
+        return df
+    mask = df.apply(lambda row: _row_partition_key(row, dataset_id=dataset_id) == partition, axis=1)
+    return df.loc[mask].copy()
+
+
+def _filter_curves_by_partition(
+    curves_df: pd.DataFrame | None,
+    peaks_df: pd.DataFrame,
+    *,
+    partition: str,
+    dataset_id: str,
+) -> pd.DataFrame | None:
+    if curves_df is None or curves_df.empty:
+        return curves_df
+    if "task" in curves_df.columns or "condition" in curves_df.columns:
+        return _filter_by_partition(curves_df, partition=partition, dataset_id=dataset_id)
+    subject_ids = set(peaks_df["subject_id"].astype(str).unique())
+    return curves_df.loc[curves_df["subject_id"].astype(str).isin(subject_ids)].copy()
+
+
+def _validate_partition_inputs(
+    peaks_df: pd.DataFrame,
+    curves_df: pd.DataFrame | None,
+    *,
+    partition: str,
+) -> int:
     n_subjects = int(peaks_df["subject_id"].nunique()) if not peaks_df.empty else 0
     n_peak_rows = len(peaks_df)
     expected_rows = n_subjects * len(variable_pairs())
     if n_peak_rows != expected_rows:
         raise ValueError(
             f"Stage 3 input peaks rows={n_peak_rows}, expected {expected_rows} "
-            f"({n_subjects} subjects × {len(variable_pairs())} pairs)."
+            f"({n_subjects} subjects × {len(variable_pairs())} pairs) "
+            f"for partition={partition!r}."
         )
-    if curves_df is not None:
+    if not peaks_df.empty:
+        dup = peaks_df.groupby(["subject_id", "pair"]).size()
+        if (dup > 1).any():
+            bad = dup[dup > 1].index.tolist()[:5]
+            raise ValueError(
+                f"Stage 3 duplicate subject×pair rows in partition={partition!r}: {bad}"
+            )
+    if curves_df is not None and not curves_df.empty:
         curve_subjects = int(curves_df["subject_id"].nunique())
         if curve_subjects != n_subjects:
             raise ValueError(
-                f"Stage 3 input mismatch: peaks subjects={n_subjects}, "
-                f"curves subjects={curve_subjects}."
+                f"Stage 3 input mismatch for partition={partition!r}: "
+                f"peaks subjects={n_subjects}, curves subjects={curve_subjects}."
             )
     return n_subjects
 
 
 def _validate_stage3_outputs(
-    cfg: TemporalCouplingConfig,
     *,
+    group_dir: Path,
     expected_subjects: int,
 ) -> None:
-    peak_summary = pd.read_csv(peak_summary_output_path(cfg))
-    group_summary = pd.read_csv(summary_output_path(cfg))
-    notes_path = interpretation_notes_output_path(cfg)
+    peak_summary = pd.read_csv(group_dir / PEAK_SUMMARY_FILENAME)
+    group_summary = pd.read_csv(group_dir / SUMMARY_FILENAME)
+    notes_path = group_dir / INTERPRETATION_NOTES_FILENAME
     notes_text = notes_path.read_text(encoding="utf-8")
 
     if len(peak_summary) != len(variable_pairs()):
@@ -206,7 +275,7 @@ def _validate_stage3_outputs(
             f"stage3_interpretation_notes.txt missing n_subjects_in_peaks: {expected_subjects}."
         )
 
-    mean_curves_path = mean_curves_output_path(cfg)
+    mean_curves_path = group_dir / MEAN_CURVES_FILENAME
     if mean_curves_path.is_file():
         mean_curves = pd.read_csv(mean_curves_path)
         if int(mean_curves["total_subjects"].max()) != expected_subjects:
@@ -976,16 +1045,17 @@ def _write_interpretation_notes(
     global_common_bounds: tuple[float, float] | None,
     total_subjects: int | None,
     output_path: Path,
+    partition: str | None = None,
 ) -> None:
     lines: list[str] = [
         "Stage 3 temporal coupling interpretation notes",
         "============================================",
         f"dataset_id: {cfg.dataset_id}",
-        f"n_subjects_in_peaks: {total_subjects if total_subjects is not None else 'unknown'}",
-        "",
-        "Plot settings",
-        f"  plot_common_lag_only: {cfg.temporal_coupling.group.plot_common_lag_only}",
     ]
+    if partition:
+        lines.append(f"partition: {partition}")
+    lines.append(f"n_subjects_in_peaks: {total_subjects if total_subjects is not None else 'unknown'}")
+    lines.extend(["", "Plot settings", f"  plot_common_lag_only: {cfg.temporal_coupling.group.plot_common_lag_only}"])
     if global_common_bounds is not None:
         lines.append(
             f"  common lag range used for mean curves: "
@@ -1071,37 +1141,30 @@ def _print_summary_report(interpretation_rows: list[dict[str, object]], peak_sum
             print(f"[temporal_coupling]     warning: {row['warning']}")
 
 
-def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
+def _run_stage3_partition(
+    cfg: TemporalCouplingConfig,
+    peaks_df: pd.DataFrame,
+    curves_df: pd.DataFrame | None,
+    *,
+    partition: str,
+    group_dir: Path,
+) -> list[Path]:
     lag_step_s = cfg.temporal_coupling.cross_correlation.lag_step_s
     plot_common_lag_only = cfg.temporal_coupling.group.plot_common_lag_only
-    group_dir = group_output_dir(cfg)
     group_dir.mkdir(parents=True, exist_ok=True)
 
-    peaks_path = group_peaks_output_path(cfg)
-    curves_path = group_curves_output_path(cfg)
-    print(f"[temporal_coupling] stage=3 reading peaks -> {peaks_path}")
-    print(f"[temporal_coupling] stage=3 reading curves -> {curves_path}")
-
-    removed = clear_stage3_outputs(cfg)
-    if removed:
-        print(
-            f"[temporal_coupling] stage=3 removed {len(removed)} prior Stage 3 outputs "
-            f"from {group_dir}"
-        )
-
-    peaks_df = _load_peaks(cfg)
-    curves_df = _load_curves(cfg)
-    n_subjects = _validate_stage3_inputs(peaks_df, curves_df)
+    n_subjects = _validate_partition_inputs(peaks_df, curves_df, partition=partition)
     print(
-        f"[temporal_coupling] stage=3 input cohort: subjects={n_subjects} "
-        f"peak_rows={len(peaks_df)} curve_rows={0 if curves_df is None else len(curves_df)}"
+        f"[temporal_coupling] stage=3 partition={partition!r}: subjects={n_subjects} "
+        f"peak_rows={len(peaks_df)} curve_rows={0 if curves_df is None else len(curves_df)} "
+        f"-> {group_dir}"
     )
 
     peak_summary_rows = build_peak_correlation_summary(peaks_df, cfg)
     n_group_perms = cfg.temporal_coupling.group.n_group_permutations
     if n_group_perms > 0:
         print(
-            f"[temporal_coupling] stage=3 running group permutation tests "
+            f"[temporal_coupling] stage=3 partition={partition!r}: running group permutation tests "
             f"(n_group_permutations={n_group_perms})"
         )
     peak_summary_rows = apply_group_permutation_tests(peak_summary_rows, peaks_df, cfg)
@@ -1110,7 +1173,7 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
         lag_step_s=lag_step_s,
     )
 
-    peak_summary_path = peak_summary_output_path(cfg)
+    peak_summary_path = group_dir / PEAK_SUMMARY_FILENAME
     pd.DataFrame(peak_summary_rows, columns=list(PEAK_SUMMARY_COLUMNS)).to_csv(
         peak_summary_path,
         index=False,
@@ -1118,17 +1181,17 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
     written: list[Path] = [peak_summary_path]
     print(f"[temporal_coupling] stage=3 wrote peak summary -> {peak_summary_path}")
 
-    summary_path = summary_output_path(cfg)
+    summary_path = group_dir / SUMMARY_FILENAME
     pd.DataFrame(interpretation_rows, columns=list(SUMMARY_COLUMNS)).to_csv(summary_path, index=False)
     written.append(summary_path)
     print(f"[temporal_coupling] stage=3 wrote interpretation summary -> {summary_path}")
 
     total_subjects = n_subjects
     global_common_bounds: tuple[float, float] | None = None
-    if curves_df is not None:
+    if curves_df is not None and not curves_df.empty:
         mean_curves_df = build_mean_curves(curves_df)
         global_common_bounds = _global_common_lag_bounds(curves_df)
-        mean_curves_path = mean_curves_output_path(cfg)
+        mean_curves_path = group_dir / MEAN_CURVES_FILENAME
         mean_curves_df.to_csv(mean_curves_path, index=False)
         written.append(mean_curves_path)
         print(
@@ -1137,7 +1200,7 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
         )
         if global_common_bounds is not None:
             print(
-                "[temporal_coupling] stage=3 common lag range for all subjects: "
+                f"[temporal_coupling] stage=3 partition={partition!r} common lag range: "
                 f"[{global_common_bounds[0]:g}, {global_common_bounds[1]:g}] s"
             )
 
@@ -1154,7 +1217,7 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
             print(f"[temporal_coupling] stage=3 wrote mean SEM grid -> {plot_path}")
     else:
         print(
-            "[temporal_coupling] stage=3: no group curves CSV found; "
+            f"[temporal_coupling] stage=3 partition={partition!r}: no curves; "
             "skipping mean curve outputs."
         )
 
@@ -1180,7 +1243,7 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
             f"{lag_plot_path.name}, {r_plot_path.name}"
         )
 
-    notes_path = interpretation_notes_output_path(cfg)
+    notes_path = group_dir / INTERPRETATION_NOTES_FILENAME
     _write_interpretation_notes(
         cfg,
         peak_summary_rows=peak_summary_rows,
@@ -1188,22 +1251,75 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
         global_common_bounds=global_common_bounds,
         total_subjects=total_subjects,
         output_path=notes_path,
+        partition=partition,
     )
     written.append(notes_path)
     print(f"[temporal_coupling] stage=3 wrote interpretation notes -> {notes_path}")
 
     if cfg.temporal_coupling.cross_correlation.n_permutations == 0:
         warnings.warn(
-            "[temporal_coupling] stage=3: permutation null not run (n_permutations=0). "
-            "Group p/q values are exploratory only.",
+            f"[temporal_coupling] stage=3 partition={partition!r}: permutation null not run "
+            "(n_permutations=0). Group p/q values are exploratory only.",
             stacklevel=2,
         )
 
-    _validate_stage3_outputs(cfg, expected_subjects=n_subjects)
+    _validate_stage3_outputs(group_dir=group_dir, expected_subjects=n_subjects)
     print(
-        f"[temporal_coupling] stage=3 validation OK: "
-        f"{len(variable_pairs())} pair summaries, n_subjects={n_subjects} throughout"
+        f"[temporal_coupling] stage=3 partition={partition!r} validation OK: "
+        f"{len(variable_pairs())} pair summaries, n_subjects={n_subjects}"
     )
 
     _print_summary_report(interpretation_rows, peak_summary_rows)
+    return written
+
+
+def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
+    group_base = group_output_dir(cfg)
+    group_base.mkdir(parents=True, exist_ok=True)
+
+    peaks_path = group_peaks_output_path(cfg)
+    curves_path = group_curves_output_path(cfg)
+    print(f"[temporal_coupling] stage=3 reading peaks -> {peaks_path}")
+    print(f"[temporal_coupling] stage=3 reading curves -> {curves_path}")
+
+    removed = clear_stage3_outputs(cfg)
+    if removed:
+        print(
+            f"[temporal_coupling] stage=3 removed {len(removed)} prior Stage 3 outputs "
+            f"from {group_base}"
+        )
+
+    peaks_df = _load_peaks(cfg)
+    curves_df = _load_curves(cfg)
+    partitions = _partition_keys(peaks_df, dataset_id=cfg.dataset_id)
+    if not partitions:
+        print("[temporal_coupling] stage=3: no peak rows found.")
+        return []
+
+    n_partitions = len(partitions)
+    if n_partitions > 1:
+        print(
+            f"[temporal_coupling] stage=3: {n_partitions} partitions detected "
+            f"({', '.join(partitions)}); summarizing each separately."
+        )
+
+    written: list[Path] = []
+    for partition in partitions:
+        part_peaks = _filter_by_partition(peaks_df, partition=partition, dataset_id=cfg.dataset_id)
+        part_curves = _filter_curves_by_partition(
+            curves_df,
+            part_peaks,
+            partition=partition,
+            dataset_id=cfg.dataset_id,
+        )
+        out_dir = group_base if n_partitions == 1 else group_output_dir(cfg, partition)
+        written.extend(
+            _run_stage3_partition(
+                cfg,
+                part_peaks,
+                part_curves,
+                partition=partition,
+                group_dir=out_dir,
+            )
+        )
     return written

@@ -17,8 +17,10 @@ class CardiacObservation:
     dataset_id: str
     subject_id: str
     task: str
+    condition: str
     observation_id: str
     cardiac_file: Path
+    cardiac_format: str
 
 
 @dataclass(frozen=True)

@@ -50,6 +50,29 @@ class TestCrossCorrelation(unittest.TestCase):
         self.assertAlmostEqual(peak.raw_peak_lag_s, -20.0)
         self.assertAlmostEqual(peak.raw_peak_abs_r, 0.9)
 
+    def test_raw_peak_ignores_negative_local_maxima(self) -> None:
+        curve = [
+            LagCorrelationPoint(lag_s=-40.0, r=-0.46, n_overlap=87),
+            LagCorrelationPoint(lag_s=-20.0, r=-0.22, n_overlap=107),
+            LagCorrelationPoint(lag_s=-10.0, r=-0.04, n_overlap=117),
+            LagCorrelationPoint(lag_s=0.0, r=-0.09, n_overlap=127),
+            LagCorrelationPoint(lag_s=35.0, r=0.22, n_overlap=92),
+            LagCorrelationPoint(lag_s=40.0, r=0.27, n_overlap=87),
+        ]
+        lag_grid = np.array([-40.0, -20.0, -10.0, 0.0, 35.0, 40.0])
+        peak = extract_peaks(
+            curve,
+            lag_step_s=5.0,
+            lag_grid_s=lag_grid,
+            edge_margin_s=0.0,
+            min_peak_distance_s=10.0,
+            peak_prominence="auto",
+            peak_height="auto",
+        )
+        self.assertGreater(peak.raw_peak_signed_r, 0.0)
+        self.assertAlmostEqual(peak.raw_peak_lag_s, 40.0)
+        self.assertTrue(peak.raw_peak_at_edge)
+
     def test_raw_peak_uses_max_positive_r_with_tie_to_zero(self) -> None:
         curve = [
             LagCorrelationPoint(lag_s=-10.0, r=0.5, n_overlap=20),
@@ -62,11 +85,11 @@ class TestCrossCorrelation(unittest.TestCase):
         self.assertAlmostEqual(peak.raw_peak_signed_r, 0.5)
         self.assertAlmostEqual(peak.raw_peak_abs_r, 0.5)
 
-    def test_preferred_peak_rejects_opposite_sign_interior(self) -> None:
+    def test_preferred_peak_keeps_raw_when_only_interior_is_negative(self) -> None:
         curve = [
             LagCorrelationPoint(lag_s=-20.0, r=0.9, n_overlap=20),
             LagCorrelationPoint(lag_s=0.0, r=-0.8, n_overlap=20),
-            LagCorrelationPoint(lag_s=20.0, r=0.2, n_overlap=20),
+            LagCorrelationPoint(lag_s=20.0, r=-0.2, n_overlap=20),
         ]
         lag_grid = np.array([-20.0, 0.0, 20.0])
         peak = extract_peaks(curve, lag_step_s=5.0, lag_grid_s=lag_grid, edge_margin_s=5.0)
@@ -74,7 +97,7 @@ class TestCrossCorrelation(unittest.TestCase):
         self.assertAlmostEqual(peak.raw_peak_lag_s, -20.0)
         self.assertAlmostEqual(peak.preferred_peak_lag_s, -20.0)
         self.assertEqual(peak.preferred_peak_source, "raw_peak")
-        self.assertIn("opposite_sign_interior_rejected", peak.warning)
+        self.assertIn("no_interior_peak", peak.warning)
 
     def test_preferred_peak_uses_interior_when_raw_at_edge(self) -> None:
         curve = [

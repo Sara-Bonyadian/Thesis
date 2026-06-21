@@ -2,7 +2,7 @@
 
 Technical plan for within-subject temporal coupling. Stages 1a/1b read **raw EEG + raw PPG/ECG**; Stages 1c–4 read prior CSV outputs (no raw reload).
 
-**Last updated:** Stages 0–4 implemented and validated on ds003838 rest (smoke: 3 subjects; validation: 8 subjects).
+**Last updated:** Stages 0–4 validated on ds003838 rest (65 subjects). Multi-dataset configs and adapter-based audit added for ds003838 (all tasks), ds006848, and HIIT. Cross-dataset replication summaries in progress.
 
 ---
 
@@ -12,8 +12,11 @@ Move beyond between-subject summary correlations to examine **within-subject tem
 
 - When HR or HRV changes within an individual, do EEG oscillations change before, during, or after?
 - Do EEG changes predict later HR/HRV changes?
+- **Cross-dataset:** Do coupling patterns replicate across ds003838, ds006848, and HIIT tasks/conditions?
 
-Timing is central — one value per time point (e.g. every 0.5–1 s), not one summary per observation.
+Timing is central — one value per time point (default 1 Hz after resampling), not one summary per observation.
+
+**Interpretation:** Descriptive timing only. Group permutation support (`sig_group_perm_fdr`) is the stricter evidence layer; selected peak-r FDR alone is exploratory. No causal claims.
 
 ---
 
@@ -23,10 +26,13 @@ Timing is central — one value per time point (e.g. every 0.5–1 s), not one s
 |-----------|-----------|
 | Separate module | Phase 1 pipeline unchanged; opt-in analysis |
 | Config-driven | YAML ROIs, windows, lag limits, detector choice, QC plots |
-| Per-subject first | Core math within subject; group stats in Stages 3–4 |
+| Per-observation first | Core math within observation; group stats in Stages 3–4 |
+| One task/condition per group summary | Never mix tasks or HIIT states in one aggregate |
 | Stage 1 = 3 CSVs | Reusable cache; Stages 2–4 avoid raw I/O |
+| Dataset adapters | Stage 0 discovers observations via `build_observations` |
+| Observation output dirs | `{observation_id}/` prevents HIIT multi-condition overwrites |
 | Visual QC | Stage 1a/1b debug plots before alignment |
-| Permutation null | Peak-r across lags needs circular-shift control (Stage 2) |
+| Permutation null | Circular-shift control for peak strength (Stage 2 + Stage 3 group perm) |
 | Subject-balanced events | Stage 4 averages within subject first, then across subjects |
 
 ---
@@ -38,7 +44,8 @@ ppg_eeg/temporal_coupling/
   __main__.py              # CLI: python -m ppg_eeg.temporal_coupling
   config.py                # YAML → dataclasses
   run.py                   # stage dispatcher
-  data_audit.py            # Stage 0 ✅
+  paths.py                 # observation_output_dir, group_output_dir, partition keys ✅
+  data_audit.py            # Stage 0 ✅ (adapters + BIDS + BrainVision)
   eeg_envelope.py          # Stage 1a ✅
   cardiac_common.py        # shared types, IBI cleaning, ROI helpers ✅
   cardiac_detectors.py     # channel inventory, detector comparison, ECG R-peak ✅
@@ -47,17 +54,22 @@ ppg_eeg/temporal_coupling/
   cross_correlation.py     # Stage 2 ✅
   group_summary.py         # Stage 3 ✅
   events.py                # Stage 4 ✅
+  cross_dataset_summary.py # cross-dataset tables + plots ⏳ planned
 ```
 
 **Tests:** `tests/test_eeg_envelope.py`, `tests/test_cardiac_timeseries.py`, `tests/test_resample.py`, `tests/test_cross_correlation.py`, `tests/test_group_summary.py`, `tests/test_events.py`
 
 **Configs:**
 
-| Config | Purpose |
-|--------|---------|
-| `config.smoke.ds003838.temporal_coupling.yaml` | 3-subject smoke |
-| `config.validation.ds003838.temporal_coupling.yaml` | 8-subject validation (+ permutations) |
-| `config.run.ds003838.temporal_coupling.yaml` | Full-dataset run |
+| Config | Dataset | Scope | Output root |
+|--------|---------|-------|-------------|
+| `config.smoke.ds003838.temporal_coupling.yaml` | ds003838 | rest, 3 subjects | `derivatives/smoke_ds003838_temporal_coupling/` |
+| `config.validation.ds003838.temporal_coupling.yaml` | ds003838 | **rest only** (reference) | `derivatives/validation_ds003838_temporal_coupling/` |
+| `config.run.ds003838.temporal_coupling.yaml` | ds003838 | **rest + memory** | `derivatives/run_ds003838_temporal_coupling/` |
+| `config.run.ds006848.temporal_coupling.yaml` | ds006848 | rest, verbalwm | `derivatives/run_ds006848_temporal_coupling/` |
+| `config.run.hiit.temporal_coupling.yaml` | HIIT | 8 conditions | `derivatives/run_hiit_temporal_coupling/` |
+
+All **run** configs share the same `temporal_coupling` block as validation (ROIs, `fs_hz: 1.0`, `lag_step_s: 5`, `n_permutations: 100`, events on, `n_group_permutations: 100`).
 
 ---
 
@@ -69,22 +81,32 @@ ppg_eeg/temporal_coupling/
 
 | Column | Description |
 |--------|-------------|
-| `dataset_id`, `subject_id`, `task`, `observation_id` | Keys |
-| `eeg_file`, `cardiac_file` | BIDS paths |
+| `dataset_id`, `subject_id`, `task`, `condition`, `observation_id` | Keys |
+| `eeg_file`, `eeg_format`, `cardiac_file`, `cardiac_format`, `ppg_source` | Paths and modality |
 | `eeg_duration_s`, `cardiac_duration_s`, `overlap_duration_s` | Durations |
 | `eeg_sfreq`, `cardiac_sfreq` | Sampling rates |
 | `usable`, `skip_reason` | Gate for Stage 1 |
 | `recommended_max_lag_s` | `min(lag_max_s, floor(overlap_s / 3))` |
 
+**Discovery:** `list_configured_observations()` → `build_observations()` per dataset adapter.
+
+| Dataset | EEG format | Cardiac source |
+|---------|------------|----------------|
+| ds003838 | EEGLAB `.set` (BIDS) | Separate ECG `.set` |
+| ds006848 | BrainVision `.vhdr` | Embedded PPG in EEG |
+| HIIT | BrainVision `.vhdr` | Embedded PPG in EEG |
+
 **Minimum thresholds (configurable):** `min_overlap_s: 120`, `min_clean_beats: 30`
 
-Reads BIDS JSON sidecars first; falls back to MNE `preload=False` for metadata.
+Metadata: BIDS JSON sidecar when present; else MNE header (`read_raw_eeglab` or `read_raw_brainvision`).
 
 ---
 
 ## Stage 1: Temporal Feature Extraction ✅
 
-Three outputs per subject×observation. Run individually: `--stage 1a`, `--stage 1b`, `--stage 1c`, or together: `--stage 1`.
+Three outputs per observation. Run individually: `--stage 1a`, `--stage 1b`, `--stage 1c`, or together: `--stage 1`.
+
+**Output root:** `{out_root}/{dataset_id}/{observation_id}/`
 
 ### Stage 1a: `features_temporal_eeg_envelope.csv` ✅
 
@@ -93,12 +115,13 @@ Three outputs per subject×observation. Run individually: `--stage 1a`, `--stage
 **Columns:** `dataset_id | subject_id | task | observation_id | time_s | theta_env | alpha_env | beta_env`
 
 **Pipeline:**
-1. Load raw EEG; preprocess (1–60 Hz, bad-channel rejection, average reference)
-2. Per band: bandpass (theta 4–8, alpha 8–13, beta 13–30 Hz) → Hilbert amplitude → Gaussian smooth (default 2 s)
-3. Average envelope across configurable ROI channels
-4. Downsample to `envelope_output_fs_hz` before CSV write (smoke: **10 Hz**)
+1. Load raw EEG (`eeg_format` from audit)
+2. Preprocess (1–60 Hz, bad-channel rejection, average reference)
+3. Per band: bandpass → Hilbert amplitude → Gaussian smooth (2 s)
+4. Average envelope across configurable ROI channels
+5. Downsample to `envelope_output_fs_hz` (10 Hz) before CSV write
 
-**ROI defaults (ds003838):**
+**ROI defaults (all run configs):**
 
 | Band | Requested ROI |
 |------|---------------|
@@ -106,15 +129,9 @@ Three outputs per subject×observation. Run individually: `--stage 1a`, `--stage
 | Alpha | Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2 |
 | Beta | Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4 |
 
-Missing requested channels are skipped; envelopes average over **available** requested channels only. `group/eeg_envelope_qc.csv` records `*_roi_channels_used` and warnings such as `missing_roi_channel`.
+Missing channels: skip, do not crash; report in `eeg_envelope_qc.csv`.
 
-Z-scoring deferred to Stage 1c aligned CSV.
-
-#### Stage 1a QC outputs ✅
-
-**Per subject:** `eeg_envelope_debug_*.png`, `eeg_envelope_timeseries.png`, optional `eeg_psd_debug.png`
-
-**Group:** `group/eeg_envelope_qc.csv` — ROI channels used, NaN %, min/max/median, `usable_eeg_envelope`, warnings.
+**Group:** `group/eeg_envelope_qc.csv` — includes `condition`, `*_roi_channels_used`, `usable_eeg_envelope`, warnings.
 
 ---
 
@@ -125,61 +142,57 @@ Z-scoring deferred to Stage 1c aligned CSV.
 **Columns:** `dataset_id | subject_id | task | observation_id | time_s | hr | rmssd | sdnn | mean_rr | n_beats_hr_window | n_beats_hrv_window | quality_flag | usable_for_hr | usable_for_hrv`
 
 **Pipeline:**
-1. Channel inventory + auto selection (or configured channel)
-2. Detector comparison: `simple`, `ecg_rpeak` (normal/inverted), `ppg_peak`
-3. Peak detection → IBI cleaning (`ibi_min_ms`–`ibi_max_ms`, outlier jump rejection)
-4. Sliding-window HR / mean_rr / RMSSD / SDNN
+1. Load cardiac file (`cardiac_format` from audit; embedded PPG uses same file as EEG)
+2. Channel inventory + auto selection
+3. Detector comparison: `simple`, `ecg_rpeak`, `ppg_peak`
+4. Peak detection → IBI cleaning
+5. Sliding-window HR / mean_rr / RMSSD / SDNN
 
-| Variable | Window (smoke) | Notes |
-|----------|----------------|-------|
+| Variable | Window | Notes |
+|----------|--------|-------|
 | HR, mean_rr | 15 s | `min_beats_hr: 5` |
 | RMSSD, SDNN | 60 s, step 2 s | `min_beats_hrv: 20` |
 
-#### Cardiac peak detection (implemented)
-
-| Detector | Preprocessing | Peak finder |
-|----------|---------------|-------------|
-| `ecg_rpeak` | Detrend → 5–30 Hz bandpass → z-score | `scipy.find_peaks` prominence + 0.45 s refractory |
-| `ppg_peak` | Detrend → z-score | Prominence-based peaks |
-| `simple` | Detrend → z-score | Legacy height threshold |
-
-**Auto mode:** scores each channel × detector × polarity; picks highest `quality_score`.
-
-**IBI limits:** `ibi_min_ms: 400`, `ibi_max_ms: 1500`
-
-#### Stage 1b QC outputs ✅
-
-**Per subject:** `detected_peaks.csv`, `cardiac_channel_inventory.csv`, `peak_detector_comparison.csv`, debug plots.
-
-**Group:** `group/cardiac_qc.csv`
-
-**ds003838 smoke results:** all three subjects use **ECG + ecg_rpeak**; median HR 71–79 bpm; 100% valid HR/HRV.
+**Group:** `group/cardiac_qc.csv` — includes `condition`, detector metadata, `usable_for_hr`, `usable_for_hrv`.
 
 ---
 
 ### Stage 1c: `features_temporal_aligned.csv` ✅
 
-**Module:** `resample.py`  
-**CLI:** `--stage 1c`
+**Module:** `resample.py`
 
-**Columns:** `dataset_id | subject_id | task | observation_id | time_s | hr | rmssd | sdnn | mean_rr | theta_env | alpha_env | beta_env | hr_z | rmssd_z | sdnn_z | mean_rr_z | theta_env_z | alpha_env_z | beta_env_z`
+**Columns:** raw + z-scored cardiac and envelope columns (see README).
 
 **Steps:**
-1. Gate on `cardiac_qc.usable_for_hr` and `eeg_envelope_qc.usable_eeg_envelope`
-2. Intersect valid time range (EEG + cardiac overlap)
-3. Resample to `temporal_coupling.resample.fs_hz` (default 1 Hz)
-4. Interpolate short gaps only (`interpolate_max_gap_s`) — no long forward-fill
-5. Z-score within subject×observation → `*_z` columns
+1. Gate on upstream QC flags per `observation_id`
+2. Intersect valid time range
+3. Resample to `fs_hz: 1.0`
+4. Interpolate short gaps only (`interpolate_max_gap_s: 5`)
+5. Z-score within observation
 
-**Group:** `group/alignment_qc.csv` — aligned duration, missing % per variable, `recommended_xcorr_lag_s`, `usable_for_xcorr`.
+**Group:** `group/alignment_qc.csv` — `recommended_xcorr_lag_s`, `usable_for_xcorr`.
 
 ---
 
-## ds003838 Synchronization Warning
+## Dataset-Specific Notes
 
-EEG and ECG/PPG are **separate files**. Without shared trigger metadata, assume **t = 0** alignment. **Report this assumption** in audit + methods — a 5–10 s offset could invalidate lag conclusions.
+### ds003838
 
-Build **rest task first**; memory task separately (task events confound coupling).
+- Separate EEG and ECG files; assume **t = 0** alignment unless trigger metadata exists (report in methods).
+- **rest** (~3–4 min): validated reference, 65 subjects, Stages 0–4 complete under validation config.
+- **memory**: analyze separately from rest; task events may confound coupling.
+
+### ds006848
+
+- BrainVision EEG with embedded PPG.
+- Tasks: `rest` (22 obs), `verbalwm` (30 obs) — 52 total; Stage 0: 52/52 usable.
+- Longer verbalwm recordings → audit may still cap lag at config `lag_max_s: 60`.
+
+### HIIT
+
+- BrainVision EEG with embedded PPG (photosensor `ph` or pressure `ps`).
+- **8 conditions:** `{ph,ps}_{pre,post}_{rest,tetris}` — ~20 subjects each, 160 observations.
+- Never combine PS and PH in one group summary unless explicitly labeled exploratory.
 
 ---
 
@@ -191,53 +204,56 @@ Build **rest task first**; memory task separately (task events confound coupling
 
 **9 pairs:** HR/RMSSD/SDNN × theta/alpha/beta
 
-**Lag:** per-subject `recommended_xcorr_lag_s` from alignment QC (capped by config `lag_max_s`; smoke/validation: ±60 s)
+**Lag:** per-observation `recommended_xcorr_lag_s` from alignment QC, capped by `lag_max_s` and `floor(overlap_s / 3)`.
 
 #### Peak selection rule (primary)
 
-**Raw peak** = lag where **|r| is maximum** on the lag grid (after optional local-peak detection via `scipy.find_peaks` on signed r).
+**Raw peak** = lag where |r| is maximum on the lag grid.
 
-Primary output columns mirror the raw peak:
+Primary columns: `peak_lag_s` = `raw_peak_lag_s`, etc. Interior/preferred peaks are QC-only.
 
-| Primary column | Equals |
-|----------------|--------|
-| `peak_lag_s` | `raw_peak_lag_s` |
-| `peak_signed_r` | `raw_peak_signed_r` |
-| `peak_abs_r` | `raw_peak_abs_r` |
-| `peak_at_lag_edge` | `raw_peak_at_edge` |
+**Per-observation outputs:** `cross_correlation_peaks.csv`, `cross_correlation_curves.csv`, grid/overlay plots.
 
-**Interior** and **preferred** peak columns (`interior_peak_*`, `preferred_peak_*`) are **QC diagnostics only** — e.g. edge-flagged raw peaks with same-sign interior alternatives. They do **not** replace the primary peak in Stage 3 group summaries or main plots.
+**Group outputs:** aggregated peaks/curves, `cross_correlation_qc_summary.csv`, `cross_correlation_peak_validation.csv`, distribution plots.
 
-**Per-subject outputs:**
-- `cross_correlation_peaks.csv` — peak lag, signed r, edge flags, optional `p_perm`
-- `cross_correlation_curves.csv` — `pair, lag_s, r, n_overlap` (if `save_curves: true`)
-- `cross_correlation_grid_subject.png`, overlay plots, peak distribution plots
+**Permutation null:** `n_permutations: 100` in run configs → `p_perm` per observation.
 
-**Group outputs:**
-- `group/cross_correlation_peaks.csv`, `group/cross_correlation_curves.csv`
-- `group/cross_correlation_qc_summary.csv`
-- `group/cross_correlation_peak_validation.csv`
-- QC plots: peak lag/strength distributions, edge peak summary
-
-**Permutation null:** circular time-shift one signal `n_permutations` times; `p_perm` for observed peak (validation config: 100 permutations).
+**Peak row columns include:** `dataset_id`, `subject_id`, `task`, `condition`, `observation_id`, `pair`, `raw_peak_*`, `p_perm`, …
 
 ---
 
 ## Stage 3: Group Analysis ✅
 
 **Module:** `group_summary.py`  
-**CLI:** `--stage 3`  
-**Input:** group Stage 2 peaks/curves
+**CLI:** `--stage 3`
 
 **Outputs:**
-- `peak_correlation_summary.csv` — per-pair median/mean peak lag and r, FDR q-values
-- `group_cross_correlation_summary.csv` — interpretation labels (direction, coupling strength)
-- `mean_cross_correlation_curves.csv` — group mean ± SEM with common lag range
+- `peak_correlation_summary.csv`
+- `group_cross_correlation_summary.csv`
+- `mean_cross_correlation_curves.csv`
 - `stage3_interpretation_notes.txt`
+- Plots: mean ± SEM grid, peak heatmaps, lag/r distributions, edge peak summary
 
-**Plots:** mean ± SEM grid, peak summary heatmap, edge peak rate heatmap, peak lag/r distribution plots.
+### Three inference layers
 
-**Tests per pair:** signed peak r ≠ 0; median lag ≠ 0; peak r vs permutation null; BH-FDR across 9 pairs (when permutations run).
+| Layer | Columns | Interpretation |
+|-------|---------|----------------|
+| 1. Selected peak signed-r | `sig_peak_signed_r_fdr`, `q_value_peak_signed_r` | Exploratory if not perm-supported |
+| 2. Group permutation peak strength | `sig_group_perm_fdr`, `group_perm_q`, `group_perm_stat` | **Stricter evidence** |
+| 3. Peak-lag direction | `sig_peak_lag_fdr`, `q_value_peak_lag` | Direction stability across subjects |
+
+**ds003838 rest reference (n=65):**
+
+| Pair | `sig_peak_signed_r_fdr` | `sig_group_perm_fdr` | Notes |
+|------|-------------------------|----------------------|-------|
+| All 9 pairs | true | — | Selected peak-r layer |
+| rmssd × beta | true | **true** (q≈0.045) | Permutation-supported |
+| sdnn × beta | true | **true** (q≈0.045) | Permutation-supported; edge peaks ~15% |
+| Others | true | false | Exploratory at group-perm layer |
+
+**Planned:** `subject_consistency_summary.csv` per dataset/task/condition/pair with labels `high_consistency`, `moderate_consistency`, `low_consistency`, `inconclusive_low_n`.
+
+**Planned:** Partitioned group outputs when one config lists multiple tasks/conditions (`group/{partition}/`).
 
 ---
 
@@ -245,128 +261,57 @@ Primary output columns mirror the raw peak:
 
 **Module:** `events.py`  
 **CLI:** `--stage 4`  
-**Input:** `features_temporal_aligned.csv` only (no raw reload)
+**Input:** `features_temporal_aligned.csv`
 
-**Epoch window:** configurable `epoch_pre_s` / `epoch_post_s` (default ±60 s for ds003838).
+**Epoch window:** `epoch_pre_s` / `epoch_post_s` (default ±60 s).
 
-### Averaging method
+### Event types
 
-`subject_mean_then_group_mean` (`subject_balanced_average: true`):
+| Direction | Event types |
+|-----------|-------------|
+| HR → EEG | HR increase, HR decrease |
+| EEG → cardiac | Theta burst, alpha suppression, beta burst |
 
-1. Average **accepted events within each subject** → one trajectory per subject.
-2. Average **subject-level trajectories** across subjects (equal weight per subject).
-
-Subjects with many events do **not** dominate the group curve.
-
-### Heart-led (HR → EEG)
-
-- Compute ΔHR z over `hr_delta_window_s` (default 15 s).
-- Top/bottom tail events via `hr_percentile` / `event_percentile` (default top/bottom 10%).
-- Extract `theta_env_z`, `alpha_env_z`, `beta_env_z` epochs around each accepted event.
-
-### Brain-led (EEG → cardiac)
-
-Configurable per band (`fixed_z` or `percentile`):
-
-| Event | Default detection |
-|-------|-------------------|
-| Theta burst | top 10% `theta_env_z`, ≥ `min_event_duration_s`, `min_event_distance_s` between onsets |
-| Alpha suppression | bottom 10% `alpha_env_z` (or `fixed_z` &lt; −threshold) |
-| Beta burst | top 10% `beta_env_z` |
-
-Extract `hr_z`, `rmssd_z`, `sdnn_z` around each accepted event onset.
-
-### Usability thresholds
+### Usability
 
 | Rule | Default |
 |------|---------|
 | `min_total_events` | 10 |
 | `min_contributing_subjects` | 4 |
 
-Below threshold → `usable_for_group_plot: false`, marked exploratory in QC and plot titles.
+**Outputs:** `event_counts.csv`, `event_list.csv`, `event_qc.csv`, triggered CSVs/PNGs, `stage4_interpretation_notes.txt`.
 
-### Validation cohort status (8 subjects)
+**`event_qc.csv` columns:** `event_type`, `total_events`, `n_subjects`, `usable_for_group_plot`, `subject_balanced_average`, `warning`.
 
-| Event type | Events | Subjects | Status |
-|------------|--------|----------|--------|
-| HR increase | 40 | 8 | usable |
-| HR decrease | 40 | 8 | usable |
-| Beta burst | 10 | 7 | usable (cautious) |
-| Theta burst | 8 | 5 | exploratory |
-| Alpha suppression | 5 | 5 | exploratory |
-
-### Outputs
-
-| File | Description |
-|------|-------------|
-| `event_counts.csv` | Per-subject accepted event counts |
-| `event_list.csv` | Every detected event: time, value, epoch window, `accepted`, `rejection_reason` |
-| `event_qc.csv` | Group usability + averaging metadata |
-| `event_triggered_hr_to_eeg.csv` | Group HR→EEG curves (mean_z, sem_z, n_subjects, n_events) |
-| `event_triggered_eeg_to_hr.csv` | Group EEG→cardiac curves |
-| `event_triggered_hr_to_eeg.png` | HR-led plots with exploratory labels |
-| `event_triggered_eeg_to_hr.png` | Brain-led plots |
-| `stage4_interpretation_notes.txt` | Usability summary + interpretation guidance |
-
-**`event_list.csv` columns:** `dataset_id | subject_id | task | observation_id | event_type | event_time_s | event_value | epoch_start_s | epoch_end_s | accepted | rejection_reason`
-
-**`event_qc.csv` columns:** `event_type | total_events | n_subjects | mean/min/max_events_per_subject | usable_for_group_plot | averaging_method | subject_balanced_average | min_total_events_required | min_subjects_required | warning`
-
-**Interpretation (validation run):**
-- HR-triggered EEG plots are the most reliable Stage 4 result.
-- EEG-triggered cardiac plots are exploratory, especially theta and alpha.
-- Beta burst meets minimum counts but interpret cautiously.
-- No biological conclusions until the full cohort is run.
-
-### Events config reference
-
-`events.enabled` defaults to **`false`** in smoke configs (Stage 4 is opt-in during development). For validation and full-dataset runs that include event-triggered analysis, set **`enabled: true`**.
-
-```yaml
-temporal_coupling:
-  events:
-    enabled: false   # set true for validation/full Stage 4 runs
-    hr_delta_window_s: 15
-    epoch_pre_s: 60
-    epoch_post_s: 60
-    hr_percentile: 10
-    min_event_duration_s: 2
-    min_event_distance_s: 10
-    min_total_events: 10
-    min_contributing_subjects: 4
-    theta_burst_method: percentile
-    theta_burst_percentile: 90
-    alpha_suppression_method: percentile
-    alpha_suppression_percentile: 10
-    beta_burst_method: percentile
-    beta_burst_percentile: 90
-    eeg_event_threshold_z: 2.0   # used when method: fixed_z
-```
+**Planned:** `cross_dataset_event_qc_summary.csv` (dataset × task × condition × event_type).
 
 ---
 
-## Dataset Order
+## Cross-Dataset Replication (in progress)
 
-1. **ds003838 rest** — ~3–4 min, ±60 s lag, separate EEG/ECG files — **pipeline validated (smoke + 8-subject validation)**
-2. **ds003838 rest full cohort** — `config.run.ds003838.temporal_coupling.yaml` — **next scale-up**
-3. **ds006848** — longer rest; cross-dataset validation after ds003838 full
-4. **HIIT** — ~5 min epochs only; separate PRE/POST × rest/tetris × ph/ps
+**Goal:** Compare ds003838, ds006848, and HIIT without causal claims.
+
+**Planned outputs** (under `derivatives/cross_dataset_temporal_coupling/`):
+
+| File | Rows | Key columns |
+|------|------|-------------|
+| `cross_dataset_temporal_coupling_summary.csv` | dataset × task × condition × pair | peak stats, perm q, consistency, `replication_label` |
+| `subject_consistency_summary.csv` | dataset × task × condition × pair | IQR, % positive r, % edge peaks, `consistency_label` |
+| `cross_dataset_event_qc_summary.csv` | dataset × task × condition × event_type | usability flags |
+
+**Replication labels:** `replicates_strongly`, `replicates_partially`, `does_not_replicate`, `inconclusive_low_n_or_qc`.
+
+**Planned plots:** peak strength, group perm, lag, edge peak, consistency heatmaps (rows = dataset/task/condition, columns = 9 pairs).
+
+**Reference anchor:** ds003838 rest from `validation_ds003838_temporal_coupling` (65 subjects).
 
 ---
 
-## Config Reference (smoke)
+## Config Reference (run configs)
+
+Shared `temporal_coupling` block across `config.run.*.temporal_coupling.yaml` and `config.validation.ds003838.temporal_coupling.yaml`:
 
 ```yaml
-# config.smoke.ds003838.temporal_coupling.yaml
-
-dataset_id: ds003838
-paths:
-  raw_root: ./data/raw/ds003838
-  out_root: ./derivatives/smoke_ds003838_temporal_coupling
-
-subjects: [sub-033, sub-036, sub-038]
-tasks: [rest]
-
 temporal_coupling:
   audit:
     min_overlap_s: 120
@@ -382,7 +327,6 @@ temporal_coupling:
   cardiac:
     channel: auto
     detector: auto
-    ecg: { bandpass_hz: [5,30], min_peak_distance_s: 0.45 }
     hr_window_s: 15.0
     hrv_window_s: 60.0
     hrv_step_s: 2.0
@@ -393,16 +337,39 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
-    n_permutations: 0
+    n_permutations: 100
+    edge_margin_s: 0
+    min_peak_distance_s: 10
   events:
+    enabled: true
     epoch_pre_s: 60
     epoch_post_s: 60
-    min_event_distance_s: 10
+    hr_percentile: 10
     min_total_events: 10
     min_contributing_subjects: 4
-    theta_burst_method: percentile
-    alpha_suppression_method: percentile
-    alpha_suppression_percentile: 10
+  group:
+    plot_common_lag_only: true
+    n_group_permutations: 100
+```
+
+Dataset-specific top-level filters:
+
+```yaml
+# ds003838 all tasks
+tasks: [rest, memory]
+conditions: [rest, memory]
+
+# ds006848
+tasks: [rest, verbalwm]
+conditions: [rest, verbalwm]
+
+# HIIT
+tasks: [rest, tetris]
+conditions: [ph_pre_rest, ph_pre_tetris, ph_post_rest, ph_post_tetris,
+            ps_pre_rest, ps_pre_tetris, ps_post_rest, ps_post_tetris]
+sessions: [ph, ps]
+paths:
+  raw_root: ./data/raw/HIIT
 ```
 
 ---
@@ -412,45 +379,76 @@ temporal_coupling:
 | # | Task | Status |
 |---|------|--------|
 | 1 | Config + Stage 0 audit | ✅ |
-| 2 | Audit ds003838 rest (smoke) | ✅ |
-| 3 | `eeg_envelope.py` + QC plots | ✅ |
-| 4 | `cardiac_timeseries.py` + detectors + QC plots | ✅ |
-| 5 | `resample.py` (Stage 1c) | ✅ |
-| 6 | Synthetic xcorr test | ✅ |
-| 7 | Smoke 3 subjects end-to-end | ✅ |
-| 8 | Permutation null in `cross_correlation.py` | ✅ |
-| 9 | `group_summary.py` (Stage 3) | ✅ |
-| 10 | `events.py` (Stage 4) | ✅ |
-| 11 | Validation 8 subjects (Stages 2–4) | ✅ |
-| 12 | ds003838 rest full cohort (`config.run.ds003838.temporal_coupling.yaml`) | ⏳ **next** |
-| 13 | ds006848 rest | ⏳ |
-| 14 | HIIT full cohort | ⏳ |
-| 15 | Full-cohort biological interpretation | ⏳ |
+| 2 | Smoke 3 subjects (ds003838 rest) | ✅ |
+| 3 | Stages 1a–1c + QC | ✅ |
+| 4 | Stage 2 xcorr + permutation null | ✅ |
+| 5 | Stage 3 group summary + group perm | ✅ |
+| 6 | Stage 4 events | ✅ |
+| 7 | ds003838 rest full cohort (validation config) | ✅ **65 subjects** |
+| 8 | Multi-dataset audit (adapters, BrainVision, embedded PPG) | ✅ |
+| 9 | Observation-level output dirs (`paths.py`) | ✅ |
+| 10 | Run configs: ds003838 all tasks, ds006848, HIIT | ✅ |
+| 11 | ds006848 Stages 1–4 | ⏳ Stage 0 done (52/52) |
+| 12 | HIIT Stages 0–4 (8 conditions) | ⏳ |
+| 13 | ds003838 memory + full run config | ⏳ |
+| 14 | Partitioned group outputs (per task/condition) | ⏳ |
+| 15 | `subject_consistency_summary.csv` | ⏳ |
+| 16 | `cross_dataset_temporal_coupling_summary.csv` + plots | ⏳ |
+| 17 | Cross-dataset replication report (conservative) | ⏳ |
 
 ---
 
 ## Deliverables Checklist
 
-### Per subject
+### Per observation
 - [x] `features_temporal_eeg_envelope.csv`
 - [x] `features_temporal_cardiac.csv`
 - [x] `detected_peaks.csv`
-- [x] EEG envelope QC plots + `eeg_envelope_qc.csv` (group)
-- [x] Cardiac QC plots + `cardiac_qc.csv` (group)
 - [x] `features_temporal_aligned.csv`
 - [x] `cross_correlation_peaks.csv`, `cross_correlation_curves.csv`
 
-### Per dataset (`group/`)
-- [x] `data_audit.csv`
-- [x] `eeg_envelope_qc.csv`
-- [x] `cardiac_qc.csv`
-- [x] `alignment_qc.csv`
+### Per dataset run (`group/`)
+- [x] `data_audit.csv` (with `condition`, `eeg_format`, `ppg_source`)
+- [x] `eeg_envelope_qc.csv`, `cardiac_qc.csv`, `alignment_qc.csv`
 - [x] `cross_correlation_peaks.csv`, `cross_correlation_curves.csv`, `cross_correlation_qc_summary.csv`
+- [x] `cross_correlation_peak_validation.csv`
 - [x] `peak_correlation_summary.csv`, `group_cross_correlation_summary.csv`
 - [x] `mean_cross_correlation_curves.csv`, `stage3_interpretation_notes.txt`
-- [x] Mean xcorr curves, peak lag/r distributions, summary heatmaps
+- [x] Stage 3 plots (heatmaps, lag/r distributions, mean ± SEM grid)
 - [x] `event_counts.csv`, `event_list.csv`, `event_qc.csv`
 - [x] `event_triggered_hr_to_eeg.csv`, `event_triggered_eeg_to_hr.csv`
 - [x] `event_triggered_hr_to_eeg.png`, `event_triggered_eeg_to_hr.png`
 - [x] `stage4_interpretation_notes.txt`
-- [ ] Full-cohort interpretation report
+
+### Per dataset × task × condition (planned)
+- [ ] Partitioned `group/{partition}/` copies of Stage 2–4 outputs
+- [ ] `subject_consistency_summary.csv`
+
+### Cross-dataset (planned)
+- [ ] `cross_dataset_temporal_coupling_summary.csv`
+- [ ] `cross_dataset_event_qc_summary.csv`
+- [ ] Cross-dataset heatmaps
+- [ ] Conservative replication report for Russell
+
+---
+
+## Running (staged workflow)
+
+```bash
+PY=".venv/bin/python"
+CFG=config.run.ds006848.temporal_coupling.yaml   # or ds003838 / hiit
+
+$PY -m ppg_eeg.temporal_coupling --config $CFG --stage 0
+# inspect group/data_audit.csv
+
+$PY -m ppg_eeg.temporal_coupling --config $CFG --stage 1
+# inspect eeg_envelope_qc.csv, cardiac_qc.csv, alignment_qc.csv
+
+$PY -m ppg_eeg.temporal_coupling --config $CFG --stage 2
+# inspect cross_correlation_peak_validation.csv
+
+$PY -m ppg_eeg.temporal_coupling --config $CFG --stage 3
+$PY -m ppg_eeg.temporal_coupling --config $CFG --stage 4
+```
+
+Do not use `--stage all` on full cohorts until QC gates are verified per stage.

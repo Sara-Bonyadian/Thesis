@@ -17,9 +17,9 @@ from scipy.signal import hilbert, welch
 
 from ..eeg import preprocess_eeg
 from ..features_core import _read_raw
-from ..output_layout import safe_subject_dir_name
 from .config import TemporalCouplingConfig
 from .data_audit import audit_output_path, group_output_dir
+from .paths import observation_output_dir
 
 ENVELOPE_FILENAME = "features_temporal_eeg_envelope.csv"
 QC_GROUP_FILENAME = "eeg_envelope_qc.csv"
@@ -46,8 +46,10 @@ class UsableObservation:
     dataset_id: str
     subject_id: str
     task: str
+    condition: str
     observation_id: str
     eeg_file: Path
+    eeg_format: str
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class EegEnvelopeQcRecord:
     dataset_id: str
     subject_id: str
     task: str
+    condition: str
     observation_id: str
     eeg_file: str
     sfreq: float
@@ -93,6 +96,7 @@ class EegEnvelopeQcRecord:
             "dataset_id": self.dataset_id,
             "subject_id": self.subject_id,
             "task": self.task,
+            "condition": self.condition,
             "observation_id": self.observation_id,
             "eeg_file": self.eeg_file,
             "sfreq": self.sfreq,
@@ -118,12 +122,8 @@ class EegEnvelopeQcRecord:
         }
 
 
-def subject_output_dir(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return Path(cfg.paths.out_root) / cfg.dataset_id / safe_subject_dir_name(subject_id)
-
-
-def envelope_output_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return subject_output_dir(cfg, subject_id) / ENVELOPE_FILENAME
+def envelope_output_path(cfg: TemporalCouplingConfig, observation_id: str) -> Path:
+    return observation_output_dir(cfg, observation_id) / ENVELOPE_FILENAME
 
 
 def envelope_qc_group_path(cfg: TemporalCouplingConfig) -> Path:
@@ -313,6 +313,7 @@ def envelopes_to_dataframe(
     dataset_id: str,
     subject_id: str,
     task: str,
+    condition: str,
     observation_id: str,
     result: BandEnvelopeResult,
 ) -> pd.DataFrame:
@@ -321,6 +322,7 @@ def envelopes_to_dataframe(
             "dataset_id": dataset_id,
             "subject_id": subject_id,
             "task": task,
+            "condition": condition,
             "observation_id": observation_id,
             "time_s": result.time_s,
             "theta_env": result.envelopes["theta"],
@@ -381,6 +383,7 @@ def build_eeg_envelope_qc(
         dataset_id=obs.dataset_id,
         subject_id=obs.subject_id,
         task=obs.task,
+        condition=obs.condition,
         observation_id=obs.observation_id,
         eeg_file=str(obs.eeg_file),
         sfreq=native_result.sfreq,
@@ -676,36 +679,38 @@ def load_usable_observations(cfg: TemporalCouplingConfig) -> list[UsableObservat
                     dataset_id=str(row.dataset_id),
                     subject_id=str(row.subject_id),
                     task=str(row.task),
+                    condition=str(getattr(row, "condition", row.task)),
                     observation_id=str(row.observation_id),
                     eeg_file=eeg_file,
+                    eeg_format=str(getattr(row, "eeg_format", "eeglab")),
                 )
             )
         return observations
 
     warnings.warn(
-        f"[temporal_coupling] {audit_path} not found; using all configured subject/task pairs. "
+        f"[temporal_coupling] {audit_path} not found; using configured observations. "
         "Run --stage 0 first for audit gating.",
         stacklevel=2,
     )
-    from .data_audit import _planned_subject_tasks, _resolve_dataset_root, _find_signal_file
+    from .data_audit import list_configured_observations
 
-    dataset_root = _resolve_dataset_root(cfg.paths.raw_root, cfg.dataset_id)
-    observations: list[UsableObservation] = []
-    for subject_id, task in _planned_subject_tasks(cfg):
-        eeg_path = None if dataset_root is None else _find_signal_file(dataset_root, subject_id, task, "eeg")
-        if eeg_path is None or not eeg_path.is_file():
+    observations = []
+    for obs in list_configured_observations(cfg):
+        if not obs.eeg_path.is_file():
             warnings.warn(
-                f"[temporal_coupling] skipping {subject_id} task={task}: EEG file missing.",
+                f"[temporal_coupling] skipping {obs.subject_id} condition={obs.condition_label}: EEG file missing.",
                 stacklevel=2,
             )
             continue
         observations.append(
             UsableObservation(
-                dataset_id=cfg.dataset_id,
-                subject_id=subject_id,
-                task=task,
-                observation_id=f"{cfg.dataset_id}-{subject_id}-task-{task}",
-                eeg_file=eeg_path,
+                dataset_id=obs.dataset_id,
+                subject_id=obs.subject_id,
+                task=obs.task_label,
+                condition=obs.condition_label,
+                observation_id=obs.observation_id,
+                eeg_file=obs.eeg_path,
+                eeg_format=obs.eeg_format,
             )
         )
     return observations
@@ -732,10 +737,10 @@ def run_stage1a(cfg: TemporalCouplingConfig) -> list[Path]:
     n_ok = 0
 
     for obs in observations:
-        out_dir = subject_output_dir(cfg, obs.subject_id)
+        out_dir = observation_output_dir(cfg, obs.observation_id)
         out_path = out_dir / ENVELOPE_FILENAME
         try:
-            raw = _read_raw(obs.eeg_file, "eeglab")
+            raw = _read_raw(obs.eeg_file, obs.eeg_format)
             native_result = extract_eeg_envelopes(raw, cfg)
             output_result = downsample_envelope_result(
                 native_result,
@@ -754,6 +759,7 @@ def run_stage1a(cfg: TemporalCouplingConfig) -> list[Path]:
                 dataset_id=obs.dataset_id,
                 subject_id=obs.subject_id,
                 task=obs.task,
+                condition=obs.condition,
                 observation_id=obs.observation_id,
                 result=output_result,
             )

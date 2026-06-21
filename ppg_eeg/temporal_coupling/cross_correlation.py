@@ -16,11 +16,10 @@ import pandas as pd
 
 from .cardiac_detectors import _as_auto_float, _find_peaks
 from .config import TemporalCouplingConfig, TemporalCouplingCrossCorrelationConfig
-from .data_audit import group_output_dir
+from .paths import group_output_dir, hiit_condition_from_observation_id, observation_output_dir
 from .resample import (
     QC_GROUP_FILENAME as ALIGNMENT_QC_FILENAME,
     aligned_output_path,
-    subject_output_dir,
 )
 
 CURVES_FILENAME = "cross_correlation_curves.csv"
@@ -81,6 +80,7 @@ PEAK_COLUMNS = (
     "dataset_id",
     "subject_id",
     "task",
+    "condition",
     "observation_id",
     "pair",
     "cardiac_var",
@@ -162,12 +162,12 @@ class PeakCorrelationResult:
     p_perm: float | None
 
 
-def curves_output_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return subject_output_dir(cfg, subject_id) / CURVES_FILENAME
+def curves_output_path(cfg: TemporalCouplingConfig, observation_id: str) -> Path:
+    return observation_output_dir(cfg, observation_id) / CURVES_FILENAME
 
 
-def peaks_output_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return subject_output_dir(cfg, subject_id) / PEAKS_FILENAME
+def peaks_output_path(cfg: TemporalCouplingConfig, observation_id: str) -> Path:
+    return observation_output_dir(cfg, observation_id) / PEAKS_FILENAME
 
 
 def group_curves_output_path(cfg: TemporalCouplingConfig) -> Path:
@@ -340,12 +340,26 @@ def _same_correlation_sign(a: float, b: float, *, tol: float = 1e-9) -> bool:
 
 
 def _select_positive_max_peak(points: list[LagCorrelationPoint]) -> LagCorrelationPoint | None:
-    finite = [point for point in points if np.isfinite(point.r)]
+    finite = [point for point in points if np.isfinite(point.r) and point.r > 0]
     if not finite:
         return None
     max_r = max(point.r for point in finite)
     candidates = [point for point in finite if np.isclose(point.r, max_r, rtol=0.0, atol=PEAK_VALIDATION_TOL)]
     return min(candidates, key=lambda point: abs(point.lag_s))
+
+
+def _auto_positive_threshold(
+    values: np.ndarray,
+    *,
+    percentile: float,
+    fallback: np.ndarray | None = None,
+) -> float:
+    positive = values[np.isfinite(values) & (values > 0)]
+    source = positive if positive.size >= 3 else (fallback if fallback is not None else values)
+    finite = source[np.isfinite(source)]
+    if finite.size == 0:
+        return 0.0
+    return max(0.0, float(np.percentile(finite, percentile)))
 
 
 def _resolved_min_peak_distance_s(
@@ -375,9 +389,15 @@ def _find_local_positive_peaks(
         return []
 
     r_values = np.asarray([point.r for point in finite], dtype=float)
-    prominence_val = _as_auto_float(prominence, r_values, percentile=80)
-    height_auto = _as_auto_float(height, r_values, percentile=65)
-    height_val = None if str(height).casefold() == "auto" else height_auto
+    prominence_val = (
+        _auto_positive_threshold(r_values, percentile=80)
+        if str(prominence).casefold() == "auto"
+        else max(0.0, float(prominence))
+    )
+    if str(height).casefold() == "auto":
+        height_val = 0.0
+    else:
+        height_val = max(0.0, _auto_positive_threshold(r_values, percentile=65))
     resolved_distance = _resolved_min_peak_distance_s(min_peak_distance_s, lag_step_s=lag_step_s)
     sfreq = 1.0 / lag_step_s
     _, peak_idx = _find_peaks(
@@ -387,7 +407,7 @@ def _find_local_positive_peaks(
         prominence=prominence_val,
         height=height_val,
     )
-    return [finite[int(idx)] for idx in peak_idx]
+    return [finite[int(idx)] for idx in peak_idx if finite[int(idx)].r > 0]
 
 
 def _select_detected_peak(
@@ -463,7 +483,29 @@ def extract_peaks(
         prominence=peak_prominence,
         height=peak_height,
     )
-    assert raw_point is not None
+    if raw_point is None:
+        nan = float("nan")
+        return PeakCorrelationResult(
+            raw_peak_lag_s=nan,
+            raw_peak_signed_r=nan,
+            raw_peak_abs_r=nan,
+            raw_peak_at_edge=False,
+            interior_peak_lag_s=nan,
+            interior_peak_signed_r=nan,
+            interior_peak_abs_r=nan,
+            preferred_peak_lag_s=nan,
+            preferred_peak_signed_r=nan,
+            preferred_peak_abs_r=nan,
+            preferred_peak_source="raw_peak",
+            peak_direction="unknown",
+            min_lag_s=min_lag_s,
+            max_lag_s=max_lag_s,
+            n_valid_lags=n_valid_lags,
+            n_overlap_at_raw_peak=0,
+            n_overlap_at_preferred_peak=0,
+            warning="no_positive_peak",
+            p_perm=None,
+        )
     raw_lag, raw_signed, raw_abs, raw_overlap = _point_from_peak(raw_point)
     raw_at_edge = _is_edge_lag(
         raw_lag,
@@ -633,12 +675,12 @@ def load_subject_pair_datasets(
     fs_hz = cfg.temporal_coupling.resample.fs_hz
     datasets: list[SubjectPairData] = []
 
-    for subject_id in subject_ids:
-        aligned_path = aligned_output_path(cfg, subject_id)
+    for observation_id in subject_ids:
+        aligned_path = aligned_output_path(cfg, observation_id)
         if not aligned_path.is_file():
             continue
         aligned_df = pd.read_csv(aligned_path)
-        lag_max_s = _resolve_lag_max_s(cfg, subject_id=subject_id, alignment_qc=alignment_qc)
+        lag_max_s = _resolve_lag_max_s(cfg, observation_id=observation_id, alignment_qc=alignment_qc)
         lag_grid_s = build_lag_grid(lag_max_s=lag_max_s, lag_step_s=xcorr_cfg.lag_step_s)
         cardiac = _prepare_series(
             aligned_df[pair.cardiac_var].to_numpy(dtype=float),
@@ -652,7 +694,7 @@ def load_subject_pair_datasets(
         )
         datasets.append(
             SubjectPairData(
-                subject_id=subject_id,
+                subject_id=str(aligned_df["subject_id"].iloc[0]),
                 cardiac=cardiac,
                 eeg=eeg,
                 lag_grid_s=lag_grid_s,
@@ -747,14 +789,16 @@ def permutation_p_value(
 def _resolve_lag_max_s(
     cfg: TemporalCouplingConfig,
     *,
-    subject_id: str,
+    observation_id: str,
     alignment_qc: pd.DataFrame | None,
 ) -> float:
     lag_max_s = cfg.temporal_coupling.cross_correlation.lag_max_s
     if alignment_qc is None or alignment_qc.empty:
         return lag_max_s
 
-    rows = alignment_qc.loc[alignment_qc["subject_id"] == subject_id]
+    rows = alignment_qc.loc[alignment_qc["observation_id"] == observation_id]
+    if rows.empty and "subject_id" in alignment_qc.columns:
+        rows = alignment_qc.loc[alignment_qc["subject_id"] == observation_id]
     if rows.empty or "recommended_xcorr_lag_s" not in rows.columns:
         return lag_max_s
 
@@ -764,14 +808,7 @@ def _resolve_lag_max_s(
     return min(lag_max_s, recommended)
 
 
-def _load_alignment_qc(cfg: TemporalCouplingConfig) -> pd.DataFrame | None:
-    qc_path = alignment_qc_path(cfg)
-    if not qc_path.is_file():
-        return None
-    return pd.read_csv(qc_path)
-
-
-def _usable_subject_ids(alignment_qc: pd.DataFrame | None, observations: list[str]) -> set[str]:
+def _usable_observation_ids(alignment_qc: pd.DataFrame | None, observations: list[str]) -> set[str]:
     if alignment_qc is None or alignment_qc.empty:
         return set(observations)
     if "usable_for_xcorr" not in alignment_qc.columns:
@@ -779,7 +816,16 @@ def _usable_subject_ids(alignment_qc: pd.DataFrame | None, observations: list[st
     usable = alignment_qc.loc[
         alignment_qc["usable_for_xcorr"].astype(str).str.lower().isin({"true", "1", "yes"})
     ]
+    if "observation_id" in usable.columns:
+        return set(usable["observation_id"].astype(str))
     return set(usable["subject_id"].astype(str))
+
+
+def _load_alignment_qc(cfg: TemporalCouplingConfig) -> pd.DataFrame | None:
+    qc_path = alignment_qc_path(cfg)
+    if not qc_path.is_file():
+        return None
+    return pd.read_csv(qc_path)
 
 
 def _peak_to_row(meta: dict[str, str], pair: VariablePair, peak: PeakCorrelationResult) -> dict[str, object]:
@@ -827,11 +873,18 @@ def compute_observation_xcorr(
     lag_grid_s = build_lag_grid(lag_max_s=lag_max_s, lag_step_s=lag_step_s)
 
     row0 = aligned_df.iloc[0]
+    observation_id = str(row0["observation_id"])
+    task = str(row0["task"])
+    if "condition" in aligned_df.columns and pd.notna(row0["condition"]) and str(row0["condition"]) != task:
+        condition = str(row0["condition"])
+    else:
+        condition = hiit_condition_from_observation_id(observation_id) or task
     meta = {
         "dataset_id": str(row0["dataset_id"]),
         "subject_id": str(row0["subject_id"]),
-        "task": str(row0["task"]),
-        "observation_id": str(row0["observation_id"]),
+        "task": task,
+        "condition": condition,
+        "observation_id": observation_id,
     }
 
     curve_rows: list[dict[str, object]] = []
@@ -1243,6 +1296,37 @@ def build_qc_summary(
     return summary_rows
 
 
+def _pair_common_lag_bounds(pair_curves: pd.DataFrame) -> tuple[float, float] | None:
+    total = int(pair_curves["subject_id"].nunique())
+    if total == 0:
+        return None
+    lag_counts = pair_curves.groupby("lag_s")["subject_id"].nunique()
+    common_lags = lag_counts[lag_counts == total].index.astype(float)
+    if common_lags.empty:
+        return None
+    return float(common_lags.min()), float(common_lags.max())
+
+
+def _pair_mean_curve_in_common_range(pair_curves: pd.DataFrame) -> pd.DataFrame:
+    common_bounds = _pair_common_lag_bounds(pair_curves)
+    total = int(pair_curves["subject_id"].nunique())
+    rows: list[dict[str, object]] = []
+    for lag_s, lag_rows in pair_curves.groupby("lag_s"):
+        lag_s = float(lag_s)
+        if common_bounds is not None:
+            lo, hi = common_bounds
+            if lag_s < lo or lag_s > hi:
+                continue
+        finite = lag_rows["r"].astype(float)
+        finite = finite[np.isfinite(finite)]
+        if int(finite.size) < total:
+            continue
+        rows.append({"lag_s": lag_s, "r": float(finite.mean())})
+    if not rows:
+        return pd.DataFrame(columns=["lag_s", "r"])
+    return pd.DataFrame(rows).sort_values("lag_s")
+
+
 def _plot_pair_overlay(
     pair: VariablePair,
     curves_df: pd.DataFrame,
@@ -1276,22 +1360,33 @@ def _plot_pair_overlay(
             line_color=line.get_color(),
         )
 
-    grouped = pair_curves.groupby("lag_s", as_index=False)["r"].mean().sort_values("lag_s")
-    ax.plot(grouped["lag_s"], grouped["r"], color="black", linewidth=2.5)
+    mean_curve = _pair_mean_curve_in_common_range(pair_curves)
+    if not mean_curve.empty:
+        ax.plot(mean_curve["lag_s"], mean_curve["r"], color="black", linewidth=2.5)
 
     ax.axvline(0.0, color="0.7", linewidth=0.8, linestyle="--")
     ax.set_xlabel("Lag (s)")
     ax.set_ylabel("Correlation r")
 
+    common_bounds = _pair_common_lag_bounds(pair_curves)
+    if common_bounds is not None:
+        ax.set_xlim(common_bounds[0], common_bounds[1])
+
     n_subjects = int(pair_peaks["subject_id"].nunique()) if not pair_peaks.empty else 0
     n_edge = int(pair_peaks["raw_peak_at_edge"].astype(bool).sum()) if not pair_peaks.empty else 0
     median_raw_lag = float(pair_peaks["raw_peak_lag_s"].median()) if not pair_peaks.empty else float("nan")
     median_pref_lag = float(pair_peaks["preferred_peak_lag_s"].median()) if not pair_peaks.empty else float("nan")
+    common_note = (
+        f", common_lag=[{common_bounds[0]:g}, {common_bounds[1]:g}]s"
+        if common_bounds is not None
+        else ""
+    )
     title_lines = [
         f"Cross-correlation overlay: {pair.pair}",
         (
             f"subjects={n_subjects}, edge_peaks={n_edge}, "
             f"median_preferred_lag={median_pref_lag:.1f}s, median_raw_lag={median_raw_lag:.1f}s"
+            f"{common_note}"
         ),
     ]
     ax.set_title("\n".join(title_lines), fontsize=10)
@@ -1459,7 +1554,7 @@ def write_qc_plots(
     *,
     all_curve_rows: list[dict[str, object]],
     all_peak_rows: list[dict[str, object]],
-    processed_subjects: list[str],
+    processed_observations: list[str],
 ) -> list[Path]:
     if not cfg.temporal_coupling.output.save_plots:
         return []
@@ -1471,13 +1566,13 @@ def write_qc_plots(
     curves_df = pd.DataFrame(all_curve_rows)
     peaks_df = pd.DataFrame(all_peak_rows)
 
-    for subject_id in processed_subjects:
-        subject_curves = curves_df.loc[curves_df["subject_id"] == subject_id]
-        subject_peaks = peaks_df.loc[peaks_df["subject_id"] == subject_id]
-        if subject_curves.empty or subject_peaks.empty:
+    for observation_id in processed_observations:
+        obs_curves = curves_df.loc[curves_df["observation_id"] == observation_id]
+        obs_peaks = peaks_df.loc[peaks_df["observation_id"] == observation_id]
+        if obs_curves.empty or obs_peaks.empty:
             continue
-        out_path = subject_output_dir(cfg, subject_id) / GRID_PLOT
-        _plot_subject_grid(subject_id, subject_curves, subject_peaks, out_path)
+        out_path = observation_output_dir(cfg, observation_id) / GRID_PLOT
+        _plot_subject_grid(observation_id, obs_curves, obs_peaks, out_path)
         plot_paths.append(out_path)
 
     for pair in variable_pairs():
@@ -1510,40 +1605,42 @@ def write_qc_plots(
 
 def run_stage2(cfg: TemporalCouplingConfig) -> list[Path]:
     alignment_qc = _load_alignment_qc(cfg)
-    if alignment_qc is not None and not alignment_qc.empty:
-        subject_ids = sorted(alignment_qc["subject_id"].astype(str).unique())
+    if alignment_qc is not None and not alignment_qc.empty and "observation_id" in alignment_qc.columns:
+        observation_ids = sorted(alignment_qc["observation_id"].astype(str).unique())
+    elif alignment_qc is not None and not alignment_qc.empty:
+        observation_ids = sorted(alignment_qc["subject_id"].astype(str).unique())
     else:
         dataset_dir = Path(cfg.paths.out_root) / cfg.dataset_id
-        subject_ids = sorted(
+        observation_ids = sorted(
             path.name
             for path in dataset_dir.iterdir()
             if path.is_dir() and path.name != "group" and (path / "features_temporal_aligned.csv").is_file()
         )
 
-    if not subject_ids:
+    if not observation_ids:
         print("[temporal_coupling] stage=2: no aligned observations found.")
         return []
 
-    usable_ids = _usable_subject_ids(alignment_qc, subject_ids)
+    usable_ids = _usable_observation_ids(alignment_qc, observation_ids)
     written: list[Path] = []
     all_curve_rows: list[dict[str, object]] = []
     all_peak_rows: list[dict[str, object]] = []
-    processed_subjects: list[str] = []
-    subject_lag_ranges: dict[str, tuple[float, float]] = {}
+    processed_observations: list[str] = []
+    observation_lag_ranges: dict[str, tuple[float, float]] = {}
     n_ok = 0
 
-    for subject_id in subject_ids:
-        if subject_id not in usable_ids:
+    for observation_id in observation_ids:
+        if observation_id not in usable_ids:
             warnings.warn(
-                f"[temporal_coupling] stage=2 skipping {subject_id}: usable_for_xcorr=False.",
+                f"[temporal_coupling] stage=2 skipping {observation_id}: usable_for_xcorr=False.",
                 stacklevel=2,
             )
             continue
 
-        aligned_path = aligned_output_path(cfg, subject_id)
+        aligned_path = aligned_output_path(cfg, observation_id)
         if not aligned_path.is_file():
             warnings.warn(
-                f"[temporal_coupling] stage=2 skipping {subject_id}: missing {aligned_path.name}. "
+                f"[temporal_coupling] stage=2 skipping {observation_id}: missing {aligned_path.name}. "
                 "Run --stage 1c first.",
                 stacklevel=2,
             )
@@ -1551,13 +1648,13 @@ def run_stage2(cfg: TemporalCouplingConfig) -> list[Path]:
 
         try:
             aligned_df = pd.read_csv(aligned_path)
-            lag_max_s = _resolve_lag_max_s(cfg, subject_id=subject_id, alignment_qc=alignment_qc)
+            lag_max_s = _resolve_lag_max_s(cfg, observation_id=observation_id, alignment_qc=alignment_qc)
             lag_grid_s = build_lag_grid(
                 lag_max_s=lag_max_s,
                 lag_step_s=cfg.temporal_coupling.cross_correlation.lag_step_s,
             )
             min_lag_s, max_lag_s = lag_grid_bounds(lag_grid_s)
-            subject_lag_ranges[subject_id] = (min_lag_s, max_lag_s)
+            observation_lag_ranges[observation_id] = (min_lag_s, max_lag_s)
 
             curve_rows, peak_rows = compute_observation_xcorr(
                 aligned_df,
@@ -1566,24 +1663,25 @@ def run_stage2(cfg: TemporalCouplingConfig) -> list[Path]:
             )
             all_curve_rows.extend(curve_rows)
             all_peak_rows.extend(peak_rows)
-            processed_subjects.append(subject_id)
+            processed_observations.append(observation_id)
 
-            out_dir = subject_output_dir(cfg, subject_id)
+            out_dir = observation_output_dir(cfg, observation_id)
             out_dir.mkdir(parents=True, exist_ok=True)
-            peaks_path = peaks_output_path(cfg, subject_id)
+            peaks_path = peaks_output_path(cfg, observation_id)
             pd.DataFrame(peak_rows, columns=list(PEAK_COLUMNS)).to_csv(peaks_path, index=False)
             written.append(peaks_path)
 
             if cfg.temporal_coupling.output.save_curves and curve_rows:
-                curves_path = curves_output_path(cfg, subject_id)
+                curves_path = curves_output_path(cfg, observation_id)
                 pd.DataFrame(curve_rows).to_csv(curves_path, index=False)
                 written.append(curves_path)
 
             n_ok += 1
             task = str(aligned_df["task"].iloc[0])
+            subject_id = str(aligned_df["subject_id"].iloc[0])
             n_edge = sum(1 for peak in peak_rows if peak.get("raw_peak_at_edge"))
             print(
-                f"[temporal_coupling] stage=2 {subject_id} task={task}: "
+                f"[temporal_coupling] stage=2 {subject_id} obs={observation_id} task={task}: "
                 f"pairs={len(peak_rows)} lag_range=[{min_lag_s:g},{max_lag_s:g}]s "
                 f"raw_edge_peaks={n_edge} -> {peaks_path}"
             )
@@ -1605,7 +1703,7 @@ def run_stage2(cfg: TemporalCouplingConfig) -> list[Path]:
                 )
         except Exception as exc:
             warnings.warn(
-                f"[temporal_coupling] stage=2 skipping {subject_id}: {exc}",
+                f"[temporal_coupling] stage=2 skipping {observation_id}: {exc}",
                 stacklevel=2,
             )
 
@@ -1656,7 +1754,7 @@ def run_stage2(cfg: TemporalCouplingConfig) -> list[Path]:
             cfg,
             all_curve_rows=all_curve_rows,
             all_peak_rows=all_peak_rows,
-            processed_subjects=processed_subjects,
+            processed_observations=processed_observations,
         )
         written.extend(plot_paths)
         if plot_paths:
@@ -1667,12 +1765,14 @@ def run_stage2(cfg: TemporalCouplingConfig) -> list[Path]:
             f"[temporal_coupling] stage=2 QC summary: subjects={n_subjects} "
             f"group_peak_rows={len(all_peak_rows)} edge_peaks={n_edge_total}"
         )
-        for subject_id in processed_subjects:
-            n_rows = int((peaks_df["subject_id"] == subject_id).sum())
-            n_edge = int(peaks_df.loc[peaks_df["subject_id"] == subject_id, "raw_peak_at_edge"].astype(bool).sum())
-            lag_lo, lag_hi = subject_lag_ranges.get(subject_id, (float("nan"), float("nan")))
+        for observation_id in processed_observations:
+            n_rows = int((peaks_df["observation_id"] == observation_id).sum())
+            n_edge = int(
+                peaks_df.loc[peaks_df["observation_id"] == observation_id, "raw_peak_at_edge"].astype(bool).sum()
+            )
+            lag_lo, lag_hi = observation_lag_ranges.get(observation_id, (float("nan"), float("nan")))
             print(
-                f"[temporal_coupling]   {subject_id}: peak_rows={n_rows} "
+                f"[temporal_coupling]   {observation_id}: peak_rows={n_rows} "
                 f"lag_range=[{lag_lo:g},{lag_hi:g}]s edge_peaks={n_edge}"
             )
         for pair in variable_pairs():
@@ -1686,6 +1786,6 @@ def run_stage2(cfg: TemporalCouplingConfig) -> list[Path]:
                     f"[temporal_coupling]   QC {summary['pair']}: {summary['warning']}"
                 )
 
-    print(f"[temporal_coupling] stage=2 summary: wrote={n_ok}/{len(subject_ids)}")
+    print(f"[temporal_coupling] stage=2 summary: wrote={n_ok}/{len(observation_ids)}")
     print(f"[temporal_coupling] {SMOKE_RUN_NOTE}")
     return written

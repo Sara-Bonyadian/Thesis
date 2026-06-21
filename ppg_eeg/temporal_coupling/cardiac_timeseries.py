@@ -41,6 +41,7 @@ from .cardiac_detectors import (
 )
 from .config import TemporalCouplingConfig
 from .data_audit import audit_output_path, group_output_dir
+from .paths import observation_output_dir
 
 CARDIAC_FILENAME = "features_temporal_cardiac.csv"
 PEAKS_FILENAME = "detected_peaks.csv"
@@ -60,6 +61,7 @@ class CardiacQcRecord:
     dataset_id: str
     subject_id: str
     task: str
+    condition: str
     observation_id: str
     cardiac_file: str
     available_channels: str
@@ -94,6 +96,7 @@ class CardiacQcRecord:
             "dataset_id": self.dataset_id,
             "subject_id": self.subject_id,
             "task": self.task,
+            "condition": self.condition,
             "observation_id": self.observation_id,
             "cardiac_file": self.cardiac_file,
             "available_channels": self.available_channels,
@@ -125,12 +128,8 @@ class CardiacQcRecord:
         }
 
 
-def subject_output_dir(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return Path(cfg.paths.out_root) / cfg.dataset_id / safe_subject_dir_name(subject_id)
-
-
-def cardiac_output_path(cfg: TemporalCouplingConfig, subject_id: str) -> Path:
-    return subject_output_dir(cfg, subject_id) / CARDIAC_FILENAME
+def cardiac_output_path(cfg: TemporalCouplingConfig, observation_id: str) -> Path:
+    return observation_output_dir(cfg, observation_id) / CARDIAC_FILENAME
 
 
 def cardiac_qc_group_path(cfg: TemporalCouplingConfig) -> Path:
@@ -410,6 +409,7 @@ def build_cardiac_qc(
         dataset_id=obs.dataset_id,
         subject_id=obs.subject_id,
         task=obs.task,
+        condition=obs.condition,
         observation_id=obs.observation_id,
         cardiac_file=str(obs.cardiac_file),
         available_channels=",".join(detection.available_channels),
@@ -738,36 +738,40 @@ def load_usable_cardiac_observations(cfg: TemporalCouplingConfig) -> list[Cardia
                     dataset_id=str(row.dataset_id),
                     subject_id=str(row.subject_id),
                     task=str(row.task),
+                    condition=str(getattr(row, "condition", row.task)),
                     observation_id=str(row.observation_id),
                     cardiac_file=cardiac_file,
+                    cardiac_format=str(getattr(row, "cardiac_format", getattr(row, "eeg_format", "eeglab"))),
                 )
             )
         return observations
 
     warnings.warn(
-        f"[temporal_coupling] {audit_path} not found; using configured subject/task pairs. "
+        f"[temporal_coupling] {audit_path} not found; using configured observations. "
         "Run --stage 0 first for audit gating.",
         stacklevel=2,
     )
-    from .data_audit import _find_signal_file, _planned_subject_tasks, _resolve_dataset_root
+    from .data_audit import list_configured_observations
 
-    dataset_root = _resolve_dataset_root(cfg.paths.raw_root, cfg.dataset_id)
-    observations: list[CardiacObservation] = []
-    for subject_id, task in _planned_subject_tasks(cfg):
-        cardiac_path = None if dataset_root is None else _find_signal_file(dataset_root, subject_id, task, "ecg")
+    observations = []
+    for obs in list_configured_observations(cfg):
+        cardiac_path = obs.eeg_path if obs.ppg_source == "embedded_eeg" else obs.ppg_path
+        cardiac_format = obs.eeg_format if obs.ppg_source == "embedded_eeg" else (obs.ppg_format or "eeglab")
         if cardiac_path is None or not cardiac_path.is_file():
             warnings.warn(
-                f"[temporal_coupling] skipping {subject_id} task={task}: cardiac file missing.",
+                f"[temporal_coupling] skipping {obs.subject_id} condition={obs.condition_label}: cardiac file missing.",
                 stacklevel=2,
             )
             continue
         observations.append(
             CardiacObservation(
-                dataset_id=cfg.dataset_id,
-                subject_id=subject_id,
-                task=task,
-                observation_id=f"{cfg.dataset_id}-{subject_id}-task-{task}",
+                dataset_id=obs.dataset_id,
+                subject_id=obs.subject_id,
+                task=obs.task_label,
+                condition=obs.condition_label,
+                observation_id=obs.observation_id,
                 cardiac_file=cardiac_path,
+                cardiac_format=cardiac_format,
             )
         )
     return observations
@@ -813,10 +817,10 @@ def run_stage1b(cfg: TemporalCouplingConfig) -> list[Path]:
     n_ok = 0
 
     for obs in observations:
-        out_dir = subject_output_dir(cfg, obs.subject_id)
+        out_dir = observation_output_dir(cfg, obs.observation_id)
         out_path = out_dir / CARDIAC_FILENAME
         try:
-            raw = _read_raw(obs.cardiac_file, "eeglab")
+            raw = _read_raw(obs.cardiac_file, obs.cardiac_format)
             out_dir.mkdir(parents=True, exist_ok=True)
 
             inventory_df = build_channel_inventory(raw, obs, cfg)
@@ -841,6 +845,7 @@ def run_stage1b(cfg: TemporalCouplingConfig) -> list[Path]:
             out_df.insert(0, "usable_for_hr", qc.usable_for_hr)
             out_df.insert(0, "observation_id", obs.observation_id)
             out_df.insert(0, "task", obs.task)
+            out_df.insert(0, "condition", obs.condition)
             out_df.insert(0, "subject_id", obs.subject_id)
             out_df.insert(0, "dataset_id", obs.dataset_id)
 
