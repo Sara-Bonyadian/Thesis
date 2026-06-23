@@ -33,6 +33,7 @@ class TestDatasetAdapters(unittest.TestCase):
             rows = adapter.build_observations(Path(tmp))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].condition_label, "ph_pre_rest")
+            self.assertEqual(rows[0].subject_id, "01_ph")
 
     def test_ds003838_requires_eeg_ecg_pair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

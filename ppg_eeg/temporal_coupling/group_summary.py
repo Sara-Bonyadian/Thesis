@@ -169,7 +169,7 @@ def clear_stage3_outputs(cfg: TemporalCouplingConfig) -> list[Path]:
     return removed
 
 
-def _row_partition_key(row: pd.Series, *, dataset_id: str) -> str:
+def _row_partition_key(row: pd.Series, *, dataset_id: str, hiit_partition_mode: str) -> str:
     task = str(row["task"])
     condition = str(row["condition"]) if "condition" in row.index and pd.notna(row["condition"]) else task
     observation_id = str(row["observation_id"]) if "observation_id" in row.index and pd.notna(row["observation_id"]) else None
@@ -178,13 +178,17 @@ def _row_partition_key(row: pd.Series, *, dataset_id: str) -> str:
         task=task,
         condition=condition,
         observation_id=observation_id,
+        hiit_partition_mode=hiit_partition_mode,
     )
 
 
-def _partition_keys(peaks_df: pd.DataFrame, *, dataset_id: str) -> list[str]:
+def _partition_keys(peaks_df: pd.DataFrame, *, dataset_id: str, hiit_partition_mode: str) -> list[str]:
     if peaks_df.empty:
         return []
-    keys = peaks_df.apply(lambda row: _row_partition_key(row, dataset_id=dataset_id), axis=1)
+    keys = peaks_df.apply(
+        lambda row: _row_partition_key(row, dataset_id=dataset_id, hiit_partition_mode=hiit_partition_mode),
+        axis=1,
+    )
     return sorted(keys.unique())
 
 
@@ -193,10 +197,14 @@ def _filter_by_partition(
     *,
     partition: str,
     dataset_id: str,
+    hiit_partition_mode: str,
 ) -> pd.DataFrame | None:
     if df is None or df.empty:
         return df
-    mask = df.apply(lambda row: _row_partition_key(row, dataset_id=dataset_id) == partition, axis=1)
+    mask = df.apply(
+        lambda row: _row_partition_key(row, dataset_id=dataset_id, hiit_partition_mode=hiit_partition_mode) == partition,
+        axis=1,
+    )
     return df.loc[mask].copy()
 
 
@@ -206,11 +214,17 @@ def _filter_curves_by_partition(
     *,
     partition: str,
     dataset_id: str,
+    hiit_partition_mode: str,
 ) -> pd.DataFrame | None:
     if curves_df is None or curves_df.empty:
         return curves_df
     if "task" in curves_df.columns or "condition" in curves_df.columns:
-        return _filter_by_partition(curves_df, partition=partition, dataset_id=dataset_id)
+        return _filter_by_partition(
+            curves_df,
+            partition=partition,
+            dataset_id=dataset_id,
+            hiit_partition_mode=hiit_partition_mode,
+        )
     subject_ids = set(peaks_df["subject_id"].astype(str).unique())
     return curves_df.loc[curves_df["subject_id"].astype(str).isin(subject_ids)].copy()
 
@@ -1291,7 +1305,11 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
 
     peaks_df = _load_peaks(cfg)
     curves_df = _load_curves(cfg)
-    partitions = _partition_keys(peaks_df, dataset_id=cfg.dataset_id)
+    partitions = _partition_keys(
+        peaks_df,
+        dataset_id=cfg.dataset_id,
+        hiit_partition_mode=cfg.hiit_partition_mode,
+    )
     if not partitions:
         print("[temporal_coupling] stage=3: no peak rows found.")
         return []
@@ -1305,12 +1323,18 @@ def run_stage3(cfg: TemporalCouplingConfig) -> list[Path]:
 
     written: list[Path] = []
     for partition in partitions:
-        part_peaks = _filter_by_partition(peaks_df, partition=partition, dataset_id=cfg.dataset_id)
+        part_peaks = _filter_by_partition(
+            peaks_df,
+            partition=partition,
+            dataset_id=cfg.dataset_id,
+            hiit_partition_mode=cfg.hiit_partition_mode,
+        )
         part_curves = _filter_curves_by_partition(
             curves_df,
             part_peaks,
             partition=partition,
             dataset_id=cfg.dataset_id,
+            hiit_partition_mode=cfg.hiit_partition_mode,
         )
         out_dir = group_base if n_partitions == 1 else group_output_dir(cfg, partition)
         written.extend(

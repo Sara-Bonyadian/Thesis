@@ -24,12 +24,12 @@ class TestHiitCombine(unittest.TestCase):
         self.assertEqual(partition_key("hiit-01-ps-pre-rest"), "ps_pre_rest")
 
     def test_combine_aligned_concatenates_rest_then_tetris(self) -> None:
-        def _seg(offset: float, n: int = 5) -> pd.DataFrame:
+        def _seg(offset: float, n: int = 5, *, session_subject_id: str = "01_ps") -> pd.DataFrame:
             time_s = np.arange(n, dtype=float) + offset
             return pd.DataFrame(
                 {
                     "dataset_id": "hiit",
-                    "subject_id": "01",
+                    "subject_id": session_subject_id,
                     "task": "rest",
                     "observation_id": "hiit-01-ps-pre-rest",
                     "time_s": time_s,
@@ -51,11 +51,13 @@ class TestHiitCombine(unittest.TestCase):
             combined_observation_id="hiit-01-ps-pre",
             combined_condition="ps_pre",
             timepoint="pre",
+            session_subject_id="01_ps",
             fs_hz=1.0,
             z_score=True,
         )
         self.assertEqual(len(combined), 10)
         self.assertEqual(combined.iloc[0]["observation_id"], "hiit-01-ps-pre")
+        self.assertEqual(combined.iloc[0]["subject_id"], "01_ps")
         self.assertEqual(combined.iloc[0]["condition"], "ps_pre")
         self.assertAlmostEqual(float(combined.iloc[-1]["hr"]), 2.0)
         self.assertAlmostEqual(float(combined.iloc[5]["hr"]), 1.0)

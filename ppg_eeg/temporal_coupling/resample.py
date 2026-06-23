@@ -344,6 +344,11 @@ def align_observation(
     eeg_df: pd.DataFrame,
     cardiac_df: pd.DataFrame,
     cfg: TemporalCouplingConfig,
+    *,
+    subject_id: str | None = None,
+    task: str | None = None,
+    condition: str | None = None,
+    observation_id: str | None = None,
 ) -> pd.DataFrame:
     resample_cfg = cfg.temporal_coupling.resample
     overlap = overlap_time_range(eeg_df, cardiac_df)
@@ -351,18 +356,19 @@ def align_observation(
 
     row0 = eeg_df.iloc[0]
     car0 = cardiac_df.iloc[0]
-    if "condition" in eeg_df.columns and pd.notna(row0["condition"]):
-        condition = str(row0["condition"])
-    elif "condition" in cardiac_df.columns and pd.notna(car0["condition"]):
-        condition = str(car0["condition"])
-    else:
-        condition = str(row0["task"])
+    if condition is None:
+        if "condition" in eeg_df.columns and pd.notna(row0["condition"]):
+            condition = str(row0["condition"])
+        elif "condition" in cardiac_df.columns and pd.notna(car0["condition"]):
+            condition = str(car0["condition"])
+        else:
+            condition = str(row0["task"])
     aligned: dict[str, object] = {
         "dataset_id": row0["dataset_id"],
-        "subject_id": row0["subject_id"],
-        "task": row0["task"],
+        "subject_id": subject_id if subject_id is not None else row0["subject_id"],
+        "task": task if task is not None else row0["task"],
         "condition": condition,
-        "observation_id": row0["observation_id"],
+        "observation_id": observation_id if observation_id is not None else row0["observation_id"],
         "time_s": grid_times,
     }
 
@@ -435,7 +441,15 @@ def run_stage1c(cfg: TemporalCouplingConfig) -> list[Path]:
         try:
             eeg_df = pd.read_csv(eeg_path)
             cardiac_df = pd.read_csv(cardiac_path)
-            aligned_df = align_observation(eeg_df, cardiac_df, cfg)
+            aligned_df = align_observation(
+                eeg_df,
+                cardiac_df,
+                cfg,
+                subject_id=obs.subject_id,
+                task=obs.task,
+                condition=obs.condition,
+                observation_id=obs.observation_id,
+            )
             overlap = overlap_time_range(eeg_df, cardiac_df)
             upstream_hr, upstream_eeg = upstream_flags.get(obs.observation_id, (None, None))
             qc = build_alignment_qc(

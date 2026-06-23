@@ -1,18 +1,19 @@
-# Temporal EEG–cardiac coupling for HIIT (Option 1: all 4 tasks separate).
+# HIIT temporal coupling: 40 participants, 4 task groups (PS + PH pooled).
 #
 # Data model:
-#   - 20 participants, each with PS and PH protocol sessions -> 40 session-units
-#   - subject_id = {participant}_{protocol}, e.g. 01_ps, 01_ph (not bare 01)
-#   - Each session has 4 recordings: pre-rest, pre-tetris, post-rest, post-tetris
-#   - 160 recording-level observations; cross-correlation uses 8 partitions (n=20 each)
+#   - PS and PH sessions are treated as separate HIIT participants (40 total)
+#   - subject_id = {participant}_{protocol}, e.g. 01_ps, 01_ph
+#   - 160 recordings (40 × 4 tasks); group analysis uses 4 partitions (n=40 each):
+#       pre_rest, pre_tetris, post_rest, post_tetris
 #
 # Reference pipeline: config.validation.ds003838.temporal_coupling.yaml
 
 dataset_id: hiit
+hiit_partition_mode: task_only
 
 paths:
   raw_root: ./data/raw/HIIT
-  out_root: ./derivatives/run_hiit_temporal_coupling
+  out_root: ./derivatives/run_hiit_40_temporal_coupling
   base_root: ./derivatives/run_hiit_fast
 
 subjects: []
@@ -21,21 +22,13 @@ tasks:
   - rest
   - tetris
 
-# HIIT condition_label = {modality}_{timepoint}_{state}.
 conditions:
-  - ph_pre_rest
-  - ph_pre_tetris
-  - ph_post_rest
-  - ph_post_tetris
-  - ps_pre_rest
-  - ps_pre_tetris
-  - ps_post_rest
-  - ps_post_tetris
+  - pre_rest
+  - pre_tetris
+  - post_rest
+  - post_tetris
 
-# HIIT session_label = modality (ph = photosensor, ps = pressure sensor).
-sessions:
-  - ph
-  - ps
+sessions: []
 
 eeg:
   l_freq: 1.0
@@ -44,7 +37,6 @@ eeg:
   reference: average
 
 ppg:
-  # null = use full EEG/embedded-PPG overlap; audit caps lag by overlap/3.
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4

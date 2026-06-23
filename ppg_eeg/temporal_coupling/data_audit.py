@@ -382,6 +382,7 @@ def list_configured_observations(cfg: TemporalCouplingConfig) -> list[CanonicalO
         tasks=cfg.tasks or None,
         conditions=cfg.conditions or None,
         sessions=cfg.sessions or None,
+        hiit_partition_mode=cfg.hiit_partition_mode,
     )
 
 

@@ -74,6 +74,7 @@ def resolve_observations(cfg: TemporalCouplingConfig) -> ResolvedObservations:
             tasks=cfg.tasks or None,
             conditions=cfg.conditions or None,
             sessions=cfg.sessions or None,
+            hiit_partition_mode=cfg.hiit_partition_mode,
         )
     except FileNotFoundError as exc:
         message = f"[temporal_coupling] dataset root not found: {exc}"

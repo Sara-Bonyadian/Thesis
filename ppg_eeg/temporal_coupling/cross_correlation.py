@@ -16,7 +16,13 @@ import pandas as pd
 
 from .cardiac_detectors import _as_auto_float, _find_peaks
 from .config import TemporalCouplingConfig, TemporalCouplingCrossCorrelationConfig
-from .paths import group_output_dir, hiit_condition_from_observation_id, observation_output_dir
+from .paths import (
+    HIIT_PARTITION_MODE_TASK_ONLY,
+    group_output_dir,
+    hiit_condition_from_observation_id,
+    hiit_task_partition_from_observation_id,
+    observation_output_dir,
+)
 from .resample import (
     QC_GROUP_FILENAME as ALIGNMENT_QC_FILENAME,
     aligned_output_path,
@@ -877,6 +883,8 @@ def compute_observation_xcorr(
     task = str(row0["task"])
     if "condition" in aligned_df.columns and pd.notna(row0["condition"]) and str(row0["condition"]) != task:
         condition = str(row0["condition"])
+    elif cfg.dataset_id.casefold() == "hiit" and cfg.hiit_partition_mode == HIIT_PARTITION_MODE_TASK_ONLY:
+        condition = hiit_task_partition_from_observation_id(observation_id) or task
     else:
         condition = hiit_condition_from_observation_id(observation_id) or task
     meta = {

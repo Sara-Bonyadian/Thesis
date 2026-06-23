@@ -80,15 +80,18 @@ def build_observations(
     sessions: Sequence[str] | None = None,
     subject_tasks: dict[str, str] | None = None,
     subject_conditions: dict[str, str] | None = None,
+    hiit_partition_mode: str = "protocol_task",
 ) -> list[CanonicalObservation]:
     adapter = get_adapter(dataset_id)
-    observations = adapter.build_observations(
-        raw_root,
-        subjects=subjects,
-        tasks=tasks,
-        conditions=conditions,
-        sessions=sessions,
-    )
+    build_kwargs: dict[str, object] = {
+        "subjects": subjects,
+        "tasks": tasks,
+        "conditions": conditions,
+        "sessions": sessions,
+    }
+    if dataset_id.casefold() == "hiit":
+        build_kwargs["hiit_partition_mode"] = hiit_partition_mode
+    observations = adapter.build_observations(raw_root, **build_kwargs)
     observations = _apply_subject_task_assignments(observations, subject_tasks)
     return _apply_subject_condition_assignments(observations, subject_conditions)
 

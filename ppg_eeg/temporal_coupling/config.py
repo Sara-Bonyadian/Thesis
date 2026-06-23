@@ -198,6 +198,7 @@ class TemporalCouplingConfig:
     eeg: TemporalEegConfig
     ppg: TemporalPpgConfig
     temporal_coupling: TemporalCouplingSectionConfig
+    hiit_partition_mode: str = "protocol_task"
 
 
 def _get(d: dict[str, Any], key: str, default: Any) -> Any:
@@ -329,6 +330,7 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
         tasks=_as_str_list(data.get("tasks")),
         conditions=_as_str_list(data.get("conditions")),
         sessions=_as_str_list(data.get("sessions")),
+        hiit_partition_mode=str(_get(data, "hiit_partition_mode", "protocol_task")),
         eeg=TemporalEegConfig(
             l_freq=float(_get(eeg_raw, "l_freq", 1.0)),
             h_freq=float(_get(eeg_raw, "h_freq", 60.0)),

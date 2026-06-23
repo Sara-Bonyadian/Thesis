@@ -20,6 +20,10 @@ def group_output_dir(cfg: TemporalCouplingConfig, partition: str | None = None) 
     return base
 
 
+HIIT_PARTITION_MODE_PROTOCOL_TASK = "protocol_task"
+HIIT_PARTITION_MODE_TASK_ONLY = "task_only"
+
+
 def hiit_condition_from_observation_id(observation_id: str) -> str | None:
     """Parse hiit-01-ph-pre-rest -> ph_pre_rest or hiit-01-ps-pre -> ps_pre."""
     parts = observation_id.split("-")
@@ -44,15 +48,27 @@ def observation_partition_key(obs: CanonicalObservation) -> str:
     )
 
 
+def hiit_task_partition_from_observation_id(observation_id: str) -> str | None:
+    """Parse hiit-01-ph-pre-rest -> pre_rest (ignores protocol)."""
+    parts = observation_id.split("-")
+    if len(parts) >= 5 and parts[0].casefold() == "hiit":
+        return f"{parts[3]}_{parts[4]}"
+    return None
+
+
 def partition_key_from_row(
     *,
     dataset_id: str,
     task: str,
     condition: str | None = None,
     observation_id: str | None = None,
+    hiit_partition_mode: str = HIIT_PARTITION_MODE_PROTOCOL_TASK,
 ) -> str:
     if dataset_id.casefold() == "hiit" and observation_id:
-        derived = hiit_condition_from_observation_id(observation_id)
+        if hiit_partition_mode == HIIT_PARTITION_MODE_TASK_ONLY:
+            derived = hiit_task_partition_from_observation_id(observation_id)
+        else:
+            derived = hiit_condition_from_observation_id(observation_id)
         if derived:
             return derived
     return analysis_partition_key(

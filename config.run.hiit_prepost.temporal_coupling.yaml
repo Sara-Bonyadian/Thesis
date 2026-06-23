@@ -2,8 +2,8 @@
 # Combines rest + tetris within each protocol/timepoint (stage 1d) from the
 # per-session run in derivatives/run_hiit_temporal_coupling/.
 #
-# Partitions (4):
-#   ps_pre, ps_post, ph_pre, ph_post
+# Session model: subject_id = {participant}_{protocol} (e.g. 01_ps, 01_ph).
+# Partitions (4): ps_pre, ps_post, ph_pre, ph_post
 #
 # Workflow:
 #   1. Ensure run_hiit_temporal_coupling completed stages 1a–1c

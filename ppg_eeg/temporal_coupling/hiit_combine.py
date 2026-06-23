@@ -11,6 +11,7 @@ import pandas as pd
 
 from .config import TemporalCouplingConfig
 from .data_audit import audit_output_path, group_output_dir
+from ..datasets.hiit import hiit_session_subject_id
 from .eeg_envelope import UsableObservation
 from .resample import (
     ALIGNED_FILENAME,
@@ -86,6 +87,7 @@ def combine_aligned_dataframes(
     combined_observation_id: str,
     combined_condition: str,
     timepoint: str,
+    session_subject_id: str,
     fs_hz: float,
     z_score: bool,
 ) -> pd.DataFrame:
@@ -101,7 +103,7 @@ def combine_aligned_dataframes(
     row0 = rest.iloc[0]
     aligned: dict[str, object] = {
         "dataset_id": row0["dataset_id"],
-        "subject_id": row0["subject_id"],
+        "subject_id": session_subject_id,
         "task": timepoint,
         "condition": combined_condition,
         "observation_id": combined_observation_id,
@@ -143,7 +145,14 @@ def _usable_source_ids(source_qc: pd.DataFrame) -> set[str]:
 
 
 def _subjects_from_source(source_qc: pd.DataFrame) -> list[str]:
-    return sorted({oid.split("-")[1] for oid in source_qc["observation_id"].astype(str) if oid.startswith("hiit-")})
+    participant_ids: set[str] = set()
+    for oid in source_qc["observation_id"].astype(str):
+        if not oid.startswith("hiit-"):
+            continue
+        parts = oid.split("-")
+        if len(parts) >= 2:
+            participant_ids.add(parts[1])
+    return sorted(participant_ids)
 
 
 def _build_audit_row(
@@ -211,15 +220,16 @@ def run_stage1d(cfg: TemporalCouplingConfig) -> list[Path]:
     group_dir = group_output_dir(cfg)
     group_dir.mkdir(parents=True, exist_ok=True)
 
-    for subject_id in subjects:
+    for participant_id in subjects:
         for partition in HIIT_COMBINED_PARTITIONS:
             if cfg.conditions and partition.condition not in cfg.conditions:
                 continue
 
-            rest_id = source_observation_id(subject_id=subject_id, suffix=partition.rest_suffix)
-            tetris_id = source_observation_id(subject_id=subject_id, suffix=partition.tetris_suffix)
+            session_subject_id = hiit_session_subject_id(participant_id, partition.modality)
+            rest_id = source_observation_id(subject_id=participant_id, suffix=partition.rest_suffix)
+            tetris_id = source_observation_id(subject_id=participant_id, suffix=partition.tetris_suffix)
             obs_id = combined_observation_id(
-                subject_id=subject_id,
+                subject_id=participant_id,
                 modality=partition.modality,
                 timepoint=partition.timepoint,
             )
@@ -249,6 +259,7 @@ def run_stage1d(cfg: TemporalCouplingConfig) -> list[Path]:
                 combined_observation_id=obs_id,
                 combined_condition=partition.condition,
                 timepoint=partition.timepoint,
+                session_subject_id=session_subject_id,
                 fs_hz=fs_hz,
                 z_score=z_score,
             )
@@ -262,7 +273,7 @@ def run_stage1d(cfg: TemporalCouplingConfig) -> list[Path]:
             overlap = OverlapRange(start_s=float(aligned_df["time_s"].iloc[0]), end_s=float(aligned_df["time_s"].iloc[-1]))
             obs = UsableObservation(
                 dataset_id=cfg.dataset_id,
-                subject_id=subject_id,
+                subject_id=session_subject_id,
                 task=partition.timepoint,
                 condition=partition.condition,
                 observation_id=obs_id,
@@ -274,7 +285,7 @@ def run_stage1d(cfg: TemporalCouplingConfig) -> list[Path]:
             audit_rows.append(
                 _build_audit_row(
                     cfg=cfg,
-                    subject_id=subject_id,
+                    subject_id=session_subject_id,
                     partition=partition,
                     observation_id=obs_id,
                     aligned_df=aligned_df,

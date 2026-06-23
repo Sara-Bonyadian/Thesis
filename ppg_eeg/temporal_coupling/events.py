@@ -1312,6 +1312,7 @@ def run_stage4(cfg: TemporalCouplingConfig) -> list[Path]:
             task=task,
             condition=condition,
             observation_id=observation_id,
+            hiit_partition_mode=cfg.hiit_partition_mode,
         )
         result = _process_subject(aligned_df, cfg, epoch_times)
         partitioned_results.setdefault(partition, []).append(result)
