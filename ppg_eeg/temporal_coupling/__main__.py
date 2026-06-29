@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from .config import VALID_STAGES, load_config, validate_stage
+from .recommend import print_recommendations
 from .run import run_temporal_coupling
 
 
@@ -15,14 +16,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--stage",
         type=str,
-        required=True,
+        required=False,
         help=f"Pipeline stage to run. Allowed: {', '.join(sorted(VALID_STAGES, key=lambda s: (len(s), s)))}",
+    )
+    ap.add_argument(
+        "--recommend-config-values",
+        action="store_true",
+        help="Print data-driven recommendations for min_overlap_s and cardiac windows.",
     )
     args = ap.parse_args(argv)
 
     try:
-        stage = validate_stage(args.stage)
         cfg = load_config(args.config)
+        if args.recommend_config_values:
+            print_recommendations(cfg)
+            return 0
+        if not args.stage:
+            ap.error("--stage is required unless --recommend-config-values is set.")
+        stage = validate_stage(args.stage)
         run_temporal_coupling(cfg, stage=stage)
     except (FileNotFoundError, ValueError, KeyError) as exc:
         print(f"[temporal_coupling] error: {exc}", file=sys.stderr)

@@ -59,11 +59,18 @@ class CardiacDetectionResult:
 
 def infer_signal_type(channel_name: str) -> str:
     low = channel_name.casefold()
-    if "ecg" in low:
+    if "ecg" in low or "ekg" in low:
         return "ecg"
     if any(token in low for token in ("ppg", "photo", "optic", "pleth", "pulse")):
         return "ppg"
     return "unknown"
+
+
+def resolve_signal_type(channel_name: str, signal_type_pref: str) -> str:
+    pref = str(signal_type_pref).strip().casefold()
+    if pref in {"ecg", "ppg"}:
+        return pref
+    return infer_signal_type(channel_name)
 
 
 def list_cardiac_candidates(raw: mne.io.BaseRaw, signal_type: str) -> list[str]:

@@ -48,7 +48,7 @@ temporal_coupling:
 
   cardiac:
     channel: EKG
-    signal_type: auto
+    signal_type: ecg
     detector: ecg_rpeak
     ecg:
       bandpass_hz: [5, 30]
@@ -58,12 +58,12 @@ temporal_coupling:
       test_inverted: true
     hr_window_s: 15.0
     mean_rr_window_s: 15.0
-    hrv_window_s: 60.0
+    hrv_window_s: 30.0
     hrv_step_s: 2.0
     min_beats_hr: 5
-    min_beats_hrv: 20
+    min_beats_hrv: 12
     min_valid_hr_percent: 50.0
-    min_valid_hrv_percent: 30.0
+    min_valid_hrv_percent: 20.0
     debug_plot:
       enabled: false
 
@@ -73,13 +73,13 @@ temporal_coupling:
     interpolate_max_gap_s: 5
 
   cross_correlation:
-    lag_max_s: 60
+    lag_max_s: 90
     lag_step_s: 5
     peak_selection: abs_peak
     n_permutations: 100
     detrend: false
     rolling_detrend_window_s: null
-    edge_margin_s: 0
+    edge_margin_s: 5
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto

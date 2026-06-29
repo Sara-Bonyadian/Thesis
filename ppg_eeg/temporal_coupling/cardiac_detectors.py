@@ -23,6 +23,7 @@ from .cardiac_common import (
     PeakAnnotation,
     annotate_peaks,
     infer_signal_type,
+    resolve_signal_type,
     list_cardiac_candidates,
     resolved_debug_windows,
     segment_bounds,
@@ -215,7 +216,7 @@ def _run_one_detector(
     cardiac_cfg = cfg.temporal_coupling.cardiac
     ecg_cfg = cardiac_cfg.ecg
     oriented = -signal_raw if inverted else signal_raw
-    signal_type = infer_signal_type(channel)
+    signal_type = resolve_signal_type(channel, cardiac_cfg.signal_type)
 
     prominence_val = 0.3
     height_val: float | None = None
@@ -472,7 +473,7 @@ def compare_detectors(
         if signal_raw is None:
             continue
         ch_type = raw.get_channel_types(picks=[channel])[0]
-        sig_type = infer_signal_type(channel)
+        sig_type = resolve_signal_type(channel, cardiac_cfg.signal_type)
         polarities = [False, True] if cardiac_cfg.ecg.test_inverted else [False]
 
         detectors: list[DetectorName] = []

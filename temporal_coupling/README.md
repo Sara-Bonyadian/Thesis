@@ -51,6 +51,7 @@ We do this **separately for each person**, then combine results at the group lev
 | **3** | Group cross-correlation summary | ✅ Done |
 | **4** | Event-triggered analysis | ✅ Done |
 | **Cross-dataset** | Replication summary + consistency tables | ⏳ In progress |
+| **Config recommend** | Data-driven `min_overlap_s` + cardiac windows | ✅ Done |
 
 ### Dataset coverage
 
@@ -60,6 +61,8 @@ We do this **separately for each person**, then combine results at the group lev
 | **ds003838** | `config.run.ds003838.temporal_coupling.yaml` | **rest + memory** | Separate ECG | ⏳ Config ready; run pending |
 | **ds006848** | `config.run.ds006848.temporal_coupling.yaml` | **rest, verbalwm** | Embedded PPG (BrainVision) | ⏳ Stage 0 done (52/52 usable) |
 | **HIIT** | `config.run.hiit.temporal_coupling.yaml` | **8 conditions** (PS/PH × PRE/POST × REST/TETRIS) | Embedded PPG (BrainVision) | ⏳ Config ready; run pending |
+| **ds003690** | `config.run.ds003690.temporal_coupling.yaml` | gonogo, passive, simplert | Embedded EKG (EEGLAB) | ⏳ In progress |
+| **ds003816** | `config.run.ds003816.temporal_coupling.yaml` | 7 tasks × sessions | Embedded ECG (BrainVision) | ⏳ In progress |
 | **ds003838** | `config.smoke.ds003838.temporal_coupling.yaml` | rest (3 subjects) | Separate ECG | ✅ Smoke / debug |
 
 **Important:** Analyze each task or condition **separately** — never concatenate different tasks or HIIT states in one group summary.
@@ -114,11 +117,31 @@ Per observation: channel inventory, peak-detector comparison, detected peaks, de
 
 Auto mode selects channel, detector, and polarity by quality score.
 
+For **EKG** channels (ds003690), set `signal_type: ecg` explicitly so `ecg_rpeak` runs (channel-name inference alone may label `unknown`).
+
+**Cardiac window timing:** the first HR/HRV time point appears at `max(hr_window_s, mean_rr_window_s, hrv_window_s) / 2` seconds. On short recordings, large `hrv_window_s` can delay cardiac series and cause Stage 1c `no_temporal_overlap` even when `hr_window_s` is small.
+
 **`features_temporal_aligned.csv` columns (z-scored):**
 
 `dataset_id | subject_id | task | observation_id | time_s | hr | rmssd | sdnn | mean_rr | theta_env | alpha_env | beta_env | hr_z | rmssd_z | sdnn_z | mean_rr_z | theta_env_z | alpha_env_z | beta_env_z`
 
-Group: `group/alignment_qc.csv`
+Group: `group/alignment_qc.csv` — check `usable_for_xcorr`, `aligned_duration_s`, `missing_percent_hr`, and `warning` (e.g. `upstream_not_usable_for_hr`, `short_aligned_duration`).
+
+---
+
+### Tuning config from your data ✅
+
+After Stage **1b** and **1c**, get suggested `min_overlap_s` and cardiac window values from QC outputs:
+
+```bash
+$PY -m ppg_eeg.temporal_coupling \
+  --config config.run.ds003816.temporal_coupling.yaml \
+  --recommend-config-values
+```
+
+The tool reads `group/alignment_qc.csv` and per-observation envelope/cardiac CSVs, then prints a YAML snippet. Apply changes to your config and rerun **1b + 1c** if cardiac windows changed (or **1c only** if only `min_overlap_s` changed).
+
+**Rule of thumb for `min_overlap_s`:** pick the smallest threshold that keeps most rows usable (often ~20 s for ds003816 short tasks vs default 30–120 s for long rest recordings).
 
 ---
 
@@ -134,8 +157,8 @@ Group: `group/alignment_qc.csv`
 
 For each pair:
 1. Compute correlation at lags up to `lag_max_s` (capped per observation by `overlap_duration_s / 3`).
-2. **Raw peak** = lag where |r| is maximum; primary group summaries use `raw_peak_*` columns.
-3. Interior/preferred peaks are QC-only diagnostics.
+2. **Raw peak** = lag with strongest correlation per `peak_selection`: `positive_only` (default) or `abs_peak` (|r| max, allows negative peaks).
+3. Interior/preferred peaks are QC-only when `edge_margin_s > 0`.
 4. Permutation null (`p_perm`, default `n_permutations: 100` in run configs).
 5. Write per-observation peaks/curves and group aggregates.
 
@@ -288,11 +311,14 @@ ppg_eeg/temporal_coupling/
   cross_correlation.py      ← Stage 2
   group_summary.py          ← Stage 3
   events.py                 ← Stage 4
+  recommend.py              ← data-driven config suggestions
 
 derivatives/validation_ds003838_temporal_coupling/  ← ds003838 rest reference (65 subjects)
 derivatives/run_ds003838_temporal_coupling/        ← ds003838 all tasks (pending)
 derivatives/run_ds006848_temporal_coupling/        ← ds006848 (Stage 0 done)
 derivatives/run_hiit_temporal_coupling/            ← HIIT (pending)
+derivatives/run_ds003690_temporal_coupling/        ← ds003690 (EKG embedded)
+derivatives/run_ds003816_temporal_coupling/        ← ds003816 (ECG embedded, short tasks)
 ```
 
 Per observation:
@@ -341,6 +367,11 @@ $PY -m ppg_eeg.temporal_coupling \
   --config config.run.ds003838.temporal_coupling.yaml \
   --stage 1
 
+# Optional: suggest min_overlap_s and cardiac windows from QC (needs 1b+1c done)
+$PY -m ppg_eeg.temporal_coupling \
+  --config config.run.ds003816.temporal_coupling.yaml \
+  --recommend-config-values
+
 # Stages 2–4 (read aligned CSVs only)
 $PY -m ppg_eeg.temporal_coupling \
   --config config.run.ds003838.temporal_coupling.yaml \
@@ -366,6 +397,8 @@ $PY -m ppg_eeg.temporal_coupling \
   --config config.run.hiit.temporal_coupling.yaml \
   --stage 0
 ```
+
+**Valid CLI flags:** `--config` (required), `--stage` (required unless recommending), `--recommend-config-values`
 
 **Valid `--stage` values:** `0`, `1`, `1a`, `1b`, `1c`, `2`, `3`, `4`, `all`
 

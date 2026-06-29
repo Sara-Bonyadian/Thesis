@@ -29,7 +29,7 @@ ppg:
 
 temporal_coupling:
   audit:
-    min_overlap_s: 30
+    min_overlap_s: 20
     min_clean_beats: 30
 
   eeg:
@@ -56,9 +56,9 @@ temporal_coupling:
       prominence: auto
       height: auto
       test_inverted: true
-    hr_window_s: 15.0
-    mean_rr_window_s: 15.0
-    hrv_window_s: 30.0
+    hr_window_s: 10.0
+    mean_rr_window_s: 10.0
+    hrv_window_s: 20.0
     hrv_step_s: 2.0
     min_beats_hr: 5
     min_beats_hrv: 12
@@ -75,10 +75,11 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
+    peak_selection: abs_peak
     n_permutations: 100
     detrend: false
     rolling_detrend_window_s: null
-    edge_margin_s: 0
+    edge_margin_s: 5
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto

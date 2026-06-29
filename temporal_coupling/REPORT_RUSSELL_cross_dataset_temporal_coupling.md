@@ -1,8 +1,8 @@
 # Cross-Dataset Temporal EEG–Cardiac Coupling Report
 
 **Prepared for:** Russell  
-**Date:** 21 June 2026  
-**Analyst note:** Conservative replication summary based on completed pipeline runs (Stages 0–4).
+**Date:** 21 June 2026 (updated 29 June 2026)  
+**Analyst note:** Conservative replication summary based on completed pipeline runs (Stages 0–4). Additional datasets (ds003690, ds003816) and data-driven config tuning are documented below.
 
 ---
 
@@ -15,6 +15,13 @@ We ran the within-subject temporal coupling pipeline on three derivative folders
 | **ds003838** | `derivatives/run_ds003838_temporal_coupling` | Separate ECG (BIDS) | rest (n=65), memory (n=64) |
 | **ds006848** | `derivatives/run_ds006848_temporal_coupling` | Embedded PPG (BrainVision) | rest (n=21), verbalwm (n=28) |
 | **HIIT-40 PPG** | `derivatives/run_hiit_40_ppg_temporal_coupling` | Embedded photosensor PPG | pre_rest, pre_tetris, post_rest, post_tetris (n=40 each) |
+
+**In progress (not in replication matrix below):**
+
+| Run | Path | Cardiac source | Notes |
+|-----|------|----------------|-------|
+| **ds003690** | `derivatives/run_ds003690_temporal_coupling` | Embedded EKG (EEGLAB) | Requires `signal_type: ecg`; Stage 2 usable count gated by cardiac QC |
+| **ds003816** | `derivatives/run_ds003816_temporal_coupling` | Embedded ECG (BrainVision) | Many short tasks; tune `min_overlap_s` and cardiac windows via `--recommend-config-values` |
 
 **Bottom line (conservative read):**
 
@@ -35,7 +42,8 @@ We ran the within-subject temporal coupling pipeline on three derivative folders
 ## Methods snapshot
 
 - **Signals:** z-scored 1 Hz time series of EEG band envelopes (theta, alpha, beta) and cardiac features (HR, RMSSD, SDNN).
-- **Stage 3:** Lagged cross-correlation (−60 to +60 s for most runs; ds003838 rest mean curves use −40 to +40 s). Group summaries use median raw peak lag and signed r per subject, then aggregate.
+- **Stage 3:** Lagged cross-correlation (−60 to +60 s for most runs; ds003838 rest mean curves use −40 to +40 s). Group summaries use median raw peak lag and signed r per subject, then aggregate. Config `peak_selection: abs_peak` uses strongest |r| (positive or negative); default `positive_only` ignores negative-only curves.
+- **QC warnings:** `mixed_peak_lag_direction` means subjects disagree on whether EEG or cardiac leads — informational, not a failure. High `raw_edge_peaks` suggests widening `lag_max_s` or setting `edge_margin_s: 5`.
 - **Inference layers (in order of conservatism):**
   1. Selected peak signed-r vs zero — exploratory (no lag-search correction).
   2. Permutation-controlled group peak strength (circular-shift EEG null) — **preferred** for group claims.
@@ -63,6 +71,20 @@ Full pipeline documentation: `temporal_coupling/README.md`, `temporal_coupling/I
 
 - **ds003838:** Dedicated ECG — highest signal quality; used as **reference anchor**.
 - **ds006848 & HIIT-40 PPG:** Embedded PPG/photosensor — more artifact-prone; likely contributes to weaker peaks and higher edge-peak rates.
+- **ds003690:** Embedded **EKG** (EEGLAB) — label `signal_type: ecg` in config so R-peak detector runs; cardiac QC strongly affects Stage 2 yield.
+- **ds003816:** Embedded **ECG** (BrainVision) — large cohort with many **short segments**; alignment yield sensitive to `hr_window_s`, `hrv_window_s`, and `audit.min_overlap_s`.
+
+### Data-driven config tuning
+
+After Stage 1b + 1c, run:
+
+```bash
+.venv/bin/python -m ppg_eeg.temporal_coupling \
+  --config config.run.<dataset>.temporal_coupling.yaml \
+  --recommend-config-values
+```
+
+This suggests `min_overlap_s` and cardiac window sizes from `alignment_qc.csv` and overlap-failure patterns. Re-apply to YAML and rerun 1b→1c before interpreting Stage 2 counts (e.g. `wrote=269/375` on ds003690 reflects `usable_for_xcorr`, not total aligned rows).
 
 ### Edge-peak QC flag
 
@@ -225,8 +247,9 @@ Example plots per partition: `event_triggered_hr_to_eeg.png`, `event_triggered_e
 2. **Report permutation null results prominently** — do not rely on selected peak-r FDR alone.
 3. **Split HIIT by PS vs PH** (or pre vs post) before drawing intervention conclusions — pooled n=40 may hide condition × direction interactions already visible between pre_rest and post_rest.
 4. **Run ECG-based HIIT partition** (`derivatives/run_hiit_40_ecg_temporal_coupling`) when available — separates exercise effects from PPG quality effects.
-5. **Automate** `cross_dataset_temporal_coupling_summary.csv` (planned in IMPLEMENTATION_PLAN) to formalize replication labels per pair.
+5. **Automate** `cross_dataset_temporal_coupling_summary.csv` (planned in IMPLEMENTATION_PLAN) to formalize replication labels per pair. Use `--recommend-config-values` per dataset before locking window/overlap parameters.
 6. **Stage 4:** prioritize HR-triggered EEG figures for Russell; defer EEG-triggered cardiac figures to supplementary material.
+7. **Complete ds003690 and ds003816** runs with dataset-specific cardiac QC, then add to cross-dataset matrix if effect sizes and directions are stable enough.
 
 ---
 
@@ -242,6 +265,8 @@ Example plots per partition: `event_triggered_hr_to_eeg.png`, `event_triggered_e
 | Mean ± SEM curves | `group_cross_correlation_mean_sem_grid.png` |
 | Data audit | `derivatives/run_ds003838_temporal_coupling/ds003838/group/data_audit.csv` (130 rows) |
 | | `derivatives/run_ds006848_temporal_coupling/ds006848/group/data_audit.csv` (52 rows) |
+| Config recommendations | `python -m ppg_eeg.temporal_coupling --config <cfg> --recommend-config-values` |
+| ds003690 / ds003816 (WIP) | `derivatives/run_ds003690_temporal_coupling/`, `derivatives/run_ds003816_temporal_coupling/` |
 
 ---
 
