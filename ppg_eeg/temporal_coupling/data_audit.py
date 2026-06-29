@@ -146,10 +146,14 @@ def _read_mne_metadata(path: Path, data_format: str | None = None) -> SignalMeta
             fmt = "brainvision"
         elif suffix == ".set":
             fmt = "eeglab"
+        elif suffix == ".edf":
+            fmt = "edf"
 
     try:
         if fmt == "brainvision":
             raw = mne.io.read_raw_brainvision(str(path), preload=False, verbose=False)
+        elif fmt == "edf":
+            raw = mne.io.read_raw_edf(str(path), preload=False, verbose=False)
         else:
             raw = mne.io.read_raw_eeglab(str(path), preload=False, verbose=False)
     except Exception:

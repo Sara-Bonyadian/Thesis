@@ -4,14 +4,20 @@ from pathlib import Path
 from typing import Sequence
 
 from .base import CanonicalObservation, DatasetAdapter
+from .ds003690 import DS003690Adapter
+from .ds003816 import DS003816Adapter
 from .ds003838 import DS003838Adapter
+from .ds004511 import DS004511Adapter
 from .ds006848 import DS006848Adapter
 from .hiit import HIITAdapter
 
 
 ADAPTER_REGISTRY: dict[str, type[DatasetAdapter]] = {
     "hiit": HIITAdapter,
+    "ds003690": DS003690Adapter,
+    "ds003816": DS003816Adapter,
     "ds003838": DS003838Adapter,
+    "ds004511": DS004511Adapter,
     "ds006848": DS006848Adapter,
 }
 

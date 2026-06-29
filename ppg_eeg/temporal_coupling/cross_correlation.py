@@ -354,6 +354,17 @@ def _select_positive_max_peak(points: list[LagCorrelationPoint]) -> LagCorrelati
     return min(candidates, key=lambda point: abs(point.lag_s))
 
 
+def _select_abs_max_peak(points: list[LagCorrelationPoint]) -> LagCorrelationPoint | None:
+    finite = [point for point in points if np.isfinite(point.r)]
+    if not finite:
+        return None
+    max_abs_r = max(abs(point.r) for point in finite)
+    candidates = [
+        point for point in finite if np.isclose(abs(point.r), max_abs_r, rtol=0.0, atol=PEAK_VALIDATION_TOL)
+    ]
+    return min(candidates, key=lambda point: abs(point.lag_s))
+
+
 def _auto_positive_threshold(
     values: np.ndarray,
     *,
@@ -423,7 +434,11 @@ def _select_detected_peak(
     min_peak_distance_s: float | None,
     prominence: str | float,
     height: str | float,
+    peak_selection: str = "positive_only",
 ) -> tuple[LagCorrelationPoint | None, bool]:
+    if str(peak_selection).casefold() == "abs_peak":
+        return _select_abs_max_peak(points), False
+
     local_peaks = _find_local_positive_peaks(
         points,
         lag_step_s=lag_step_s,
@@ -453,6 +468,7 @@ def extract_peaks(
     min_peak_distance_s: float | None = None,
     peak_prominence: str | float = "auto",
     peak_height: str | float = "auto",
+    peak_selection: str = "positive_only",
 ) -> PeakCorrelationResult:
     min_lag_s, max_lag_s = lag_grid_bounds(lag_grid_s)
     finite = [point for point in curve if np.isfinite(point.r)]
@@ -488,9 +504,11 @@ def extract_peaks(
         min_peak_distance_s=min_peak_distance_s,
         prominence=peak_prominence,
         height=peak_height,
+        peak_selection=peak_selection,
     )
     if raw_point is None:
         nan = float("nan")
+        no_peak_warning = "no_positive_peak" if str(peak_selection).casefold() == "positive_only" else "no_peak"
         return PeakCorrelationResult(
             raw_peak_lag_s=nan,
             raw_peak_signed_r=nan,
@@ -509,7 +527,7 @@ def extract_peaks(
             n_valid_lags=n_valid_lags,
             n_overlap_at_raw_peak=0,
             n_overlap_at_preferred_peak=0,
-            warning="no_positive_peak",
+            warning=no_peak_warning,
             p_perm=None,
         )
     raw_lag, raw_signed, raw_abs, raw_overlap = _point_from_peak(raw_point)
@@ -536,6 +554,7 @@ def extract_peaks(
         min_peak_distance_s=min_peak_distance_s,
         prominence=peak_prominence,
         height=peak_height,
+        peak_selection=peak_selection,
     )
     interior_lag, interior_signed, interior_abs, interior_overlap = _point_from_peak(interior_point)
 
@@ -607,6 +626,7 @@ def extract_peak(
     min_peak_distance_s: float | None = None,
     peak_prominence: str | float = "auto",
     peak_height: str | float = "auto",
+    peak_selection: str = "positive_only",
 ) -> PeakCorrelationResult:
     return extract_peaks(
         curve,
@@ -616,6 +636,7 @@ def extract_peak(
         min_peak_distance_s=min_peak_distance_s,
         peak_prominence=peak_prominence,
         peak_height=peak_height,
+        peak_selection=peak_selection,
     )
 
 
@@ -663,6 +684,7 @@ def null_peak_abs_r_from_shift(
         min_peak_distance_s=xcorr_cfg.min_peak_distance_s,
         peak_prominence=xcorr_cfg.peak_prominence,
         peak_height=xcorr_cfg.peak_height,
+        peak_selection=xcorr_cfg.peak_selection,
     )
     return float(peak.raw_peak_abs_r)
 
@@ -759,6 +781,7 @@ def permutation_p_value(
     min_peak_distance_s: float | None = None,
     peak_prominence: str | float = "auto",
     peak_height: str | float = "auto",
+    peak_selection: str = "positive_only",
 ) -> float | None:
     if n_permutations <= 0 or not np.isfinite(observed_peak_abs_r):
         return None
@@ -781,6 +804,7 @@ def permutation_p_value(
             min_peak_distance_s=min_peak_distance_s,
             peak_prominence=peak_prominence,
             peak_height=peak_height,
+            peak_selection=peak_selection,
         )
         if np.isfinite(peak.raw_peak_abs_r):
             null_peaks.append(peak.raw_peak_abs_r)
@@ -924,6 +948,7 @@ def compute_observation_xcorr(
             min_peak_distance_s=xcorr_cfg.min_peak_distance_s,
             peak_prominence=xcorr_cfg.peak_prominence,
             peak_height=xcorr_cfg.peak_height,
+            peak_selection=xcorr_cfg.peak_selection,
         )
         if xcorr_cfg.n_permutations > 0:
             p_perm = permutation_p_value(
@@ -939,6 +964,7 @@ def compute_observation_xcorr(
                 min_peak_distance_s=xcorr_cfg.min_peak_distance_s,
                 peak_prominence=xcorr_cfg.peak_prominence,
                 peak_height=xcorr_cfg.peak_height,
+                peak_selection=xcorr_cfg.peak_selection,
             )
             peak = PeakCorrelationResult(
                 raw_peak_lag_s=peak.raw_peak_lag_s,
@@ -1066,7 +1092,7 @@ def _overlay_legend_handles() -> list[Line2D]:
             markerfacecolor="#1f77b4",
             markeredgecolor="black",
             markersize=10,
-            label="detected positive peak (scipy find_peaks)",
+            label="detected primary peak",
         ),
         Line2D(
             [0],
@@ -1092,6 +1118,7 @@ def validate_peaks_against_curves(
     min_peak_distance_s: float | None = None,
     peak_prominence: str | float = "auto",
     peak_height: str | float = "auto",
+    peak_selection: str = "positive_only",
 ) -> tuple[list[dict[str, object]], bool]:
     curves_df = pd.DataFrame(curve_rows)
     validation_rows: list[dict[str, object]] = []
@@ -1127,6 +1154,7 @@ def validate_peaks_against_curves(
                 min_peak_distance_s=min_peak_distance_s,
                 prominence=peak_prominence,
                 height=peak_height,
+                peak_selection=peak_selection,
             )
             if expected_point is None:
                 expected_lag = float("nan")
@@ -1736,6 +1764,7 @@ def run_stage2(cfg: TemporalCouplingConfig) -> list[Path]:
             min_peak_distance_s=cfg.temporal_coupling.cross_correlation.min_peak_distance_s,
             peak_prominence=cfg.temporal_coupling.cross_correlation.peak_prominence,
             peak_height=cfg.temporal_coupling.cross_correlation.peak_height,
+            peak_selection=cfg.temporal_coupling.cross_correlation.peak_selection,
         )
         validation_path = group_validation_output_path(cfg)
         pd.DataFrame(validation_rows, columns=list(VALIDATION_COLUMNS)).to_csv(validation_path, index=False)

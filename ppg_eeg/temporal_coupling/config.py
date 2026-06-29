@@ -133,6 +133,7 @@ class TemporalCouplingCrossCorrelationConfig:
     min_peak_distance_s: float | None = None
     peak_prominence: str | float = "auto"
     peak_height: str | float = "auto"
+    peak_selection: str = "positive_only"
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,16 @@ def _as_optional_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _as_peak_selection(value: Any) -> str:
+    normalized = str(value).strip().casefold()
+    if normalized in {"positive_only", "abs_peak"}:
+        return normalized
+    raise ValueError(
+        "temporal_coupling.cross_correlation.peak_selection must be "
+        "'positive_only' or 'abs_peak'."
+    )
 
 
 def _as_band_limits(value: Any, *, name: str) -> tuple[float, float]:
@@ -426,6 +437,7 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
                 min_peak_distance_s=_as_optional_float(xcorr_raw.get("min_peak_distance_s")),
                 peak_prominence=xcorr_raw.get("peak_prominence", "auto"),
                 peak_height=xcorr_raw.get("peak_height", "auto"),
+                peak_selection=_as_peak_selection(_get(xcorr_raw, "peak_selection", "positive_only")),
             ),
             events=TemporalCouplingEventsConfig(
                 enabled=bool(_get(events_raw, "enabled", False)),

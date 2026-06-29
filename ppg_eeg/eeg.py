@@ -119,7 +119,8 @@ def preprocess_eeg(
     Non-ICA preprocessing: bandpass, bad-channel detection by variance z-score, CAR.
     """
     r = raw.copy()
-    r.pick_types(eeg=True, meg=False, eog=False, ecg=False, emg=False, misc=False, stim=False, exclude=[])
+    # r.pick_types(eeg=True, meg=False, eog=False, ecg=False, emg=False, misc=False, stim=False, exclude=[])
+    r.pick("eeg")
     r.filter(l_freq=l_freq, h_freq=h_freq, verbose=False)
 
     bads = detect_bad_channels_by_variance_z(r, z_thresh=bad_channel_variance_z)

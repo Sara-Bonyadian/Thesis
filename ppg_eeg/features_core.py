@@ -215,6 +215,8 @@ def _read_raw(path: Path, data_format: str) -> mne.io.BaseRaw:
             if "matlab v7.3" in str(exc).lower() or "hdf reader" in str(exc).lower():
                 return _read_raw_eeglab_v73(path)
             raise
+    if fmt == "edf":
+        return mne.io.read_raw_edf(str(path), preload=True, verbose=False)
     raise ValueError(f"Unsupported data format: {data_format!r}")
 
 

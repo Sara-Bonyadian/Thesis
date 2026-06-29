@@ -164,6 +164,17 @@ def resolve_debug_channel(
     raise ValueError(f"no debug channel available for requested={requested!r}")
 
 
+def _fallback_roi_channels(ch_names: list[str]) -> list[str]:
+    """
+    Some datasets (e.g., ds004511 EDF exports) use numeric EEG labels instead of
+    canonical montage names (Fz/Pz/Cz...). Prefer numeric scalp channels when present.
+    """
+    numeric = [name for name in ch_names if name.isdigit()]
+    if len(numeric) >= 16:
+        return numeric
+    return list(ch_names)
+
+
 def compute_band_envelope(
     signal_1d: np.ndarray,
     *,
@@ -208,7 +219,7 @@ def _compute_roi_band_envelope(
     h_freq: float,
     smooth_s: float,
 ) -> np.ndarray:
-    band_raw = preprocessed.copy().pick_channels(roi_channels)
+    band_raw = preprocessed.copy().pick(roi_channels)
     band_raw.filter(l_freq=l_freq, h_freq=h_freq, verbose=False)
     sfreq = float(band_raw.info["sfreq"])
     data = band_raw.get_data()
@@ -255,7 +266,13 @@ def extract_eeg_envelopes(
                 f"warning: missing_roi_channel {band_name}={missing} (requested={list(requested_roi)})"
             )
         if not available:
-            raise ValueError(f"{band_name}: no ROI channels available after matching montage.")
+            fallback = _fallback_roi_channels(preprocessed.ch_names)
+            if not fallback:
+                raise ValueError(f"{band_name}: no ROI channels available after matching montage.")
+            available = fallback
+            warnings_out.append(
+                f"warning: roi_fallback_all_eeg_channels {band_name}=using_{len(available)}_channels"
+            )
 
         roi_used[band_name] = tuple(available)
         l_freq, h_freq = limits
