@@ -10,7 +10,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
@@ -31,10 +30,6 @@ from .resample import (
 CURVES_FILENAME = "cross_correlation_curves.csv"
 PEAKS_FILENAME = "cross_correlation_peaks.csv"
 GRID_PLOT = "cross_correlation_grid_subject.png"
-PEAK_LAG_DIST_RAW_PLOT = "peak_lag_distribution_raw.png"
-PEAK_LAG_DIST_PREFERRED_PLOT = "peak_lag_distribution_preferred.png"
-PEAK_STRENGTH_RAW_PLOT = "peak_correlation_strength_distribution_raw.png"
-PEAK_STRENGTH_PREFERRED_PLOT = "peak_correlation_strength_distribution_preferred.png"
 EDGE_PEAK_SUMMARY_PLOT = "edge_peak_summary.png"
 QC_SUMMARY_FILENAME = "cross_correlation_qc_summary.csv"
 VALIDATION_FILENAME = "cross_correlation_peak_validation.csv"
@@ -1313,134 +1308,6 @@ def build_qc_summary(
     return summary_rows
 
 
-def _plot_peak_lag_distribution(
-    peaks_df: pd.DataFrame,
-    output_path: Path,
-    *,
-    peak_kind: str,
-) -> None:
-    lag_col = "raw_peak_lag_s" if peak_kind == "raw" else "preferred_peak_lag_s"
-    title_kind = "raw peak" if peak_kind == "raw" else "preferred peak"
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    pairs = [pair.pair for pair in variable_pairs()]
-    x_positions = {pair: idx for idx, pair in enumerate(pairs)}
-
-    for row in peaks_df.itertuples(index=False):
-        x = x_positions[str(row.pair)]
-        is_edge = bool(getattr(row, "raw_peak_at_edge", False))
-        ax.scatter(
-            x,
-            float(getattr(row, lag_col)),
-            color="#d62728" if is_edge else "#1f77b4",
-            marker="X" if is_edge else "o",
-            s=70 if is_edge else 50,
-            linewidths=0.8,
-            zorder=3 if is_edge else 2,
-        )
-
-    ax.axhline(0.0, color="0.5", linewidth=0.8)
-    ax.set_xticks(range(len(pairs)))
-    ax.set_xticklabels(pairs, rotation=45, ha="right")
-    ax.set_ylabel("Peak lag (s)")
-    ax.set_title(f"Peak lag distribution by pair ({title_kind})")
-    ax.legend(
-        handles=[
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor="#1f77b4",
-                markersize=8,
-                label=f"{title_kind} (non-edge raw)",
-            ),
-            Line2D(
-                [0],
-                [0],
-                marker="X",
-                color="#d62728",
-                linestyle="None",
-                markersize=9,
-                markeredgewidth=1.0,
-                label="raw peak at edge",
-            ),
-        ],
-        loc="best",
-        fontsize=9,
-    )
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=140)
-    plt.close(fig)
-
-
-def _plot_peak_strength_distribution(
-    peaks_df: pd.DataFrame,
-    output_path: Path,
-    *,
-    peak_kind: str,
-) -> None:
-    if peak_kind == "raw":
-        value_col = "raw_peak_signed_r"
-        title_kind = "raw peak"
-        ylabel = "raw_peak_signed_r"
-    else:
-        value_col = "preferred_peak_signed_r"
-        title_kind = "preferred peak"
-        ylabel = "preferred_peak_signed_r"
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    pairs = [pair.pair for pair in variable_pairs()]
-    x_positions = {pair: idx for idx, pair in enumerate(pairs)}
-
-    for row in peaks_df.itertuples(index=False):
-        x = x_positions[str(row.pair)]
-        is_edge = bool(getattr(row, "raw_peak_at_edge", False))
-        ax.scatter(
-            x,
-            float(getattr(row, value_col)),
-            color="#d62728" if is_edge else "#1f77b4",
-            marker="X" if is_edge else "o",
-            s=70 if is_edge else 50,
-            linewidths=0.8,
-            zorder=3 if is_edge else 2,
-        )
-
-    ax.axhline(0.0, color="0.5", linewidth=0.8)
-    ax.set_xticks(range(len(pairs)))
-    ax.set_xticklabels(pairs, rotation=45, ha="right")
-    ax.set_ylabel(ylabel)
-    ax.set_title(f"Peak correlation strength by pair ({title_kind}; y-axis: {ylabel})")
-    ax.legend(
-        handles=[
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor="#1f77b4",
-                markersize=8,
-                label=f"{title_kind} (non-edge raw)",
-            ),
-            Line2D(
-                [0],
-                [0],
-                marker="X",
-                color="#d62728",
-                linestyle="None",
-                markersize=9,
-                markeredgewidth=1.0,
-                label="raw peak at edge",
-            ),
-        ],
-        loc="best",
-        fontsize=9,
-    )
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=140)
-    plt.close(fig)
-
-
 def _plot_edge_peak_summary(peaks_df: pd.DataFrame, output_path: Path) -> None:
     pairs = [pair.pair for pair in variable_pairs()]
     counts: list[int] = []
@@ -1491,22 +1358,6 @@ def write_qc_plots(
         out_path = observation_output_dir(cfg, observation_id) / GRID_PLOT
         _plot_subject_grid(observation_id, obs_curves, obs_peaks, out_path)
         plot_paths.append(out_path)
-
-    lag_raw_path = group_dir / PEAK_LAG_DIST_RAW_PLOT
-    _plot_peak_lag_distribution(peaks_df, lag_raw_path, peak_kind="raw")
-    plot_paths.append(lag_raw_path)
-
-    lag_pref_path = group_dir / PEAK_LAG_DIST_PREFERRED_PLOT
-    _plot_peak_lag_distribution(peaks_df, lag_pref_path, peak_kind="preferred")
-    plot_paths.append(lag_pref_path)
-
-    strength_raw_path = group_dir / PEAK_STRENGTH_RAW_PLOT
-    _plot_peak_strength_distribution(peaks_df, strength_raw_path, peak_kind="raw")
-    plot_paths.append(strength_raw_path)
-
-    strength_pref_path = group_dir / PEAK_STRENGTH_PREFERRED_PLOT
-    _plot_peak_strength_distribution(peaks_df, strength_pref_path, peak_kind="preferred")
-    plot_paths.append(strength_pref_path)
 
     edge_path = group_dir / EDGE_PEAK_SUMMARY_PLOT
     _plot_edge_peak_summary(peaks_df, edge_path)
