@@ -31,7 +31,6 @@ from .resample import (
 CURVES_FILENAME = "cross_correlation_curves.csv"
 PEAKS_FILENAME = "cross_correlation_peaks.csv"
 GRID_PLOT = "cross_correlation_grid_subject.png"
-OVERLAY_PLOT_TEMPLATE = "cross_correlation_overlay_{pair}.png"
 PEAK_LAG_DIST_RAW_PLOT = "peak_lag_distribution_raw.png"
 PEAK_LAG_DIST_PREFERRED_PLOT = "peak_lag_distribution_preferred.png"
 PEAK_STRENGTH_RAW_PLOT = "peak_correlation_strength_distribution_raw.png"
@@ -117,6 +116,7 @@ PEAK_COLUMNS = (
 )
 
 VALIDATION_COLUMNS = (
+    "observation_id",
     "subject_id",
     "pair",
     "expected_raw_peak_lag_s",
@@ -1080,35 +1080,6 @@ def _plot_peak_markers(
         )
 
 
-def _overlay_legend_handles() -> list[Line2D]:
-    return [
-        Line2D([0], [0], color="#1f77b4", linewidth=1.5, label="subject cross-correlation curve"),
-        Line2D([0], [0], color="black", linewidth=2.5, label="mean curve"),
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor="#1f77b4",
-            markeredgecolor="black",
-            markersize=10,
-            label="detected primary peak",
-        ),
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor="none",
-            markeredgecolor="#1f77b4",
-            markersize=7,
-            markeredgewidth=1.0,
-            label="QC interior alternative",
-        ),
-        Line2D([0], [0], color="0.7", linestyle="--", linewidth=0.8, label="lag 0"),
-    ]
-
-
 def validate_peaks_against_curves(
     curve_rows: list[dict[str, object]],
     peak_rows: list[dict[str, object]],
@@ -1124,12 +1095,20 @@ def validate_peaks_against_curves(
     validation_rows: list[dict[str, object]] = []
     all_passed = True
 
+    has_observation_id = "observation_id" in curves_df.columns
+
     for peak in peak_rows:
         subject_id = str(peak["subject_id"])
+        observation_id = str(peak.get("observation_id", "")).strip()
         pair = str(peak["pair"])
-        curve = curves_df.loc[
-            (curves_df["subject_id"] == subject_id) & (curves_df["pair"] == pair)
-        ].copy()
+        if observation_id and has_observation_id:
+            curve = curves_df.loc[
+                (curves_df["observation_id"] == observation_id) & (curves_df["pair"] == pair)
+            ].copy()
+        else:
+            curve = curves_df.loc[
+                (curves_df["subject_id"] == subject_id) & (curves_df["pair"] == pair)
+            ].copy()
         finite = curve.loc[np.isfinite(curve["r"].astype(float))]
         warnings_out: list[str] = []
 
@@ -1164,6 +1143,7 @@ def validate_peaks_against_curves(
                 all_passed = False
                 validation_rows.append(
                     {
+                        "observation_id": observation_id,
                         "subject_id": subject_id,
                         "pair": pair,
                         "expected_raw_peak_lag_s": expected_lag,
@@ -1191,6 +1171,7 @@ def validate_peaks_against_curves(
 
         validation_rows.append(
             {
+                "observation_id": observation_id,
                 "subject_id": subject_id,
                 "pair": pair,
                 "expected_raw_peak_lag_s": expected_lag,
@@ -1330,106 +1311,6 @@ def build_qc_summary(
         )
 
     return summary_rows
-
-
-def _pair_common_lag_bounds(pair_curves: pd.DataFrame) -> tuple[float, float] | None:
-    total = int(pair_curves["subject_id"].nunique())
-    if total == 0:
-        return None
-    lag_counts = pair_curves.groupby("lag_s")["subject_id"].nunique()
-    common_lags = lag_counts[lag_counts == total].index.astype(float)
-    if common_lags.empty:
-        return None
-    return float(common_lags.min()), float(common_lags.max())
-
-
-def _pair_mean_curve_in_common_range(pair_curves: pd.DataFrame) -> pd.DataFrame:
-    common_bounds = _pair_common_lag_bounds(pair_curves)
-    total = int(pair_curves["subject_id"].nunique())
-    rows: list[dict[str, object]] = []
-    for lag_s, lag_rows in pair_curves.groupby("lag_s"):
-        lag_s = float(lag_s)
-        if common_bounds is not None:
-            lo, hi = common_bounds
-            if lag_s < lo or lag_s > hi:
-                continue
-        finite = lag_rows["r"].astype(float)
-        finite = finite[np.isfinite(finite)]
-        if int(finite.size) < total:
-            continue
-        rows.append({"lag_s": lag_s, "r": float(finite.mean())})
-    if not rows:
-        return pd.DataFrame(columns=["lag_s", "r"])
-    return pd.DataFrame(rows).sort_values("lag_s")
-
-
-def _plot_pair_overlay(
-    pair: VariablePair,
-    curves_df: pd.DataFrame,
-    peaks_df: pd.DataFrame,
-    output_path: Path,
-) -> None:
-    fig, ax = plt.subplots(figsize=(10, 5))
-    pair_curves = curves_df.loc[curves_df["pair"] == pair.pair]
-    pair_peaks = peaks_df.loc[peaks_df["pair"] == pair.pair]
-    if pair_curves.empty:
-        ax.set_title(f"{pair.pair} overlay (no data)")
-        fig.savefig(output_path, dpi=120)
-        plt.close(fig)
-        return
-
-    for subject_id, subject_curves in pair_curves.groupby("subject_id"):
-        subject_curves = subject_curves.sort_values("lag_s")
-        line = ax.plot(
-            subject_curves["lag_s"],
-            subject_curves["r"],
-            linewidth=1.0,
-            alpha=0.7,
-            label=str(subject_id),
-        )[0]
-        subject_peak = pair_peaks.loc[pair_peaks["subject_id"] == subject_id]
-        if subject_peak.empty:
-            continue
-        _plot_peak_markers(
-            ax,
-            peak_row=subject_peak.iloc[0],
-            line_color=line.get_color(),
-        )
-
-    mean_curve = _pair_mean_curve_in_common_range(pair_curves)
-    if not mean_curve.empty:
-        ax.plot(mean_curve["lag_s"], mean_curve["r"], color="black", linewidth=2.5)
-
-    ax.axvline(0.0, color="0.7", linewidth=0.8, linestyle="--")
-    ax.set_xlabel("Lag (s)")
-    ax.set_ylabel("Correlation r")
-
-    common_bounds = _pair_common_lag_bounds(pair_curves)
-    if common_bounds is not None:
-        ax.set_xlim(common_bounds[0], common_bounds[1])
-
-    n_subjects = int(pair_peaks["subject_id"].nunique()) if not pair_peaks.empty else 0
-    n_edge = int(pair_peaks["raw_peak_at_edge"].astype(bool).sum()) if not pair_peaks.empty else 0
-    median_raw_lag = float(pair_peaks["raw_peak_lag_s"].median()) if not pair_peaks.empty else float("nan")
-    median_pref_lag = float(pair_peaks["preferred_peak_lag_s"].median()) if not pair_peaks.empty else float("nan")
-    common_note = (
-        f", common_lag=[{common_bounds[0]:g}, {common_bounds[1]:g}]s"
-        if common_bounds is not None
-        else ""
-    )
-    title_lines = [
-        f"Cross-correlation overlay: {pair.pair}",
-        (
-            f"subjects={n_subjects}, edge_peaks={n_edge}, "
-            f"median_preferred_lag={median_pref_lag:.1f}s, median_raw_lag={median_raw_lag:.1f}s"
-            f"{common_note}"
-        ),
-    ]
-    ax.set_title("\n".join(title_lines), fontsize=10)
-    ax.legend(handles=_overlay_legend_handles(), fontsize=8, loc="best")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=140)
-    plt.close(fig)
 
 
 def _plot_peak_lag_distribution(
@@ -1609,11 +1490,6 @@ def write_qc_plots(
             continue
         out_path = observation_output_dir(cfg, observation_id) / GRID_PLOT
         _plot_subject_grid(observation_id, obs_curves, obs_peaks, out_path)
-        plot_paths.append(out_path)
-
-    for pair in variable_pairs():
-        out_path = group_dir / OVERLAY_PLOT_TEMPLATE.format(pair=pair.pair)
-        _plot_pair_overlay(pair, curves_df, peaks_df, out_path)
         plot_paths.append(out_path)
 
     lag_raw_path = group_dir / PEAK_LAG_DIST_RAW_PLOT
