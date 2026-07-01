@@ -244,6 +244,68 @@ class TestCrossCorrelation(unittest.TestCase):
         self.assertIn("no_permutation_test", hr_theta["warning"])
         self.assertEqual(list(summary[0].keys()), list(QC_SUMMARY_COLUMNS))
 
+    def test_validate_peaks_uses_observation_id_for_multi_task_subjects(self) -> None:
+        curve_rows = [
+            {
+                "observation_id": "ds003816-01lt-ses-01-task-rest",
+                "subject_id": "01lt_ses-01",
+                "pair": "hr__theta",
+                "lag_s": 0.0,
+                "r": 0.8,
+                "n_overlap": 10,
+            },
+            {
+                "observation_id": "ds003816-01lt-ses-01-task-rest",
+                "subject_id": "01lt_ses-01",
+                "pair": "hr__theta",
+                "lag_s": 10.0,
+                "r": 0.2,
+                "n_overlap": 10,
+            },
+            {
+                "observation_id": "ds003816-01lt-ses-01-task-task",
+                "subject_id": "01lt_ses-01",
+                "pair": "hr__theta",
+                "lag_s": 0.0,
+                "r": 0.1,
+                "n_overlap": 10,
+            },
+            {
+                "observation_id": "ds003816-01lt-ses-01-task-task",
+                "subject_id": "01lt_ses-01",
+                "pair": "hr__theta",
+                "lag_s": 10.0,
+                "r": 0.9,
+                "n_overlap": 10,
+            },
+        ]
+        peak_rows = [
+            {
+                "observation_id": "ds003816-01lt-ses-01-task-rest",
+                "subject_id": "01lt_ses-01",
+                "pair": "hr__theta",
+                "raw_peak_lag_s": 0.0,
+                "raw_peak_abs_r": 0.8,
+            },
+            {
+                "observation_id": "ds003816-01lt-ses-01-task-task",
+                "subject_id": "01lt_ses-01",
+                "pair": "hr__theta",
+                "raw_peak_lag_s": 10.0,
+                "raw_peak_abs_r": 0.9,
+            },
+        ]
+
+        validation_rows, passed = validate_peaks_against_curves(
+            curve_rows,
+            peak_rows,
+            peak_selection="abs_peak",
+        )
+
+        self.assertTrue(passed)
+        self.assertEqual(len(validation_rows), 2)
+        self.assertTrue(all(row["passed"] for row in validation_rows))
+
 
 if __name__ == "__main__":
     unittest.main()
