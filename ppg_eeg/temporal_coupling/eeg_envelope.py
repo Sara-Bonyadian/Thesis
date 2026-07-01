@@ -41,6 +41,23 @@ BAND_LABELS: dict[str, str] = {
 }
 
 
+def _envelope_working_sfreq_hz(cfg: TemporalCouplingConfig) -> float:
+    bands = cfg.temporal_coupling.eeg.bands
+    max_band_hf = max(bands.theta[1], bands.alpha[1], bands.beta[1])
+    # 8× the highest band edge is enough for bandpass + Hilbert; floor keeps high-fs EDF exports tractable.
+    return max(250.0, float(max_band_hf) * 8.0)
+
+
+def _prepare_raw_for_envelope_pipeline(raw: mne.io.BaseRaw, cfg: TemporalCouplingConfig) -> mne.io.BaseRaw:
+    native_sfreq = float(raw.info["sfreq"])
+    target_sfreq = _envelope_working_sfreq_hz(cfg)
+    if native_sfreq <= target_sfreq:
+        return raw
+    prepared = raw.copy()
+    prepared.resample(target_sfreq, verbose=False)
+    return prepared
+
+
 @dataclass(frozen=True)
 class UsableObservation:
     dataset_id: str
@@ -161,6 +178,9 @@ def resolve_debug_channel(
     roi_available, roi_missing = resolve_roi_channels(ch_names, roi_fallback)
     if roi_available:
         return roi_available[0], [requested, *roi_missing]
+    fallback = _fallback_roi_channels(ch_names)
+    if fallback:
+        return fallback[0], [requested, *roi_missing, *roi_missing]
     raise ValueError(f"no debug channel available for requested={requested!r}")
 
 
@@ -752,13 +772,29 @@ def run_stage1a(cfg: TemporalCouplingConfig) -> list[Path]:
     written: list[Path] = []
     qc_records: list[EegEnvelopeQcRecord] = []
     n_ok = 0
+    n_total = len(observations)
+    print(f"[temporal_coupling] stage=1a: processing {n_total} observations")
 
-    for obs in observations:
+    for idx, obs in enumerate(observations, start=1):
         out_dir = observation_output_dir(cfg, obs.observation_id)
         out_path = out_dir / ENVELOPE_FILENAME
         try:
+            print(
+                f"[temporal_coupling] stage=1a [{idx}/{n_total}] "
+                f"{obs.observation_id} task={obs.task}: loading {obs.eeg_file.name}",
+                flush=True,
+            )
             raw = _read_raw(obs.eeg_file, obs.eeg_format)
-            native_result = extract_eeg_envelopes(raw, cfg)
+            native_sfreq = float(raw.info["sfreq"])
+            working = _prepare_raw_for_envelope_pipeline(raw, cfg)
+            working_sfreq = float(working.info["sfreq"])
+            if working_sfreq < native_sfreq:
+                print(
+                    f"[temporal_coupling] stage=1a [{idx}/{n_total}] "
+                    f"downsampled {native_sfreq:.0f} -> {working_sfreq:.0f} Hz before envelope extraction",
+                    flush=True,
+                )
+            native_result = extract_eeg_envelopes(working, cfg)
             output_result = downsample_envelope_result(
                 native_result,
                 output_fs_hz=cfg.temporal_coupling.eeg.envelope_output_fs_hz,
@@ -766,7 +802,7 @@ def run_stage1a(cfg: TemporalCouplingConfig) -> list[Path]:
             for message in native_result.warnings:
                 warnings.warn(f"[temporal_coupling] {obs.subject_id} {message}", stacklevel=2)
 
-            preprocessed = _preprocess_raw(raw, cfg)
+            preprocessed = _preprocess_raw(working, cfg)
             qc = build_eeg_envelope_qc(obs, native_result, output_result, cfg)
             qc_records.append(qc)
             if qc.warning:
@@ -782,16 +818,6 @@ def run_stage1a(cfg: TemporalCouplingConfig) -> list[Path]:
             )
             out_dir.mkdir(parents=True, exist_ok=True)
             df.to_csv(out_path, index=False)
-            plot_paths = write_debug_plots(
-                obs,
-                preprocessed,
-                native_result,
-                output_result,
-                cfg,
-                out_dir,
-                qc_warnings=qc.warning,
-            )
-
             written.append(out_path)
             n_ok += 1
             duration_s = float(df["time_s"].iloc[-1]) if not df.empty else 0.0
@@ -799,8 +825,24 @@ def run_stage1a(cfg: TemporalCouplingConfig) -> list[Path]:
                 f"[temporal_coupling] stage=1a {obs.subject_id} task={obs.task}: "
                 f"rows={len(df)} duration_s={duration_s:.1f} usable={qc.usable_eeg_envelope} -> {out_path}"
             )
-            for plot_path in plot_paths:
-                print(f"[temporal_coupling]   eeg_plot={plot_path}")
+            try:
+                plot_paths = write_debug_plots(
+                    obs,
+                    preprocessed,
+                    native_result,
+                    output_result,
+                    cfg,
+                    out_dir,
+                    qc_warnings=qc.warning,
+                )
+                for plot_path in plot_paths:
+                    print(f"[temporal_coupling]   eeg_plot={plot_path}")
+            except Exception as plot_exc:
+                warnings.warn(
+                    f"[temporal_coupling] stage=1a {obs.subject_id} task={obs.task}: "
+                    f"debug plots skipped: {plot_exc}",
+                    stacklevel=2,
+                )
         except Exception as exc:
             warnings.warn(
                 f"[temporal_coupling] stage=1a skipping {obs.subject_id} task={obs.task}: {exc}",
