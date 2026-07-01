@@ -1,16 +1,28 @@
-# Temporal EEG-cardiac coupling for ds004511 (all available tasks/sessions).
+# Smoke config for temporal EEG–cardiac coupling (ds004511 rest).
+# 3-subject cohort before running config.run.ds004511.temporal_coupling.yaml on full raw data.
+# See temporal_coupling/README.md and config.smoke.ds003838.temporal_coupling.yaml.
 
 dataset_id: ds004511
 
 paths:
   raw_root: ./data/raw/ds004511
-  out_root: ./derivatives/run_ds004511_temporal_coupling
-  base_root: ./derivatives/run_ds004511_fast
+  out_root: ./derivatives/smoke_ds004511_temporal_coupling
+  base_root: ./derivatives/smoke_ds004511_fast
 
-subjects: []
-tasks: []
-conditions: []
-sessions: []
+# Subject IDs match BIDS entity after "sub-" (e.g. sub-S210317 → S210317).
+subjects:
+  - S200116
+  - S210317
+  - S201210
+
+tasks:
+  - rest
+
+conditions:
+  - rest
+
+sessions:
+  - "01"
 
 eeg:
   l_freq: 1.0
@@ -19,7 +31,7 @@ eeg:
   reference: average
 
 ppg:
-  # null = use full EEG/ECG overlap; audit caps lag by overlap/3.
+  # null = use full EEG/ECG overlap
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4
@@ -44,7 +56,17 @@ temporal_coupling:
       alpha: [Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2]
       beta: [Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4]
     debug_plot:
-      enabled: false
+      enabled: true
+      start_time_s: 40
+      end_time_s: 60
+      auto_window_s: 20
+      also_auto_window: true
+      save_psd: true
+      # ds004511 EDF uses numeric channel labels (1–128), not 10–5 names.
+      channels:
+        theta: "64"
+        alpha: "1"
+        beta: "64"
 
   cardiac:
     channel: auto
@@ -65,7 +87,16 @@ temporal_coupling:
     min_valid_hr_percent: 50.0
     min_valid_hrv_percent: 30.0
     debug_plot:
-      enabled: false
+      enabled: true
+      windows:
+        - [35, 45]
+        - [50, 60]
+        - [65, 75]
+      auto_window_s: 10
+      overview_window_s: 40
+      save_overview: true
+      also_auto_window: true
+      max_plots_per_subject: 5
 
   resample:
     fs_hz: 1.0
@@ -75,7 +106,7 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
-    n_permutations: 100
+    n_permutations: 0
     detrend: false
     rolling_detrend_window_s: null
     edge_margin_s: 0
@@ -85,8 +116,7 @@ temporal_coupling:
     peak_selection: abs_peak
 
   events:
-    enabled: true
-    subject_balanced_average: true
+    enabled: false
     hr_percentile: 10
     eeg_threshold_sd: 2.0
     epoch_pre_s: 60
@@ -107,4 +137,3 @@ temporal_coupling:
 
   group:
     plot_common_lag_only: true
-    n_group_permutations: 100
