@@ -33,30 +33,89 @@ def _stages_to_run(stage: str) -> list[str]:
     return [stage]
 
 
+def _normalize_subject_key(subject_id: str) -> str:
+    key = subject_id.strip().casefold()
+    if key.startswith("sub-"):
+        return key[4:]
+    return key
+
+
+def _observation_matches_configured_subject(
+    configured_subject: str,
+    observation: CanonicalObservation,
+) -> bool:
+    configured_key = _normalize_subject_key(configured_subject)
+    if not configured_key:
+        return False
+
+    obs_subject_key = _normalize_subject_key(observation.subject_id.split("_", 1)[0])
+    if obs_subject_key == configured_key:
+        return True
+
+    bids_folder = f"sub-{configured_key}"
+    return any(part.casefold() == bids_folder for part in observation.eeg_path.parts)
+
+
+def _dataset_root(raw_root: Path, dataset_id: str) -> Path:
+    dataset_root = raw_root
+    if dataset_root.name != dataset_id:
+        candidate = raw_root / dataset_id
+        if candidate.exists():
+            dataset_root = candidate
+    return dataset_root
+
+
+def _subject_dir(dataset_root: Path, subject_id: str) -> Path | None:
+    key = subject_id.strip()
+    candidates = [dataset_root / key]
+    normalized = _normalize_subject_key(key)
+    candidates.append(dataset_root / f"sub-{normalized}")
+    seen: set[str] = set()
+    for path in candidates:
+        marker = str(path.casefold())
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if path.is_dir():
+            return path
+    return None
+
+
 def _missing_pair_reason(
     raw_root: Path,
     dataset_id: str,
     subject_id: str,
     tasks: list[str],
 ) -> str:
-    dataset_root = raw_root
-    if dataset_root.name != dataset_id:
-        candidate = raw_root / dataset_id
-        if candidate.exists():
-            dataset_root = candidate
-
-    if not (dataset_root / subject_id).is_dir():
+    dataset_root = _dataset_root(raw_root, dataset_id)
+    subject_dir = _subject_dir(dataset_root, subject_id)
+    if subject_dir is None:
         return f"subject directory not found under {dataset_root}"
 
     task_labels = tasks or ["rest"]
     missing_parts: list[str] = []
     for task in task_labels:
-        eeg_glob = list((dataset_root / subject_id / "eeg").glob(f"*_task-{task}_eeg.set"))
-        ecg_glob = list((dataset_root / subject_id / "ecg").glob(f"*_task-{task}_ecg.set"))
-        if not eeg_glob:
-            missing_parts.append(f"EEG rest file missing for task={task!r}")
-        if not ecg_glob:
-            missing_parts.append(f"ECG/PPG rest file missing for task={task!r}")
+        task_key = task.casefold()
+        eeg_files = [
+            path
+            for path in subject_dir.glob("**/eeg/*_eeg.*")
+            if task_key in path.stem.casefold()
+        ]
+        ecg_files = [
+            path
+            for path in subject_dir.glob("**/ecg/*_ecg.*")
+            if task_key in path.stem.casefold()
+        ]
+        if not eeg_files:
+            missing_parts.append(f"EEG file missing for task={task!r}")
+        elif not ecg_files:
+            embedded_candidates = [
+                path
+                for path in eeg_files
+                if path.suffix.casefold() in {".edf", ".vhdr", ".set"}
+            ]
+            if not embedded_candidates:
+                missing_parts.append(f"ECG/PPG file missing for task={task!r}")
     if missing_parts:
         return "; ".join(missing_parts)
     return "no matching EEG+ECG observation for configured filters"
@@ -81,12 +140,14 @@ def resolve_observations(cfg: TemporalCouplingConfig) -> ResolvedObservations:
         warnings.warn(message, stacklevel=2)
         return ResolvedObservations(observations=(), skipped_subjects=tuple(configured_subjects), warnings=(message,))
 
-    found_subjects = {obs.subject_id for obs in observations}
     skipped: list[str] = []
 
     if configured_subjects:
         for subject_id in configured_subjects:
-            if subject_id in found_subjects:
+            if any(
+                _observation_matches_configured_subject(subject_id, obs)
+                for obs in observations
+            ):
                 continue
             skipped.append(subject_id)
             reason = _missing_pair_reason(cfg.paths.raw_root, cfg.dataset_id, subject_id, cfg.tasks)
@@ -161,10 +222,15 @@ def run_temporal_coupling(cfg: TemporalCouplingConfig, *, stage: str) -> None:
 
     resolved = resolve_observations(cfg)
     if resolved.observations:
+        n_obs = len(resolved.observations)
         subject_ids = sorted({obs.subject_id for obs in resolved.observations})
-        print(f"[temporal_coupling] usable subjects ({len(subject_ids)}): {', '.join(subject_ids)}")
+        task_labels = sorted({obs.task_label for obs in resolved.observations})
+        print(
+            f"[temporal_coupling] resolved observations: {n_obs} "
+            f"({len(subject_ids)} subject-session-run keys, tasks={', '.join(task_labels)})"
+        )
     else:
-        print("[temporal_coupling] usable subjects (0): none")
+        print("[temporal_coupling] resolved observations: 0")
 
     for step in _stages_to_run(stage):
         _run_stage(step, cfg, resolved)
