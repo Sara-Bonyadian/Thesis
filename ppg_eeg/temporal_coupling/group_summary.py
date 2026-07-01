@@ -35,10 +35,6 @@ PEAK_SUMMARY_FILENAME = "peak_correlation_summary.csv"
 SUMMARY_FILENAME = "group_cross_correlation_summary.csv"
 MEAN_CURVES_FILENAME = "mean_cross_correlation_curves.csv"
 MEAN_SEM_GRID_PLOT = "group_cross_correlation_mean_sem_grid.png"
-PEAK_HEATMAP_PLOT = "group_peak_summary_heatmap.png"
-EDGE_HEATMAP_PLOT = "group_edge_peak_rate_heatmap.png"
-PEAK_LAG_DIST_PLOT = "peak_lag_distribution.png"
-PEAK_R_DIST_PLOT = "peak_r_distribution.png"
 INTERPRETATION_NOTES_FILENAME = "stage3_interpretation_notes.txt"
 
 STAGE3_OUTPUT_FILENAMES = (
@@ -47,10 +43,6 @@ STAGE3_OUTPUT_FILENAMES = (
     MEAN_CURVES_FILENAME,
     INTERPRETATION_NOTES_FILENAME,
     MEAN_SEM_GRID_PLOT,
-    PEAK_HEATMAP_PLOT,
-    EDGE_HEATMAP_PLOT,
-    PEAK_LAG_DIST_PLOT,
-    PEAK_R_DIST_PLOT,
 )
 
 AUTO_NORMALITY_ALPHA = 0.05
@@ -843,204 +835,6 @@ def _plot_mean_sem_grid(
     plt.close(fig)
 
 
-def _pair_matrix_indices() -> dict[str, tuple[int, int]]:
-    cardiac_idx = {name: idx for idx, name in enumerate(CARDIAC_VARS)}
-    eeg_idx = {name: idx for idx, name in enumerate(EEG_VARS)}
-    return {
-        pair.pair: (cardiac_idx[pair.cardiac_var], eeg_idx[pair.eeg_var])
-        for pair in variable_pairs()
-    }
-
-
-def _plot_peak_summary_heatmap(
-    peak_summary_rows: list[dict[str, object]],
-    output_path: Path,
-) -> None:
-    matrix_shape = (len(CARDIAC_VARS), len(EEG_VARS))
-    signed_r = np.full(matrix_shape, np.nan)
-    lag_s = np.full(matrix_shape, np.nan)
-    edge_flag = np.full(matrix_shape, False, dtype=bool)
-    indices = _pair_matrix_indices()
-
-    for row in peak_summary_rows:
-        idx = indices[str(row["pair"])]
-        signed_r[idx] = float(row["median_raw_peak_signed_r"])
-        lag_s[idx] = float(row["median_raw_peak_lag_s"])
-        edge_flag[idx] = bool(
-            np.isfinite(float(row["percent_edge_peaks"]))
-            and float(row["percent_edge_peaks"]) > HIGH_EDGE_PEAK_RATE_PERCENT
-        )
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    for ax, values, title, cmap, fmt in (
-        (axes[0], signed_r, "Median raw peak signed r", "RdBu_r", "{:+.2f}"),
-        (axes[1], lag_s, "Median raw peak lag (s)", "coolwarm", "{:.0f}"),
-    ):
-        masked = np.ma.array(values, mask=~np.isfinite(values))
-        im = ax.imshow(masked, cmap=cmap, aspect="auto")
-        ax.set_xticks(range(len(EEG_LABELS)))
-        ax.set_xticklabels(EEG_LABELS)
-        ax.set_yticks(range(len(CARDIAC_LABELS)))
-        ax.set_yticklabels(CARDIAC_LABELS)
-        ax.set_title(title)
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        for (row_i, col_j), value in np.ndenumerate(values):
-            if not np.isfinite(value):
-                continue
-            marker = "*" if edge_flag[row_i, col_j] else ""
-            ax.text(
-                col_j,
-                row_i,
-                fmt.format(value) + marker,
-                ha="center",
-                va="center",
-                color="black" if abs(value) < 0.35 else "white",
-                fontsize=9,
-            )
-
-    fig.suptitle("* = >50% raw peaks at lag edge", fontsize=10, y=1.02)
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=140, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_edge_peak_rate_heatmap(
-    peak_summary_rows: list[dict[str, object]],
-    output_path: Path,
-) -> None:
-    matrix_shape = (len(CARDIAC_VARS), len(EEG_VARS))
-    edge_pct = np.full(matrix_shape, np.nan)
-    indices = _pair_matrix_indices()
-
-    for row in peak_summary_rows:
-        idx = indices[str(row["pair"])]
-        edge_pct[idx] = float(row["percent_edge_peaks"])
-
-    fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    masked = np.ma.array(edge_pct, mask=~np.isfinite(edge_pct))
-    im = ax.imshow(masked, cmap="YlOrRd", aspect="auto", vmin=0, vmax=100)
-    ax.set_xticks(range(len(EEG_LABELS)))
-    ax.set_xticklabels(EEG_LABELS)
-    ax.set_yticks(range(len(CARDIAC_LABELS)))
-    ax.set_yticklabels(CARDIAC_LABELS)
-    ax.set_title("Percent raw peaks at lag edge by pair")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="% edge peaks")
-    for (row_i, col_j), value in np.ndenumerate(edge_pct):
-        if not np.isfinite(value):
-            continue
-        suffix = "*" if value > HIGH_EDGE_PEAK_RATE_PERCENT else ""
-        ax.text(col_j, row_i, f"{value:.0f}{suffix}", ha="center", va="center", fontsize=9)
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=140, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _plot_peak_lag_distribution(peaks_df: pd.DataFrame, output_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(12, 5))
-    pairs = [pair.pair for pair in variable_pairs()]
-    x_positions = {pair: idx for idx, pair in enumerate(pairs)}
-
-    for row in peaks_df.itertuples(index=False):
-        is_edge = bool(getattr(row, "raw_peak_at_edge", False))
-        ax.scatter(
-            x_positions[str(row.pair)],
-            float(row.raw_peak_lag_s),
-            color="#d62728" if is_edge else "#1f77b4",
-            marker="X" if is_edge else "o",
-            s=70 if is_edge else 50,
-            linewidths=0.8,
-            zorder=3 if is_edge else 2,
-        )
-
-    ax.axhline(0.0, color="0.5", linewidth=0.8)
-    ax.set_xticks(range(len(pairs)))
-    ax.set_xticklabels(pairs, rotation=45, ha="right")
-    ax.set_ylabel("Raw peak lag (s)")
-    ax.set_title("Group raw peak lag distribution by pair")
-    ax.legend(
-        handles=[
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor="#1f77b4",
-                markersize=8,
-                label="raw peak lag (non-edge)",
-            ),
-            Line2D(
-                [0],
-                [0],
-                marker="X",
-                color="#d62728",
-                linestyle="None",
-                markersize=9,
-                label="raw peak at lag edge",
-            ),
-        ],
-        loc="best",
-        fontsize=9,
-    )
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=140)
-    plt.close(fig)
-
-
-def _plot_peak_r_distribution(peaks_df: pd.DataFrame, output_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(12, 5))
-    pairs = [pair.pair for pair in variable_pairs()]
-    x_positions = {pair: idx for idx, pair in enumerate(pairs)}
-
-    for row in peaks_df.itertuples(index=False):
-        is_edge = bool(getattr(row, "raw_peak_at_edge", False))
-        ax.scatter(
-            x_positions[str(row.pair)],
-            float(row.raw_peak_signed_r),
-            color="#d62728" if is_edge else "#1f77b4",
-            marker="X" if is_edge else "o",
-            s=70 if is_edge else 50,
-            linewidths=0.8,
-            zorder=3 if is_edge else 2,
-        )
-
-    ax.axhline(0.0, color="0.5", linewidth=0.8)
-    ax.set_xticks(range(len(pairs)))
-    ax.set_xticklabels(pairs, rotation=45, ha="right")
-    ax.set_ylabel("raw_peak_signed_r")
-    ax.set_title("Group raw peak correlation strength by pair")
-    ax.legend(
-        handles=[
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor="#1f77b4",
-                markersize=8,
-                label="raw_peak_signed_r (non-edge)",
-            ),
-            Line2D(
-                [0],
-                [0],
-                marker="X",
-                color="#d62728",
-                linestyle="None",
-                markersize=9,
-                label="raw peak at lag edge",
-            ),
-        ],
-        loc="best",
-        fontsize=9,
-    )
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=140)
-    plt.close(fig)
-
-
 def _format_float(value: object, *, precision: int = 1) -> str:
     try:
         number = float(value)
@@ -1233,28 +1027,6 @@ def _run_stage3_partition(
         print(
             f"[temporal_coupling] stage=3 partition={partition!r}: no curves; "
             "skipping mean curve outputs."
-        )
-
-    if cfg.temporal_coupling.output.save_plots and peak_summary_rows:
-        heatmap_path = group_dir / PEAK_HEATMAP_PLOT
-        edge_heatmap_path = group_dir / EDGE_HEATMAP_PLOT
-        _plot_peak_summary_heatmap(peak_summary_rows, heatmap_path)
-        _plot_edge_peak_rate_heatmap(peak_summary_rows, edge_heatmap_path)
-        written.extend([heatmap_path, edge_heatmap_path])
-        print(
-            f"[temporal_coupling] stage=3 wrote heatmaps -> "
-            f"{heatmap_path.name}, {edge_heatmap_path.name}"
-        )
-
-    if cfg.temporal_coupling.output.save_plots and not peaks_df.empty:
-        lag_plot_path = group_dir / PEAK_LAG_DIST_PLOT
-        r_plot_path = group_dir / PEAK_R_DIST_PLOT
-        _plot_peak_lag_distribution(peaks_df, lag_plot_path)
-        _plot_peak_r_distribution(peaks_df, r_plot_path)
-        written.extend([lag_plot_path, r_plot_path])
-        print(
-            f"[temporal_coupling] stage=3 wrote peak distribution plots -> "
-            f"{lag_plot_path.name}, {r_plot_path.name}"
         )
 
     notes_path = group_dir / INTERPRETATION_NOTES_FILENAME
