@@ -160,8 +160,10 @@ def _beats_and_ibis_in_window(
     ibi_min_ms: float,
     ibi_max_ms: float,
 ) -> tuple[np.ndarray, int]:
-    mask = (peak_times_s >= window_start) & (peak_times_s <= window_end)
-    peak_times = peak_times_s[mask]
+    # peak_times_s is monotonic; index slicing avoids full-array boolean masks per window.
+    lo = int(np.searchsorted(peak_times_s, window_start, side="left"))
+    hi = int(np.searchsorted(peak_times_s, window_end, side="right"))
+    peak_times = peak_times_s[lo:hi]
     n_beats = int(len(peak_times))
     if n_beats < 2:
         return np.array([], dtype=float), n_beats
@@ -206,9 +208,10 @@ def compute_cardiac_timeseries(detection: CardiacDetectionResult, cfg: TemporalC
     if peak_times.size < 2:
         return pd.DataFrame()
 
-    half_max = max(hr_window_s, mean_rr_window_s, hrv_window_s) / 2.0
-    start_t = half_max
-    end_t = max(start_t, detection.duration_s - half_max)
+    # Grid endpoints use HR/RR half-windows so overlap is not over-trimmed by HRV window size.
+    half_grid = max(hr_window_s, mean_rr_window_s) / 2.0
+    start_t = half_grid
+    end_t = max(start_t, detection.duration_s - half_grid)
     if end_t < start_t:
         return pd.DataFrame()
 

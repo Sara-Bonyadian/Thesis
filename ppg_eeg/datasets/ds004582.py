@@ -7,10 +7,6 @@ from .base import CanonicalObservation, DatasetAdapter, include_if_in_filter, no
 
 
 def _parse_bids_eeg_stem(stem: str) -> dict[str, str]:
-    """
-    Parse BIDS-like stem components from names such as:
-    sub-S210317_ses-01_task-Rest_run-01_eeg
-    """
     entities: dict[str, str] = {}
     for token in stem.split("_"):
         if "-" not in token:
@@ -21,9 +17,13 @@ def _parse_bids_eeg_stem(stem: str) -> dict[str, str]:
     return entities
 
 
-class DS004511Adapter(DatasetAdapter):
-    dataset_id = "ds004511"
-    dataset_folder = "ds004511"
+def _physio_path_for_eeg(vhdr: Path) -> Path:
+    return vhdr.parent.parent / "beh" / f"{vhdr.stem.replace('_eeg', '_physio')}.tsv.gz"
+
+
+class DS004582Adapter(DatasetAdapter):
+    dataset_id = "ds004582"
+    dataset_folder = "ds004582"
 
     def build_observations(
         self,
@@ -42,8 +42,8 @@ class DS004511Adapter(DatasetAdapter):
         session_filter = normalized_set(sessions)
 
         rows: list[CanonicalObservation] = []
-        for eeg_json in unique_sorted_paths(dataset_root.glob("sub-*/ses-*/eeg/*_eeg.json")):
-            entities = _parse_bids_eeg_stem(eeg_json.stem)
+        for vhdr in unique_sorted_paths(dataset_root.glob("sub-*/ses-*/eeg/*_eeg.vhdr")):
+            entities = _parse_bids_eeg_stem(vhdr.stem)
             subject = entities.get("sub")
             task = entities.get("task")
             session = entities.get("ses")
@@ -64,8 +64,10 @@ class DS004511Adapter(DatasetAdapter):
             if not include_if_in_filter(session_label, session_filter):
                 continue
 
-            eeg_path = eeg_json.with_suffix(".edf")
-            if not eeg_path.exists():
+            eeg_bin = vhdr.with_suffix(".eeg")
+            marker = vhdr.with_suffix(".vmrk")
+            physio_path = _physio_path_for_eeg(vhdr)
+            if not eeg_bin.is_file() or not marker.is_file() or not physio_path.is_file():
                 continue
 
             run_suffix = f"-run-{run.casefold()}" if run else ""
@@ -85,17 +87,17 @@ class DS004511Adapter(DatasetAdapter):
                     subject_id=subject_instance,
                     task_label=task_label,
                     condition_label=condition_label,
-                    eeg_path=eeg_path,
-                    eeg_format="edf",
-                    ppg_source="embedded_eeg",
-                    ppg_path=None,
-                    ppg_format=None,
+                    eeg_path=vhdr,
+                    eeg_format="brainvision",
+                    ppg_source="external_file",
+                    ppg_path=physio_path,
+                    ppg_format="bids_physio",
                     session_label=session_label,
-                    modality="eeg_ecg",
+                    modality="eeg_physio",
                     timepoint="na",
                     state=task_label,
                     is_usable=True,
-                    notes="EDF files use numeric channel labels without embedded ECG.",
+                    notes="Cardiac from beh/*_physio.tsv.gz (ECGBIT/OXIBIT); HR computed via peak detection.",
                 )
             )
 

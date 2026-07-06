@@ -8,7 +8,10 @@ from ppg_eeg.ppg import rmssd_ms, sdnn_ms
 from ppg_eeg.temporal_coupling.cardiac_common import (
     annotate_peaks,
     classify_ibi,
+    has_cardiac_channels,
     infer_signal_type,
+    infer_signal_type_from_channel,
+    list_cardiac_candidates,
 )
 from ppg_eeg.temporal_coupling.cardiac_timeseries import _beats_and_ibis_in_window
 
@@ -63,6 +66,27 @@ class TestCardiacTimeseries(unittest.TestCase):
     def test_infer_signal_type(self) -> None:
         self.assertEqual(infer_signal_type("ECG"), "ecg")
         self.assertEqual(infer_signal_type("PPG"), "ppg")
+        self.assertEqual(infer_signal_type("32"), "unknown")
+        self.assertEqual(infer_signal_type_from_channel("32", "eeg"), "unknown")
+        self.assertEqual(infer_signal_type_from_channel("lead", "ecg"), "ecg")
+
+    def test_list_cardiac_candidates_skips_unlabeled_scalp_channels(self) -> None:
+        import mne
+
+        info = mne.create_info(
+            ch_names=["1", "2", "ECG"],
+            sfreq=250.0,
+            ch_types=["eeg", "eeg", "ecg"],
+        )
+        raw = mne.io.RawArray(np.zeros((3, 100)), info, verbose=False)
+        self.assertEqual(list_cardiac_candidates(raw, "auto"), ["ECG"])
+        self.assertEqual(list_cardiac_candidates(raw, "ecg"), ["ECG"])
+
+    def test_has_cardiac_channels_allows_single_channel_file(self) -> None:
+        self.assertTrue(has_cardiac_channels(["physio"], ["misc"], signal_type="ecg"))
+        self.assertFalse(
+            has_cardiac_channels(["1", "2", "3"], ["eeg", "eeg", "eeg"], signal_type="ecg")
+        )
 
 
 if __name__ == "__main__":

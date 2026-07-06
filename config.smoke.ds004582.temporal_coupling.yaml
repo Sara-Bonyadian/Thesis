@@ -1,18 +1,25 @@
-# Temporal EEG–cardiac coupling for ds003816 (all available tasks/sessions).
-# temporal_coupling analysis settings match config.smoke.ds003816.temporal_coupling.yaml
-# (full cohort; smoke uses a 3-subject subset for QC).
+# Smoke config for temporal EEG–cardiac coupling (ds004582).
+# Cardiac HR/HRV computed from beh/*_physio.tsv.gz (ECGBIT/OXIBIT), not device HR column.
 
-dataset_id: ds003816
+dataset_id: ds004582
 
 paths:
-  raw_root: ./data/raw/ds003816
-  out_root: ./derivatives/run_ds003816_temporal_coupling
-  base_root: ./derivatives/run_ds003816_fast
+  raw_root: ./data/raw/ds004582
+  out_root: ./derivatives/smoke_ds004582_temporal_coupling
+  base_root: ./derivatives/smoke_ds004582_fast
 
-subjects: []
-tasks: []
-conditions: []
-sessions: []
+subjects:
+  - FFE149
+  - FFE150
+
+tasks:
+  - ff
+
+conditions:
+  - ff
+
+sessions:
+  - "01"
 
 eeg:
   l_freq: 1.0
@@ -21,7 +28,6 @@ eeg:
   reference: average
 
 ppg:
-  # null = use full EEG/ECG overlap; audit caps lag by overlap/3.
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4
@@ -31,7 +37,7 @@ ppg:
 
 temporal_coupling:
   audit:
-    min_overlap_s: 20
+    min_overlap_s: 60
     min_clean_beats: 30
 
   eeg:
@@ -49,8 +55,8 @@ temporal_coupling:
       enabled: false
 
   cardiac:
-    channel: ECG
-    signal_type: ecg
+    channel: auto
+    signal_type: auto
     detector: auto
     ecg:
       bandpass_hz: [5, 30]
@@ -58,14 +64,14 @@ temporal_coupling:
       prominence: auto
       height: auto
       test_inverted: true
-    hr_window_s: 10.0
-    mean_rr_window_s: 10.0
-    hrv_window_s: 20.0
+    hr_window_s: 15.0
+    mean_rr_window_s: 15.0
+    hrv_window_s: 60.0
     hrv_step_s: 2.0
     min_beats_hr: 5
-    min_beats_hrv: 12
+    min_beats_hrv: 20
     min_valid_hr_percent: 50.0
-    min_valid_hrv_percent: 20.0
+    min_valid_hrv_percent: 30.0
     debug_plot:
       enabled: false
 
@@ -77,36 +83,22 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
-    peak_selection: abs_peak
-    n_permutations: 100
+    n_permutations: 0
     detrend: false
     rolling_detrend_window_s: null
-    edge_margin_s: 5
+    edge_margin_s: 0
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto
+    peak_selection: abs_peak
 
   events:
-    enabled: true
-    subject_balanced_average: true
-    hr_percentile: 10
-    eeg_threshold_sd: 2.0
-    epoch_pre_s: 60
-    epoch_post_s: 60
-    min_event_distance_s: 10
-    min_total_events: 10
-    min_contributing_subjects: 4
-    theta_burst_method: percentile
-    theta_burst_percentile: 90
-    alpha_suppression_method: percentile
-    alpha_suppression_percentile: 10
-    beta_burst_method: percentile
-    beta_burst_percentile: 90
+    enabled: false
 
   output:
     save_curves: true
-    save_plots: true
+    save_plots: false
 
   group:
     plot_common_lag_only: true
-    n_group_permutations: 100
+    n_group_permutations: 0

@@ -217,6 +217,10 @@ def _read_raw(path: Path, data_format: str) -> mne.io.BaseRaw:
             raise
     if fmt == "edf":
         return mne.io.read_raw_edf(str(path), preload=True, verbose=False)
+    if fmt == "bids_physio":
+        from .bids_physio import read_physio_raw
+
+        return read_physio_raw(path)
     raise ValueError(f"Unsupported data format: {data_format!r}")
 
 

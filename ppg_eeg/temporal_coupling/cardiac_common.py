@@ -61,23 +61,38 @@ def infer_signal_type(channel_name: str) -> str:
     low = channel_name.casefold()
     if "ecg" in low or "ekg" in low:
         return "ecg"
-    if any(token in low for token in ("ppg", "photo", "optic", "pleth", "pulse")):
+    if any(token in low for token in ("ppg", "photo", "optic", "pleth", "pulse", "oxi")):
         return "ppg"
     return "unknown"
 
 
-def resolve_signal_type(channel_name: str, signal_type_pref: str) -> str:
+def infer_signal_type_from_channel(channel_name: str, ch_type: str) -> str:
+    inferred = infer_signal_type(channel_name)
+    if inferred != "unknown":
+        return inferred
+    ctype = str(ch_type).strip().casefold()
+    if ctype == "ecg":
+        return "ecg"
+    if ctype in {"ppg", "pleth"}:
+        return "ppg"
+    if ctype == "bio" and any(token in channel_name.casefold() for token in ("oxi", "ppg", "pleth", "pulse")):
+        return "ppg"
+    return "unknown"
+
+
+def resolve_signal_type(channel_name: str, signal_type_pref: str, *, ch_type: str = "") -> str:
     pref = str(signal_type_pref).strip().casefold()
     if pref in {"ecg", "ppg"}:
         return pref
-    return infer_signal_type(channel_name)
+    return infer_signal_type_from_channel(channel_name, ch_type)
 
 
 def list_cardiac_candidates(raw: mne.io.BaseRaw, signal_type: str) -> list[str]:
     st = signal_type.strip().casefold()
     candidates: list[str] = []
     for name in raw.ch_names:
-        inferred = infer_signal_type(name)
+        ch_type = raw.get_channel_types(picks=[name])[0]
+        inferred = infer_signal_type_from_channel(name, ch_type)
         if st in {"", "auto"}:
             if inferred in {"ecg", "ppg"}:
                 candidates.append(name)
@@ -85,9 +100,33 @@ def list_cardiac_candidates(raw: mne.io.BaseRaw, signal_type: str) -> list[str]:
             candidates.append(name)
         elif st == "ppg" and inferred == "ppg":
             candidates.append(name)
-    if not candidates and raw.ch_names:
-        candidates = list(raw.ch_names)
+    # Dedicated single-channel cardiac recordings (e.g. paired ECG .set files).
+    if not candidates and len(raw.ch_names) == 1 and st in {"", "auto", "ecg", "ppg"}:
+        candidates = [raw.ch_names[0]]
     return candidates
+
+
+def has_cardiac_channels(
+    ch_names: list[str],
+    ch_types: list[str],
+    *,
+    signal_type: str = "auto",
+) -> bool:
+    if not ch_names:
+        return False
+    if len(ch_names) == 1:
+        return True
+    st = signal_type.strip().casefold()
+    for name, ch_type in zip(ch_names, ch_types, strict=False):
+        inferred = infer_signal_type_from_channel(name, ch_type)
+        if st in {"", "auto"}:
+            if inferred in {"ecg", "ppg"}:
+                return True
+        elif st == "ecg" and inferred == "ecg":
+            return True
+        elif st == "ppg" and inferred == "ppg":
+            return True
+    return False
 
 
 def segment_bounds(raw: mne.io.BaseRaw, cfg: TemporalCouplingConfig) -> tuple[float, float]:

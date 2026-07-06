@@ -6,6 +6,17 @@ from typing import Sequence
 from .base import CanonicalObservation, DatasetAdapter, include_if_in_filter, normalized_set, unique_sorted_paths
 
 
+# BIDS task labels vary across subjects (e.g. VisualizeOther vs Visualother).
+TASK_ALIASES: dict[str, str] = {
+    "visualother": "visualizeother",
+    "visualself": "visualizeself",
+}
+
+
+def _canonical_task_label(task: str) -> str:
+    return TASK_ALIASES.get(task.casefold(), task.casefold())
+
+
 def _parse_bids_eeg_stem(stem: str) -> dict[str, str]:
     """
     Parse BIDS-like stem components from names such as:
@@ -51,7 +62,7 @@ class DS003816Adapter(DatasetAdapter):
             if subject is None or task is None:
                 continue
 
-            task_label = task.casefold()
+            task_label = _canonical_task_label(task)
             session_label = session.casefold() if session else "single"
             condition_label = task_label
 

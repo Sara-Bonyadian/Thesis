@@ -244,6 +244,52 @@ class TestCrossCorrelation(unittest.TestCase):
         self.assertIn("no_permutation_test", hr_theta["warning"])
         self.assertEqual(list(summary[0].keys()), list(QC_SUMMARY_COLUMNS))
 
+    def test_positive_only_prefers_global_max_over_smaller_local_peak(self) -> None:
+        curve = [
+            LagCorrelationPoint(lag_s=-15.0, r=0.8, n_overlap=20),
+            LagCorrelationPoint(lag_s=-10.0, r=0.3, n_overlap=20),
+            LagCorrelationPoint(lag_s=-5.0, r=0.5, n_overlap=20),
+            LagCorrelationPoint(lag_s=0.0, r=0.1, n_overlap=20),
+            LagCorrelationPoint(lag_s=5.0, r=0.2, n_overlap=20),
+            LagCorrelationPoint(lag_s=10.0, r=0.15, n_overlap=20),
+            LagCorrelationPoint(lag_s=15.0, r=0.25, n_overlap=20),
+        ]
+        lag_grid = np.array([-15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0])
+        peak = extract_peaks(
+            curve,
+            lag_step_s=5.0,
+            lag_grid_s=lag_grid,
+            edge_margin_s=5.0,
+            min_peak_distance_s=10.0,
+            peak_prominence="auto",
+            peak_height="auto",
+            peak_selection="positive_only",
+        )
+        self.assertAlmostEqual(peak.raw_peak_lag_s, -15.0)
+        self.assertAlmostEqual(peak.raw_peak_abs_r, 0.8)
+
+    def test_sparse_lag_grid_uses_boundary_only_edge_margin(self) -> None:
+        curve = [
+            LagCorrelationPoint(lag_s=-15.0, r=0.2, n_overlap=20),
+            LagCorrelationPoint(lag_s=-10.0, r=0.9, n_overlap=20),
+            LagCorrelationPoint(lag_s=-5.0, r=0.4, n_overlap=20),
+            LagCorrelationPoint(lag_s=0.0, r=0.1, n_overlap=20),
+            LagCorrelationPoint(lag_s=5.0, r=0.15, n_overlap=20),
+            LagCorrelationPoint(lag_s=10.0, r=0.25, n_overlap=20),
+            LagCorrelationPoint(lag_s=15.0, r=0.2, n_overlap=20),
+        ]
+        lag_grid = np.array([-15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0])
+        peak = extract_peaks(
+            curve,
+            lag_step_s=5.0,
+            lag_grid_s=lag_grid,
+            edge_margin_s=5.0,
+            min_peak_distance_s=10.0,
+            peak_selection="positive_only",
+        )
+        self.assertAlmostEqual(peak.raw_peak_lag_s, -10.0)
+        self.assertFalse(peak.raw_peak_at_edge)
+
     def test_validate_peaks_uses_observation_id_for_multi_task_subjects(self) -> None:
         curve_rows = [
             {

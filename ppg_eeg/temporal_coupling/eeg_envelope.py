@@ -167,6 +167,16 @@ def resolve_roi_channels(ch_names: list[str], requested: tuple[str, ...]) -> tup
     return available, missing
 
 
+def configured_roi_channels(cfg: TemporalCouplingConfig) -> tuple[str, ...]:
+    rois = cfg.temporal_coupling.eeg.rois
+    return tuple(dict.fromkeys((*rois.theta, *rois.alpha, *rois.beta)))
+
+
+def has_usable_eeg_channels(ch_names: list[str], requested_roi: tuple[str, ...]) -> bool:
+    available, _ = resolve_roi_channels(ch_names, requested_roi)
+    return bool(available)
+
+
 def resolve_debug_channel(
     ch_names: list[str],
     requested: str,

@@ -326,6 +326,26 @@ def _peak_direction(peak_lag_s: float, *, lag_step_s: float) -> str:
     return "cardiac_leads"
 
 
+def _resolved_edge_margin_s(
+    edge_margin_s: float,
+    *,
+    min_lag_s: float,
+    max_lag_s: float,
+    lag_step_s: float,
+    n_valid_lags: int,
+) -> float:
+    """Shrink edge margin on sparse lag grids so interior lags are not all flagged as edges."""
+    if edge_margin_s <= 0:
+        return 0.0
+    lag_span = max_lag_s - min_lag_s
+    if lag_span <= 0:
+        return edge_margin_s
+    n_grid_lags = int(round(lag_span / lag_step_s)) + 1
+    if n_valid_lags <= max(5, n_grid_lags) or n_grid_lags <= 9:
+        return max(0.0, lag_step_s / 2.0 - 1e-9)
+    return min(edge_margin_s, lag_span / 4.0)
+
+
 def _is_edge_lag(lag_s: float, *, min_lag_s: float, max_lag_s: float, edge_margin_s: float) -> bool:
     if edge_margin_s <= 0:
         return np.isclose(lag_s, min_lag_s) or np.isclose(lag_s, max_lag_s)
@@ -431,20 +451,31 @@ def _select_detected_peak(
     height: str | float,
     peak_selection: str = "positive_only",
 ) -> tuple[LagCorrelationPoint | None, bool]:
+    finite = [point for point in points if np.isfinite(point.r)]
     if str(peak_selection).casefold() == "abs_peak":
-        return _select_abs_max_peak(points), False
+        return _select_abs_max_peak(finite), False
 
+    # Sparse grids: scipy find_peaks is unreliable; use the global positive maximum.
+    if len(finite) <= 9:
+        peak = _select_positive_max_peak(finite)
+        return peak, peak is None
+
+    global_peak = _select_positive_max_peak(finite)
     local_peaks = _find_local_positive_peaks(
-        points,
+        finite,
         lag_step_s=lag_step_s,
         min_peak_distance_s=min_peak_distance_s,
         prominence=prominence,
         height=height,
     )
-    if local_peaks:
-        return _select_positive_max_peak(local_peaks), False
-    finite = [point for point in points if np.isfinite(point.r)]
-    return _select_positive_max_peak(finite), True
+    if not local_peaks:
+        return global_peak, True
+    local_peak = _select_positive_max_peak(local_peaks)
+    if global_peak is None:
+        return local_peak, False
+    if local_peak is None or global_peak.r > local_peak.r + PEAK_VALIDATION_TOL:
+        return global_peak, True
+    return local_peak, False
 
 
 def _point_from_peak(peak: LagCorrelationPoint | None) -> tuple[float, float, float, int]:
@@ -493,6 +524,14 @@ def extract_peaks(
             p_perm=None,
         )
 
+    resolved_edge_margin_s = _resolved_edge_margin_s(
+        edge_margin_s,
+        min_lag_s=min_lag_s,
+        max_lag_s=max_lag_s,
+        lag_step_s=lag_step_s,
+        n_valid_lags=n_valid_lags,
+    )
+
     raw_point, used_global_fallback = _select_detected_peak(
         finite,
         lag_step_s=lag_step_s,
@@ -530,7 +569,7 @@ def extract_peaks(
         raw_lag,
         min_lag_s=min_lag_s,
         max_lag_s=max_lag_s,
-        edge_margin_s=edge_margin_s,
+        edge_margin_s=resolved_edge_margin_s,
     )
 
     interior_candidates = [
@@ -540,7 +579,7 @@ def extract_peaks(
             point.lag_s,
             min_lag_s=min_lag_s,
             max_lag_s=max_lag_s,
-            edge_margin_s=edge_margin_s,
+            edge_margin_s=resolved_edge_margin_s,
         )
     ]
     interior_point, _ = _select_detected_peak(

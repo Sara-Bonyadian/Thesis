@@ -1,18 +1,32 @@
-# Temporal EEG–cardiac coupling for ds003816 (all available tasks/sessions).
-# temporal_coupling analysis settings match config.smoke.ds003816.temporal_coupling.yaml
-# (full cohort; smoke uses a 3-subject subset for QC).
+# Smoke config for temporal EEG–cardiac coupling (ds003816).
+# 3-subject cohort before re-running config.run.ds003816.temporal_coupling.yaml.
+# Subject IDs match BIDS entity after "sub-" (e.g. sub-01lt → 01lt).
+# See temporal_coupling/README.md and config.smoke.ds003838.temporal_coupling.yaml.
 
 dataset_id: ds003816
 
 paths:
   raw_root: ./data/raw/ds003816
-  out_root: ./derivatives/run_ds003816_temporal_coupling
+  out_root: ./derivatives/smoke_ds003816_temporal_coupling
   base_root: ./derivatives/run_ds003816_fast
 
-subjects: []
-tasks: []
-conditions: []
-sessions: []
+subjects:
+  - 01lt
+  - 07lt
+  - 03lt
+
+tasks:
+  - preresting
+  - lkmself
+  - postresting
+
+conditions:
+  - preresting
+  - lkmself
+  - postresting
+
+sessions:
+  - "01"
 
 eeg:
   l_freq: 1.0
@@ -46,7 +60,16 @@ temporal_coupling:
       alpha: [Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2]
       beta: [Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4]
     debug_plot:
-      enabled: false
+      enabled: true
+      start_time_s: 20
+      end_time_s: 40
+      auto_window_s: 20
+      also_auto_window: true
+      save_psd: true
+      channels:
+        theta: Fz
+        alpha: Pz
+        beta: Fz
 
   cardiac:
     channel: ECG
@@ -67,7 +90,16 @@ temporal_coupling:
     min_valid_hr_percent: 50.0
     min_valid_hrv_percent: 20.0
     debug_plot:
-      enabled: false
+      enabled: true
+      windows:
+        - [15, 25]
+        - [30, 40]
+        - [45, 55]
+      auto_window_s: 10
+      overview_window_s: 40
+      save_overview: true
+      also_auto_window: true
+      max_plots_per_subject: 5
 
   resample:
     fs_hz: 1.0
@@ -78,7 +110,7 @@ temporal_coupling:
     lag_max_s: 60
     lag_step_s: 5
     peak_selection: abs_peak
-    n_permutations: 100
+    n_permutations: 0
     detrend: false
     rolling_detrend_window_s: null
     edge_margin_s: 5
@@ -87,8 +119,7 @@ temporal_coupling:
     peak_height: auto
 
   events:
-    enabled: true
-    subject_balanced_average: true
+    enabled: false
     hr_percentile: 10
     eeg_threshold_sd: 2.0
     epoch_pre_s: 60
@@ -109,4 +140,4 @@ temporal_coupling:
 
   group:
     plot_common_lag_only: true
-    n_group_permutations: 100
+    n_group_permutations: 0
