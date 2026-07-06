@@ -1,25 +1,18 @@
-# Smoke config for temporal EEG–cardiac coupling (ds004582).
+# Temporal EEG–cardiac coupling for ds004582 (all subjects, task FF).
 # Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
+# Analysis settings match config.smoke.ds004582.temporal_coupling.yaml (full cohort).
 
 dataset_id: ds004582
 
 paths:
   raw_root: ./data/raw/ds004582
-  out_root: ./derivatives/smoke_ds004582_temporal_coupling
-  base_root: ./derivatives/smoke_ds004582_fast
+  out_root: ./derivatives/run_ds004582_temporal_coupling
+  base_root: ./derivatives/run_ds004582_fast
 
-subjects:
-  - FFE149
-  - FFE150
-
-tasks:
-  - ff
-
-conditions:
-  - ff
-
-sessions:
-  - "01"
+subjects: []
+tasks: []
+conditions: []
+sessions: []
 
 eeg:
   l_freq: 1.0
@@ -83,22 +76,36 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
-    n_permutations: 0
+    n_permutations: 100
     detrend: false
     rolling_detrend_window_s: null
-    edge_margin_s: 0
+    edge_margin_s: 5
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto
     peak_selection: abs_peak
 
   events:
-    enabled: false
+    enabled: true
+    subject_balanced_average: true
+    hr_percentile: 10
+    eeg_threshold_sd: 2.0
+    epoch_pre_s: 60
+    epoch_post_s: 60
+    min_event_distance_s: 10
+    min_total_events: 10
+    min_contributing_subjects: 4
+    theta_burst_method: percentile
+    theta_burst_percentile: 90
+    alpha_suppression_method: percentile
+    alpha_suppression_percentile: 10
+    beta_burst_method: percentile
+    beta_burst_percentile: 90
 
   output:
     save_curves: true
-    save_plots: false
+    save_plots: true
 
   group:
     plot_common_lag_only: true
-    n_group_permutations: 0
+    n_group_permutations: 100
