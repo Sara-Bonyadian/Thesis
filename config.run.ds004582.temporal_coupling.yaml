@@ -1,6 +1,6 @@
-# Temporal EEG–cardiac coupling for ds004582 (all subjects, task FF).
+# Temporal EEG–cardiac coupling for ds004582 (all 73 subjects, task FF).
 # Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
-# Analysis settings match config.smoke.ds004582.temporal_coupling.yaml (full cohort).
+# Analysis settings match config.smoke.ds004582.temporal_coupling.yaml (full cohort; smoke uses 7 subjects for QC).
 
 dataset_id: ds004582
 
@@ -9,10 +9,14 @@ paths:
   out_root: ./derivatives/run_ds004582_temporal_coupling
   base_root: ./derivatives/run_ds004582_fast
 
+# Empty subjects = discover all sub-* folders under raw_root (73 subjects).
 subjects: []
-tasks: []
-conditions: []
-sessions: []
+tasks:
+  - ff
+conditions:
+  - ff
+sessions:
+  - "01"
 
 eeg:
   l_freq: 1.0

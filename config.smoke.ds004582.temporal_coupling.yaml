@@ -1,4 +1,5 @@
 # Smoke config for temporal EEG–cardiac coupling (ds004582).
+# 7-subject cohort before config.run.ds004582.temporal_coupling.yaml on full raw data.
 # Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
 
 dataset_id: ds004582
@@ -9,6 +10,11 @@ paths:
   base_root: ./derivatives/smoke_ds004582_fast
 
 subjects:
+  - FFE001
+  - FFE002
+  - FFE003
+  - FFE010
+  - FFE020
   - FFE149
   - FFE150
 
@@ -97,7 +103,7 @@ temporal_coupling:
 
   output:
     save_curves: true
-    save_plots: false
+    save_plots: true
 
   group:
     plot_common_lag_only: true
