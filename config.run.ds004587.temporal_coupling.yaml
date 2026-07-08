@@ -1,0 +1,118 @@
+# Temporal EEG–cardiac coupling for ds004587 (all subjects, task IG).
+# Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
+# Analysis settings match config.smoke.ds004587.temporal_coupling.yaml (full cohort; smoke uses subset for QC).
+# Expect ~100 paired EEG+physio observations (103 subjects; 3 lack physio per dataset README).
+
+dataset_id: ds004587
+
+paths:
+  raw_root: ./data/raw/ds004587
+  out_root: ./derivatives/run_ds004587_temporal_coupling
+  base_root: ./derivatives/run_ds004587_fast
+
+# Empty subjects = discover all sub-* folders under raw_root.
+subjects: []
+tasks:
+  - ig
+conditions:
+  - ig
+sessions:
+  - "01"
+
+eeg:
+  l_freq: 1.0
+  h_freq: 60.0
+  bad_channel_variance_z: 3.0
+  reference: average
+
+ppg:
+  # Shared peak/IBI bounds for cardiac processing (applies to ECG-derived IBIs from ECGBIT).
+  start_time_s: null
+  end_time_s: null
+  peak_min_distance_s: 0.4
+  peak_height: 0.3
+  ibi_min_ms: 400.0
+  ibi_max_ms: 1500.0
+
+temporal_coupling:
+  audit:
+    min_overlap_s: 10
+    min_clean_beats: 30
+
+  eeg:
+    bands:
+      theta: [4.0, 8.0]
+      alpha: [8.0, 13.0]
+      beta: [13.0, 30.0]
+    envelope_smooth_s: 2.0
+    envelope_output_fs_hz: 10
+    rois:
+      theta: [Fz, F1, F2, FCz, FC1, FC2, Cz]
+      alpha: [Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2]
+      beta: [Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4]
+    debug_plot:
+      enabled: false
+
+  cardiac:
+    # ds004587 physio: ECGBIT=raw ECG, OXIBIT=PPG, HR=device estimate (do not use HR).
+    channel: ECGBIT
+    signal_type: ecg
+    detector: ecg_rpeak
+    ecg:
+      bandpass_hz: [5, 30]
+      min_peak_distance_s: 0.45
+      prominence: auto
+      height: auto
+      test_inverted: true
+    hr_window_s: 15.0
+    mean_rr_window_s: 15.0
+    hrv_window_s: 60.0
+    hrv_step_s: 2.0
+    min_beats_hr: 5
+    min_beats_hrv: 20
+    min_valid_hr_percent: 50.0
+    min_valid_hrv_percent: 30.0
+    debug_plot:
+      enabled: false
+
+  resample:
+    fs_hz: 1.0
+    z_score: true
+    interpolate_max_gap_s: 5
+
+  cross_correlation:
+    lag_max_s: 60
+    lag_step_s: 5
+    n_permutations: 100
+    detrend: false
+    rolling_detrend_window_s: null
+    edge_margin_s: 5
+    min_peak_distance_s: 10
+    peak_prominence: auto
+    peak_height: auto
+    peak_selection: abs_peak
+
+  events:
+    enabled: true
+    subject_balanced_average: true
+    hr_percentile: 10
+    eeg_threshold_sd: 2.0
+    epoch_pre_s: 60
+    epoch_post_s: 60
+    min_event_distance_s: 10
+    min_total_events: 10
+    min_contributing_subjects: 4
+    theta_burst_method: percentile
+    theta_burst_percentile: 90
+    alpha_suppression_method: percentile
+    alpha_suppression_percentile: 10
+    beta_burst_method: percentile
+    beta_burst_percentile: 90
+
+  output:
+    save_curves: true
+    save_plots: true
+
+  group:
+    plot_common_lag_only: true
+    n_group_permutations: 100

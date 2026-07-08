@@ -72,7 +72,7 @@ def _subject_dir(dataset_root: Path, subject_id: str) -> Path | None:
     candidates.append(dataset_root / f"sub-{normalized}")
     seen: set[str] = set()
     for path in candidates:
-        marker = str(path.casefold())
+        marker = str(path).casefold()
         if marker in seen:
             continue
         seen.add(marker)

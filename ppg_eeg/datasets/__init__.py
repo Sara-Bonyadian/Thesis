@@ -9,6 +9,7 @@ from .ds003816 import DS003816Adapter
 from .ds003838 import DS003838Adapter
 from .ds004511 import DS004511Adapter
 from .ds004582 import DS004582Adapter
+from .ds004587 import DS004587Adapter
 from .ds006848 import DS006848Adapter
 from .hiit import HIITAdapter
 
@@ -20,6 +21,7 @@ ADAPTER_REGISTRY: dict[str, type[DatasetAdapter]] = {
     "ds003838": DS003838Adapter,
     "ds004511": DS004511Adapter,
     "ds004582": DS004582Adapter,
+    "ds004587": DS004587Adapter,
     "ds006848": DS006848Adapter,
 }
 
