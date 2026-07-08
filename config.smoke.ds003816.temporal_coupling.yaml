@@ -1,19 +1,23 @@
 # Smoke config for temporal EEG–cardiac coupling (ds003816).
-# 3-subject cohort before re-running config.run.ds003816.temporal_coupling.yaml.
+# 7-subject cohort before config.run.ds003816.temporal_coupling.yaml on full raw data.
 # Subject IDs match BIDS entity after "sub-" (e.g. sub-01lt → 01lt).
-# See temporal_coupling/README.md and config.smoke.ds003838.temporal_coupling.yaml.
+# Cardiac: embedded ECG channel in BrainVision EEG files.
 
 dataset_id: ds003816
 
 paths:
   raw_root: ./data/raw/ds003816
   out_root: ./derivatives/smoke_ds003816_temporal_coupling
-  base_root: ./derivatives/run_ds003816_fast
+  base_root: ./derivatives/smoke_ds003816_fast
 
 subjects:
   - 01lt
-  - 07lt
+  - 02st
   - 03lt
+  - 05st
+  - 06st
+  - 07lt
+  - 08lt
 
 tasks:
   - preresting
@@ -45,7 +49,7 @@ ppg:
 
 temporal_coupling:
   audit:
-    min_overlap_s: 20
+    min_overlap_s: 10
     min_clean_beats: 30
 
   eeg:
@@ -60,21 +64,12 @@ temporal_coupling:
       alpha: [Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2]
       beta: [Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4]
     debug_plot:
-      enabled: true
-      start_time_s: 20
-      end_time_s: 40
-      auto_window_s: 20
-      also_auto_window: true
-      save_psd: true
-      channels:
-        theta: Fz
-        alpha: Pz
-        beta: Fz
+      enabled: false
 
   cardiac:
     channel: ECG
     signal_type: ecg
-    detector: auto
+    detector: ecg_rpeak
     ecg:
       bandpass_hz: [5, 30]
       min_peak_distance_s: 0.45
@@ -90,16 +85,7 @@ temporal_coupling:
     min_valid_hr_percent: 50.0
     min_valid_hrv_percent: 20.0
     debug_plot:
-      enabled: true
-      windows:
-        - [15, 25]
-        - [30, 40]
-        - [45, 55]
-      auto_window_s: 10
-      overview_window_s: 40
-      save_overview: true
-      also_auto_window: true
-      max_plots_per_subject: 5
+      enabled: false
 
   resample:
     fs_hz: 1.0
@@ -108,7 +94,7 @@ temporal_coupling:
 
   cross_correlation:
     lag_max_s: 60
-    lag_step_s: 5
+    lag_step_s: 1
     peak_selection: abs_peak
     n_permutations: 0
     detrend: false
@@ -118,15 +104,17 @@ temporal_coupling:
     peak_prominence: auto
     peak_height: auto
 
+  # Smoke segments are often ~40–100 s; ±60 s epochs leave no valid event window.
   events:
-    enabled: false
+    enabled: true
+    subject_balanced_average: true
     hr_percentile: 10
     eeg_threshold_sd: 2.0
-    epoch_pre_s: 60
-    epoch_post_s: 60
-    min_event_distance_s: 10
-    min_total_events: 10
-    min_contributing_subjects: 4
+    epoch_pre_s: 10
+    epoch_post_s: 10
+    min_event_distance_s: 5
+    min_total_events: 5
+    min_contributing_subjects: 2
     theta_burst_method: percentile
     theta_burst_percentile: 90
     alpha_suppression_method: percentile

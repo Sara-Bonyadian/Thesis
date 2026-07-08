@@ -1,6 +1,6 @@
-# Temporal EEG–cardiac coupling for ds003816 (all available tasks/sessions).
-# temporal_coupling analysis settings match config.smoke.ds003816.temporal_coupling.yaml
-# (full cohort; smoke uses a 3-subject subset for QC).
+# Temporal EEG–cardiac coupling for ds003816 (full cohort).
+# Settings aligned with config.smoke.ds003816.temporal_coupling.yaml, but with
+# permutations + group permutations enabled for inference.
 
 dataset_id: ds003816
 
@@ -31,7 +31,7 @@ ppg:
 
 temporal_coupling:
   audit:
-    min_overlap_s: 20
+    min_overlap_s: 10
     min_clean_beats: 30
 
   eeg:
@@ -51,7 +51,7 @@ temporal_coupling:
   cardiac:
     channel: ECG
     signal_type: ecg
-    detector: auto
+    detector: ecg_rpeak
     ecg:
       bandpass_hz: [5, 30]
       min_peak_distance_s: 0.45
@@ -76,7 +76,7 @@ temporal_coupling:
 
   cross_correlation:
     lag_max_s: 60
-    lag_step_s: 5
+    lag_step_s: 1
     peak_selection: abs_peak
     n_permutations: 100
     detrend: false
@@ -91,8 +91,9 @@ temporal_coupling:
     subject_balanced_average: true
     hr_percentile: 10
     eeg_threshold_sd: 2.0
-    epoch_pre_s: 60
-    epoch_post_s: 60
+    # ds003816 has many short segments; shorter epochs avoid no_valid_epoch_window.
+    epoch_pre_s: 10
+    epoch_post_s: 10
     min_event_distance_s: 10
     min_total_events: 10
     min_contributing_subjects: 4
