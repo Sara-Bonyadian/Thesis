@@ -12,10 +12,12 @@ from .ds004582 import DS004582Adapter
 from .ds004587 import DS004587Adapter
 from .ds006848 import DS006848Adapter
 from .hiit import HIITAdapter
+from .mindfulness import MindfulnessAdapter
 
 
 ADAPTER_REGISTRY: dict[str, type[DatasetAdapter]] = {
     "hiit": HIITAdapter,
+    "mindfulness": MindfulnessAdapter,
     "ds003690": DS003690Adapter,
     "ds003816": DS003816Adapter,
     "ds003838": DS003838Adapter,
