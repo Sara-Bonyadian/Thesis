@@ -36,6 +36,7 @@ from .artifact_controls import (
     run_confirmatory_artifact_controls,
     write_artifact_control_outputs,
 )
+from .figures import generate_confirmatory_figures
 from .group_tables import (
     build_group_tables,
     run_confirmatory_group_tables,
@@ -46,6 +47,7 @@ from .inference import (
     run_confirmatory_inference_from_dir,
     write_inference_outputs,
 )
+from .manifest import build_figure_source_manifest, build_run_manifest
 from .nulls import (
     run_confirmatory_nulls,
     run_null_battery,
@@ -61,6 +63,7 @@ from .protocol_audit import (
     write_duration_eligibility,
     write_protocol_audit,
 )
+from .report import generate_confirmatory_report, run_confirmatory_reporting
 
 __all__ = [
     "ConfirmatoryDatasetConfig",
@@ -68,7 +71,9 @@ __all__ = [
     "DURATION_ANALYSIS_CONTRACTS",
     "load_dataset_config",
     "load_master_config",
+    "build_figure_source_manifest",
     "build_group_tables",
+    "build_run_manifest",
     "compute_endpoints_from_curves",
     "compute_multitaper_power",
     "compute_peak_fits_from_curves",
@@ -76,6 +81,8 @@ __all__ = [
     "contract_for_duration",
     "extract_multitaper_file",
     "extract_multitaper_from_raw",
+    "generate_confirmatory_figures",
+    "generate_confirmatory_report",
     "harmonize_observation",
     "reconstruct_instant_hr",
     "reconstruct_instant_hr_file",
@@ -88,6 +95,7 @@ __all__ = [
     "run_confirmatory_inference_from_dir",
     "run_confirmatory_nulls",
     "run_confirmatory_peak_fits",
+    "run_confirmatory_reporting",
     "run_null_battery",
     "run_protocol_audit",
     "standard_zlpi_pool_durations",
