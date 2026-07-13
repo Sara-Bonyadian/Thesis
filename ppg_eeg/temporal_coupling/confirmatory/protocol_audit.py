@@ -10,7 +10,7 @@ import csv
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -884,6 +884,99 @@ def eligibility_metadata_from_observations(
     return result
 
 
+def _optional_bool(value: str | None) -> bool | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().casefold()
+    if normalized in {"true", "1", "yes"}:
+        return True
+    if normalized in {"false", "0", "no"}:
+        return False
+    raise ValueError(f"Cannot parse boolean value {value!r}.")
+
+
+def _optional_float(value: str | None) -> float | None:
+    if value is None or not value.strip():
+        return None
+    return _known_nonnegative(float(value), field="CSV duration metadata")
+
+
+def _csv_rows_by_observation(
+    paths: Iterable[str | Path],
+) -> dict[tuple[str, str], dict[str, str]]:
+    result: dict[tuple[str, str], dict[str, str]] = {}
+    for raw_path in paths:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_file():
+            continue
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                dataset_id = str(row.get("dataset_id", "")).strip().casefold()
+                observation_id = str(row.get("observation_id", "")).strip()
+                if not dataset_id or not observation_id:
+                    continue
+                key = (dataset_id, observation_id)
+                if key in result:
+                    raise ValueError(
+                        "Duplicate metadata row for "
+                        f"dataset={dataset_id!r}, observation={observation_id!r}."
+                    )
+                result[key] = dict(row)
+    return result
+
+
+def enrich_eligibility_metadata_from_csv(
+    metadata_rows: Iterable[EligibilityMetadata],
+    *,
+    raw_audit_paths: Iterable[str | Path] = (),
+    cardiac_qc_paths: Iterable[str | Path] = (),
+) -> list[EligibilityMetadata]:
+    """Join existing Stage 0 raw overlap and cardiac clean-span metadata.
+
+    Missing files or rows leave fields unknown; this function does not run
+    signal processing or peak detection.
+    """
+    raw_by_key = _csv_rows_by_observation(raw_audit_paths)
+    cardiac_by_key = _csv_rows_by_observation(cardiac_qc_paths)
+    enriched: list[EligibilityMetadata] = []
+    for metadata in metadata_rows:
+        key = (metadata.dataset_id.casefold(), metadata.observation_id)
+        raw = raw_by_key.get(key)
+        cardiac = cardiac_by_key.get(key)
+        notes = [metadata.notes] if metadata.notes else []
+        if raw is not None:
+            notes.append("Raw overlap loaded from protocol audit metadata.")
+        if cardiac is not None:
+            notes.append("Clean beat span loaded from cardiac QC metadata.")
+        enriched.append(
+            replace(
+                metadata,
+                eeg_exists=(
+                    _optional_bool(raw.get("eeg_exists"))
+                    if raw is not None
+                    else metadata.eeg_exists
+                ),
+                cardiac_exists=(
+                    _optional_bool(raw.get("cardiac_exists"))
+                    if raw is not None
+                    else metadata.cardiac_exists
+                ),
+                raw_overlap_s=(
+                    _optional_float(raw.get("overlap_duration_s"))
+                    if raw is not None
+                    else metadata.raw_overlap_s
+                ),
+                clean_beat_span_s=(
+                    _optional_float(cardiac.get("clean_ibi_coverage_s"))
+                    if cardiac is not None
+                    else metadata.clean_beat_span_s
+                ),
+                notes=" ".join(notes),
+            )
+        )
+    return enriched
+
+
 def run_protocol_audit(
     master: ConfirmatoryMasterConfig,
     dataset_configs: Iterable[ConfirmatoryDatasetConfig],
@@ -932,6 +1025,7 @@ __all__ = [
     "EligibilityMetadata",
     "ProtocolSpec",
     "build_paired_subject_sets",
+    "enrich_eligibility_metadata_from_csv",
     "eligibility_metadata_from_observations",
     "evaluate_all_durations",
     "evaluate_duration_eligibility",

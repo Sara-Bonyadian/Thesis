@@ -12,6 +12,7 @@ from ppg_eeg.temporal_coupling.confirmatory.protocol_audit import (
     PROTOCOL_SPECS,
     EligibilityMetadata,
     build_paired_subject_sets,
+    enrich_eligibility_metadata_from_csv,
     evaluate_all_durations,
     evaluate_duration_eligibility,
     write_duration_eligibility,
@@ -427,6 +428,49 @@ class TestDurationEligibility(unittest.TestCase):
                     "n_participants",
                 }.issubset(summary[0])
             )
+
+    def test_enriches_from_existing_raw_and_cardiac_metadata(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_path = root / "data_audit.csv"
+            raw_path.write_text(
+                "dataset_id,observation_id,eeg_exists,cardiac_exists,"
+                "overlap_duration_s\n"
+                "ds003838,ds003838-sub-001-task-rest,true,true,240\n",
+                encoding="utf-8",
+            )
+            cardiac_path = root / "cardiac_qc.csv"
+            cardiac_path.write_text(
+                "dataset_id,observation_id,clean_ibi_coverage_s\n"
+                "ds003838,ds003838-sub-001-task-rest,180\n",
+                encoding="utf-8",
+            )
+            base = self._complete(
+                raw_overlap_s=None,
+                clean_beat_span_s=None,
+                eeg_exists=None,
+                cardiac_exists=None,
+            )
+            enriched = enrich_eligibility_metadata_from_csv(
+                [base],
+                raw_audit_paths=[raw_path],
+                cardiac_qc_paths=[cardiac_path],
+            )
+
+        self.assertEqual(len(enriched), 1)
+        self.assertEqual(enriched[0].raw_overlap_s, 240.0)
+        self.assertEqual(enriched[0].clean_beat_span_s, 180.0)
+        self.assertTrue(enriched[0].eeg_exists)
+        self.assertTrue(enriched[0].cardiac_exists)
+        self.assertEqual(
+            evaluate_duration_eligibility(enriched[0], 180).status,
+            "eligible",
+        )
+        decision_240 = evaluate_duration_eligibility(enriched[0], 240)
+        self.assertEqual(decision_240.status, "ineligible")
+        self.assertEqual(
+            decision_240.exclusion_code, "insufficient_beat_span"
+        )
 
 
 if __name__ == "__main__":
