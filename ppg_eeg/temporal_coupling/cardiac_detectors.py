@@ -372,7 +372,7 @@ def build_channel_inventory(
     obs: CardiacObservation,
     cfg: TemporalCouplingConfig,
 ) -> pd.DataFrame:
-    start_s, end_s = segment_bounds(raw, cfg)
+    start_s, end_s = segment_bounds(raw, cfg, task=obs.task)
     duration_s = end_s - start_s
     sfreq = float(raw.info["sfreq"])
     rows: list[dict[str, object]] = []
@@ -408,7 +408,7 @@ def plot_channel_preview(
     *,
     output_path: Path,
 ) -> None:
-    start_s, end_s = segment_bounds(raw, cfg)
+    start_s, end_s = segment_bounds(raw, cfg, task=obs.task)
     duration_s = end_s - start_s
     sfreq = float(raw.info["sfreq"])
     windows = resolved_debug_windows(cfg)
@@ -450,7 +450,7 @@ def compare_detectors(
     cfg: TemporalCouplingConfig,
 ) -> tuple[pd.DataFrame, CardiacDetectionResult]:
     cardiac_cfg = cfg.temporal_coupling.cardiac
-    start_s, end_s = segment_bounds(raw, cfg)
+    start_s, end_s = segment_bounds(raw, cfg, task=obs.task)
     duration_s = end_s - start_s
     sfreq = float(raw.info["sfreq"])
     available = tuple(raw.ch_names)

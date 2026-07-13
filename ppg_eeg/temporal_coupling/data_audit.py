@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from ..datasets import CanonicalObservation, build_observations
-from .cardiac_common import has_cardiac_channels
+from .cardiac_common import has_cardiac_channels, overlap_duration_s as _task_overlap_duration_s
 from .config import TemporalCouplingConfig
 from .paths import group_output_dir  # re-exported for stage modules
 
@@ -319,31 +319,19 @@ def read_signal_metadata(path: Path | None, *, data_format: str | None = None) -
     return _read_bids_sidecar_metadata(path) or _read_mne_metadata(path, data_format)
 
 
-def _overlap_window(cfg: TemporalCouplingConfig, eeg_duration_s: float, cardiac_duration_s: float) -> tuple[float, float]:
-    max_duration = min(eeg_duration_s, cardiac_duration_s)
-    if max_duration <= 0:
-        return 0.0, 0.0
-
-    start_s = cfg.ppg.start_time_s
-    end_s = cfg.ppg.end_time_s
-    if start_s is None and end_s is None:
-        return 0.0, max_duration
-
-    window_start = 0.0 if start_s is None else max(0.0, float(start_s))
-    window_end = max_duration if end_s is None else min(float(end_s), max_duration)
-    if window_end <= window_start:
-        return window_start, window_start
-    return window_start, window_end
-
-
 def compute_overlap_duration_s(
     cfg: TemporalCouplingConfig,
     *,
     eeg_duration_s: float,
     cardiac_duration_s: float,
+    task: str | None = None,
 ) -> float:
-    start_s, end_s = _overlap_window(cfg, eeg_duration_s, cardiac_duration_s)
-    return max(0.0, end_s - start_s)
+    return _task_overlap_duration_s(
+        cfg,
+        task=task,
+        eeg_duration_s=eeg_duration_s,
+        cardiac_duration_s=cardiac_duration_s,
+    )
 
 
 def recommended_max_lag_s(
@@ -450,6 +438,7 @@ def audit_canonical_observation(
         cfg,
         eeg_duration_s=eeg_duration_s if eeg_info is not None else 0.0,
         cardiac_duration_s=cardiac_duration_s if cardiac_info is not None else 0.0,
+        task=obs.task_label,
     )
     rec_lag = recommended_max_lag_s(
         overlap_duration_s=overlap_duration_s,
@@ -541,6 +530,7 @@ def audit_observation(
         cfg,
         eeg_duration_s=eeg_duration_s if eeg_meta is not None else 0.0,
         cardiac_duration_s=cardiac_duration_s if cardiac_meta is not None else 0.0,
+        task=task,
     )
     rec_lag = recommended_max_lag_s(
         overlap_duration_s=overlap_duration_s,

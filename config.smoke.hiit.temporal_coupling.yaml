@@ -1,34 +1,38 @@
-# Smoke config for temporal EEG–cardiac coupling (ds004587).
-# Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
-# Tasks: ig (Illusion Game) and rest (8-min eyes-closed before IG; EEG from session-start IG file).
+# Smoke config for temporal EEG–cardiac coupling (HIIT).
+# Small cohort before config.run.hiit_40_ppg.temporal_coupling.yaml on full raw data.
+# Subject IDs are bare participant numbers (e.g. 01 → HIIT_01_PH / HIIT_01_PS).
+# Cardiac: embedded photosensor channel (ppg_peak detection).
+#
+# Run:
+#   python -m ppg_eeg.temporal_coupling --config config.smoke.hiit.temporal_coupling.yaml --stage all
 
-dataset_id: ds004587
+dataset_id: hiit
+hiit_partition_mode: task_only
 
 paths:
-  raw_root: ./data/raw/ds004587
-  out_root: ./derivatives/smoke_ds004587_temporal_coupling
-  base_root: ./derivatives/smoke_ds004587_fast
+  raw_root: ./data/raw/HIIT
+  out_root: ./derivatives/smoke_hiit_temporal_coupling
+  base_root: ./derivatives/smoke_hiit_fast
 
 subjects:
-  - FFE001
-  - FFE002
-  - FFE003
-  - FFE004
-  - FFE005
-  - FFE006
-  - FFE007
-  - FFE008
-  - FFE009
-  - FFE010
-  - FFE020
-  - FFE149
-  - FFE150
-  - FFE151
-  - FFE152
-  - FFE153
+  - "01"
+  - "02"
+  - "03"
+  - "04"
+  - "05"
+  - "06"
+  - "07"
 
-tasks: []
-conditions: []
+tasks:
+  - rest
+  - tetris
+
+conditions:
+  - pre_rest
+  - pre_tetris
+  - post_rest
+  - post_tetris
+
 sessions: []
 
 eeg:
@@ -38,8 +42,7 @@ eeg:
   reference: average
 
 ppg:
-  # Shared peak/IBI bounds for cardiac processing (applies to ECG-derived IBIs from ECGBIT).
-  # Cardiac channel selection is under temporal_coupling.cardiac below (not OXIBIT/HR).
+  # null = use full EEG/PPG overlap; audit caps lag by overlap/3.
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4
@@ -49,13 +52,8 @@ ppg:
 
 temporal_coupling:
   audit:
-    min_overlap_s: 10
+    min_overlap_s: 120
     min_clean_beats: 30
-
-  task_time_windows:
-    rest:
-      eeg_start_time_s: 0
-      eeg_end_time_s: 480
 
   eeg:
     bands:
@@ -72,10 +70,9 @@ temporal_coupling:
       enabled: false
 
   cardiac:
-    # ds004587 physio: ECGBIT=raw ECG, OXIBIT=PPG, HR=device estimate (do not use HR).
-    channel: ECGBIT
-    signal_type: ecg
-    detector: ecg_rpeak
+    channel: photosensor
+    signal_type: ppg
+    detector: ppg_peak
     ecg:
       bandpass_hz: [5, 30]
       min_peak_distance_s: 0.45
@@ -101,17 +98,30 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
-    n_permutations: 0
+    n_permutations: 100
     detrend: false
     rolling_detrend_window_s: null
     edge_margin_s: 0
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto
-    peak_selection: abs_peak
 
   events:
-    enabled: false
+    enabled: true
+    subject_balanced_average: true
+    hr_percentile: 10
+    eeg_threshold_sd: 2.0
+    epoch_pre_s: 60
+    epoch_post_s: 60
+    min_event_distance_s: 10
+    min_total_events: 10
+    min_contributing_subjects: 4
+    theta_burst_method: percentile
+    theta_burst_percentile: 90
+    alpha_suppression_method: percentile
+    alpha_suppression_percentile: 10
+    beta_burst_method: percentile
+    beta_burst_percentile: 90
 
   output:
     save_curves: true
@@ -119,4 +129,4 @@ temporal_coupling:
 
   group:
     plot_common_lag_only: true
-    n_group_permutations: 0
+    n_group_permutations: 100

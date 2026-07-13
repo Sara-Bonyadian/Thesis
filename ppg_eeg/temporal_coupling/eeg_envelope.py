@@ -18,6 +18,7 @@ from scipy.signal import hilbert, welch
 from ..eeg import preprocess_eeg
 from ..features_core import _read_raw
 from .config import TemporalCouplingConfig
+from .cardiac_common import eeg_segment_bounds
 from .data_audit import audit_output_path, group_output_dir
 from .paths import observation_output_dir
 
@@ -795,6 +796,9 @@ def run_stage1a(cfg: TemporalCouplingConfig) -> list[Path]:
                 flush=True,
             )
             raw = _read_raw(obs.eeg_file, obs.eeg_format)
+            start_s, end_s = eeg_segment_bounds(raw, cfg, task=obs.task)
+            if end_s > start_s and (start_s > 0.0 or end_s < float(raw.times[-1])):
+                raw = raw.copy().crop(tmin=start_s, tmax=end_s)
             native_sfreq = float(raw.info["sfreq"])
             working = _prepare_raw_for_envelope_pipeline(raw, cfg)
             working_sfreq = float(working.info["sfreq"])

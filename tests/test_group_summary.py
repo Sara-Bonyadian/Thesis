@@ -15,6 +15,7 @@ from ppg_eeg.temporal_coupling.group_summary import (
     PEAK_SUMMARY_COLUMNS,
     SUMMARY_COLUMNS,
     _global_common_lag_bounds,
+    _resolve_plot_lag_plan,
     apply_group_permutation_tests,
     build_group_interpretation_summary,
     build_mean_curves,
@@ -123,6 +124,54 @@ class TestGroupSummary(unittest.TestCase):
         self.assertIsNotNone(bounds)
         assert bounds is not None
         self.assertEqual(bounds, (-20.0, 20.0))
+
+    def test_common_lag_bounds_ignore_non_finite_r(self) -> None:
+        curve_rows: list[dict[str, object]] = []
+        for subject_idx in range(3):
+            subject_id = f"sub-{subject_idx:03d}"
+            for lag_s in (-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0):
+                r = float("nan") if subject_idx == 0 and abs(lag_s) > 1 else 0.1
+                curve_rows.append(
+                    {
+                        "subject_id": subject_id,
+                        "pair": "hr__theta",
+                        "lag_s": lag_s,
+                        "r": r,
+                    }
+                )
+        curves_df = pd.DataFrame(curve_rows)
+        mean_curves = build_mean_curves(curves_df)
+        common = mean_curves.loc[mean_curves["in_common_lag_range"], "lag_s"].astype(float)
+        self.assertEqual(common.min(), -1.0)
+        self.assertEqual(common.max(), 1.0)
+        bounds = _global_common_lag_bounds(curves_df)
+        self.assertEqual(bounds, (-1.0, 1.0))
+
+    def test_resolve_plot_lag_plan_uses_fractional_when_strict_common_narrow(self) -> None:
+        curve_rows: list[dict[str, object]] = []
+        for subject_idx in range(10):
+            subject_id = f"sub-{subject_idx:03d}"
+            for lag_s in range(-10, 11):
+                r = float("nan") if subject_idx == 0 and abs(lag_s) > 1 else 0.1
+                curve_rows.append(
+                    {
+                        "subject_id": subject_id,
+                        "pair": "hr__theta",
+                        "lag_s": float(lag_s),
+                        "r": r,
+                    }
+                )
+        mean_curves = build_mean_curves(pd.DataFrame(curve_rows))
+        plan = _resolve_plot_lag_plan(
+            plot_common_lag_only=True,
+            mean_curves_df=mean_curves,
+            strict_common_bounds=(-1.0, 1.0),
+        )
+        self.assertEqual(plan.filter_mode, "fractional")
+        self.assertFalse(plan.shade_partial_n)
+        self.assertIsNotNone(plan.display_bounds)
+        assert plan.display_bounds is not None
+        self.assertGreaterEqual(plan.display_bounds[1] - plan.display_bounds[0], 5.0)
 
     def test_run_stage3_writes_outputs_without_raw_data(self) -> None:
         peaks_df = _synthetic_peaks(n_subjects=3)

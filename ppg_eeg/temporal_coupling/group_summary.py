@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -669,7 +670,8 @@ def _common_lag_bounds(curves_df: pd.DataFrame, *, pair: str) -> tuple[float, fl
     if pair_curves.empty:
         return None
     total = int(pair_curves["subject_id"].nunique())
-    lag_counts = pair_curves.groupby("lag_s")["subject_id"].nunique()
+    finite_curves = pair_curves.loc[np.isfinite(pair_curves["r"].astype(float))]
+    lag_counts = finite_curves.groupby("lag_s")["subject_id"].nunique()
     common_lags = lag_counts[lag_counts == total].index.astype(float)
     if common_lags.empty:
         return None
@@ -685,6 +687,156 @@ def _global_common_lag_bounds(curves_df: pd.DataFrame) -> tuple[float, float] | 
     if not bounds:
         return None
     return max(lo for lo, _ in bounds), min(hi for _, hi in bounds)
+
+
+MIN_COMMON_LAG_POINTS = 5
+MIN_COMMON_LAG_SPAN_S = 5.0
+DEFAULT_FALLBACK_SUBJECT_FRACTION = 0.8
+
+
+@dataclass(frozen=True)
+class _PlotLagPlan:
+    filter_mode: str
+    display_bounds: tuple[float, float] | None
+    shade_partial_n: bool
+    title_note: str
+    min_n_required: int | None = None
+    fallback_note: str | None = None
+
+
+def _common_lag_point_count(mean_curves_df: pd.DataFrame) -> int:
+    if mean_curves_df.empty:
+        return 0
+    common = mean_curves_df.loc[mean_curves_df["in_common_lag_range"], "lag_s"].drop_duplicates()
+    return int(common.size)
+
+
+def _common_lag_span_s(mean_curves_df: pd.DataFrame) -> float:
+    if mean_curves_df.empty:
+        return 0.0
+    common = mean_curves_df.loc[mean_curves_df["in_common_lag_range"], "lag_s"].astype(float)
+    if common.empty:
+        return 0.0
+    return float(common.max() - common.min())
+
+
+def _pair_fractional_lag_bounds(
+    mean_curves_df: pd.DataFrame,
+    *,
+    pair: str,
+    min_fraction: float,
+) -> tuple[float, float] | None:
+    pair_df = mean_curves_df.loc[mean_curves_df["pair"] == pair]
+    if pair_df.empty:
+        return None
+    total = int(pair_df["total_subjects"].iloc[0])
+    min_n = max(1, int(np.ceil(min_fraction * total)))
+    ok_lags = pair_df.loc[pair_df["n_subjects"] >= min_n, "lag_s"].astype(float)
+    if ok_lags.empty:
+        return None
+    return float(ok_lags.min()), float(ok_lags.max())
+
+
+def _global_fractional_lag_bounds(
+    mean_curves_df: pd.DataFrame,
+    *,
+    min_fraction: float,
+) -> tuple[float, float] | None:
+    bounds: list[tuple[float, float]] = []
+    for pair in variable_pairs():
+        pair_bounds = _pair_fractional_lag_bounds(
+            mean_curves_df,
+            pair=pair.pair,
+            min_fraction=min_fraction,
+        )
+        if pair_bounds is not None:
+            bounds.append(pair_bounds)
+    if not bounds:
+        return None
+    return max(lo for lo, _ in bounds), min(hi for _, hi in bounds)
+
+
+def _lag_count_in_bounds(
+    mean_curves_df: pd.DataFrame,
+    *,
+    bounds: tuple[float, float],
+    min_n: int,
+) -> int:
+    mask = (
+        (mean_curves_df["lag_s"] >= bounds[0])
+        & (mean_curves_df["lag_s"] <= bounds[1])
+        & (mean_curves_df["n_subjects"] >= min_n)
+    )
+    return int(mean_curves_df.loc[mask, "lag_s"].drop_duplicates().size)
+
+
+def _resolve_plot_lag_plan(
+    *,
+    plot_common_lag_only: bool,
+    mean_curves_df: pd.DataFrame,
+    strict_common_bounds: tuple[float, float] | None,
+) -> _PlotLagPlan:
+    total = int(mean_curves_df["total_subjects"].iloc[0]) if not mean_curves_df.empty else 0
+    n_common = _common_lag_point_count(mean_curves_df)
+    span_s = _common_lag_span_s(mean_curves_df)
+    prefer_strict = plot_common_lag_only and strict_common_bounds is not None
+    if (
+        prefer_strict
+        and n_common >= MIN_COMMON_LAG_POINTS
+        and span_s >= MIN_COMMON_LAG_SPAN_S
+    ):
+        assert strict_common_bounds is not None
+        return _PlotLagPlan(
+            filter_mode="strict_common",
+            display_bounds=strict_common_bounds,
+            shade_partial_n=False,
+            title_note=(
+                f"common lag range [{strict_common_bounds[0]:g}, {strict_common_bounds[1]:g}] s"
+            ),
+            min_n_required=total,
+        )
+
+    pct = int(round(DEFAULT_FALLBACK_SUBJECT_FRACTION * 100))
+    min_n = max(1, int(np.ceil(DEFAULT_FALLBACK_SUBJECT_FRACTION * total)))
+    frac_bounds = _global_fractional_lag_bounds(
+        mean_curves_df,
+        min_fraction=DEFAULT_FALLBACK_SUBJECT_FRACTION,
+    )
+    if frac_bounds is not None:
+        frac_points = _lag_count_in_bounds(mean_curves_df, bounds=frac_bounds, min_n=min_n)
+        frac_span = frac_bounds[1] - frac_bounds[0]
+        if frac_points >= MIN_COMMON_LAG_POINTS and frac_span >= MIN_COMMON_LAG_SPAN_S:
+            fallback_note = None
+            if prefer_strict:
+                fallback_note = (
+                    f"all-subject common lag too narrow ({n_common} points, span={span_s:g}s); "
+                    f"using ≥{pct}% subject coverage"
+                )
+            return _PlotLagPlan(
+                filter_mode="fractional",
+                display_bounds=frac_bounds,
+                shade_partial_n=False,
+                title_note=(
+                    f"common lag range [{frac_bounds[0]:g}, {frac_bounds[1]:g}] s "
+                    f"(≥{pct}% subjects)"
+                ),
+                min_n_required=min_n,
+                fallback_note=fallback_note,
+            )
+
+    fallback_note = None
+    if prefer_strict:
+        fallback_note = (
+            f"all-subject common lag too narrow ({n_common} points, span={span_s:g}s); "
+            "plotting all lags with partial-n shading"
+        )
+    return _PlotLagPlan(
+        filter_mode="full",
+        display_bounds=None,
+        shade_partial_n=True,
+        title_note="partial-n lags shaded gray",
+        fallback_note=fallback_note,
+    )
 
 
 def build_mean_curves(curves_df: pd.DataFrame) -> pd.DataFrame:
@@ -725,13 +877,22 @@ def _curve_plot_frame(
     mean_curves_df: pd.DataFrame,
     *,
     pair: str,
-    plot_common_lag_only: bool,
+    plot_plan: _PlotLagPlan,
 ) -> pd.DataFrame:
     pair_df = mean_curves_df.loc[mean_curves_df["pair"] == pair].sort_values("lag_s")
     if pair_df.empty:
         return pair_df
-    if plot_common_lag_only:
+    if plot_plan.filter_mode == "strict_common":
         return pair_df.loc[pair_df["in_common_lag_range"]].copy()
+    if plot_plan.filter_mode == "fractional" and plot_plan.display_bounds is not None:
+        min_n = plot_plan.min_n_required or 1
+        lo, hi = plot_plan.display_bounds
+        mask = (
+            (pair_df["lag_s"] >= lo)
+            & (pair_df["lag_s"] <= hi)
+            & (pair_df["n_subjects"] >= min_n)
+        )
+        return pair_df.loc[mask].copy()
     return pair_df.copy()
 
 
@@ -756,17 +917,12 @@ def _plot_mean_sem_grid(
     mean_curves_df: pd.DataFrame,
     output_path: Path,
     *,
-    plot_common_lag_only: bool,
+    plot_plan: _PlotLagPlan,
     lag_step_s: float,
-    global_common_bounds: tuple[float, float] | None,
 ) -> None:
     fig, axes = plt.subplots(3, 3, figsize=(14, 10), sharex=False, sharey=True)
     pairs = variable_pairs()
-    mode_note = (
-        f"common lag range [{global_common_bounds[0]:g}, {global_common_bounds[1]:g}] s"
-        if plot_common_lag_only and global_common_bounds is not None
-        else "partial-n lags shaded gray"
-    )
+    mode_note = plot_plan.title_note
 
     for idx, pair in enumerate(pairs):
         row = idx // 3
@@ -776,7 +932,7 @@ def _plot_mean_sem_grid(
         plot_df = _curve_plot_frame(
             mean_curves_df,
             pair=pair.pair,
-            plot_common_lag_only=plot_common_lag_only,
+            plot_plan=plot_plan,
         )
 
         if plot_df.empty:
@@ -784,7 +940,7 @@ def _plot_mean_sem_grid(
             ax.axvline(0.0, color="0.7", linewidth=0.8, linestyle="--")
             continue
 
-        if not plot_common_lag_only:
+        if plot_plan.shade_partial_n:
             _shade_partial_n_regions(ax, full_pair_df, lag_step_s=lag_step_s)
 
         x = plot_df["lag_s"].to_numpy(dtype=float)
@@ -812,8 +968,8 @@ def _plot_mean_sem_grid(
         ax.set_title(f"{pair.pair}\n{n_note}", fontsize=9)
         ax.axvline(0.0, color="0.7", linewidth=0.8, linestyle="--", zorder=1)
 
-        if plot_common_lag_only and global_common_bounds is not None:
-            ax.set_xlim(global_common_bounds[0], global_common_bounds[1])
+        if plot_plan.display_bounds is not None:
+            ax.set_xlim(plot_plan.display_bounds[0], plot_plan.display_bounds[1])
 
         if col == 0:
             ax.set_ylabel(f"{CARDIAC_LABELS[row]}\nr")
@@ -825,7 +981,7 @@ def _plot_mean_sem_grid(
         Line2D([0], [0], color="#1f77b4", alpha=0.25, linewidth=6, label="± SEM"),
         Line2D([0], [0], color="0.7", linestyle="--", linewidth=0.8, label="lag 0"),
     ]
-    if not plot_common_lag_only:
+    if plot_plan.shade_partial_n:
         handles.append(Patch(facecolor="0.85", edgecolor="none", alpha=0.55, label="n < all subjects"))
     fig.legend(handles=handles, loc="upper center", ncol=len(handles), fontsize=9, frameon=False)
     fig.suptitle(f"Group mean cross-correlation curves (± SEM)\n{mode_note}", fontsize=12, y=0.99)
@@ -854,6 +1010,7 @@ def _write_interpretation_notes(
     total_subjects: int | None,
     output_path: Path,
     partition: str | None = None,
+    plot_plan: _PlotLagPlan | None = None,
 ) -> None:
     lines: list[str] = [
         "Stage 3 temporal coupling interpretation notes",
@@ -864,9 +1021,13 @@ def _write_interpretation_notes(
         lines.append(f"partition: {partition}")
     lines.append(f"n_subjects_in_peaks: {total_subjects if total_subjects is not None else 'unknown'}")
     lines.extend(["", "Plot settings", f"  plot_common_lag_only: {cfg.temporal_coupling.group.plot_common_lag_only}"])
-    if global_common_bounds is not None:
+    if plot_plan is not None:
+        lines.append(f"  plot title: {plot_plan.title_note}")
+        if plot_plan.fallback_note:
+            lines.append(f"  plot mode override: {plot_plan.fallback_note}")
+    elif global_common_bounds is not None:
         lines.append(
-            f"  common lag range used for mean curves: "
+            f"  common lag range (all subjects): "
             f"[{global_common_bounds[0]:g}, {global_common_bounds[1]:g}] s"
         )
     else:
@@ -996,6 +1157,7 @@ def _run_stage3_partition(
 
     total_subjects = n_subjects
     global_common_bounds: tuple[float, float] | None = None
+    plot_plan: _PlotLagPlan | None = None
     if curves_df is not None and not curves_df.empty:
         mean_curves_df = build_mean_curves(curves_df)
         global_common_bounds = _global_common_lag_bounds(curves_df)
@@ -1012,14 +1174,24 @@ def _run_stage3_partition(
                 f"[{global_common_bounds[0]:g}, {global_common_bounds[1]:g}] s"
             )
 
-        if cfg.temporal_coupling.output.save_plots and not mean_curves_df.empty:
+        if not mean_curves_df.empty:
+            plot_plan = _resolve_plot_lag_plan(
+                plot_common_lag_only=plot_common_lag_only,
+                mean_curves_df=mean_curves_df,
+                strict_common_bounds=global_common_bounds,
+            )
+            if plot_plan.fallback_note:
+                print(
+                    f"[temporal_coupling] stage=3 partition={partition!r}: {plot_plan.fallback_note}"
+                )
+
+        if cfg.temporal_coupling.output.save_plots and not mean_curves_df.empty and plot_plan is not None:
             plot_path = group_dir / MEAN_SEM_GRID_PLOT
             _plot_mean_sem_grid(
                 mean_curves_df,
                 plot_path,
-                plot_common_lag_only=plot_common_lag_only,
+                plot_plan=plot_plan,
                 lag_step_s=lag_step_s,
-                global_common_bounds=global_common_bounds,
             )
             written.append(plot_path)
             print(f"[temporal_coupling] stage=3 wrote mean SEM grid -> {plot_path}")
@@ -1038,6 +1210,7 @@ def _run_stage3_partition(
         total_subjects=total_subjects,
         output_path=notes_path,
         partition=partition,
+        plot_plan=plot_plan,
     )
     written.append(notes_path)
     print(f"[temporal_coupling] stage=3 wrote interpretation notes -> {notes_path}")

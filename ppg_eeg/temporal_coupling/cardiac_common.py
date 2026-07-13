@@ -5,11 +5,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import mne
 import numpy as np
 
-from .config import TemporalCouplingConfig
+from .config import TemporalCouplingConfig, TemporalCouplingTaskTimeWindowConfig
 
 
 @dataclass(frozen=True)
@@ -129,22 +130,92 @@ def has_cardiac_channels(
     return False
 
 
-def segment_bounds(raw: mne.io.BaseRaw, cfg: TemporalCouplingConfig) -> tuple[float, float]:
+def _task_time_window(cfg: TemporalCouplingConfig, task: str | None) -> TemporalCouplingTaskTimeWindowConfig | None:
+    if not task:
+        return None
+    return cfg.temporal_coupling.task_time_windows.get(task.casefold())
+
+
+def _signal_window_bounds(
+    cfg: TemporalCouplingConfig,
+    *,
+    task: str | None,
+    signal: Literal["eeg", "cardiac"],
+) -> tuple[float | None, float | None]:
+    task_window = _task_time_window(cfg, task)
+    if task_window is not None:
+        if signal == "eeg":
+            return task_window.eeg_start_time_s, task_window.eeg_end_time_s
+        return task_window.cardiac_start_time_s, task_window.cardiac_end_time_s
+    if signal == "cardiac":
+        return cfg.ppg.start_time_s, cfg.ppg.end_time_s
+    return None, None
+
+
+def _window_start_end(
+    duration_s: float,
+    *,
+    start_time_s: float | None,
+    end_time_s: float | None,
+) -> tuple[float, float]:
+    if duration_s <= 0:
+        return 0.0, 0.0
+    if start_time_s is None and end_time_s is None:
+        return 0.0, duration_s
+
+    window_start = 0.0 if start_time_s is None else max(0.0, float(start_time_s))
+    window_end = duration_s if end_time_s is None else min(float(end_time_s), duration_s)
+    if window_end <= window_start:
+        return window_start, window_start
+    return window_start, window_end
+
+
+def overlap_duration_s(
+    cfg: TemporalCouplingConfig,
+    *,
+    task: str | None,
+    eeg_duration_s: float,
+    cardiac_duration_s: float,
+) -> float:
+    eeg_start_s, eeg_end_s = _signal_window_bounds(cfg, task=task, signal="eeg")
+    cardiac_start_s, cardiac_end_s = _signal_window_bounds(cfg, task=task, signal="cardiac")
+    eeg_start, eeg_end = _window_start_end(
+        eeg_duration_s,
+        start_time_s=eeg_start_s,
+        end_time_s=eeg_end_s,
+    )
+    cardiac_start, cardiac_end = _window_start_end(
+        cardiac_duration_s,
+        start_time_s=cardiac_start_s,
+        end_time_s=cardiac_end_s,
+    )
+    overlap_start = max(eeg_start, cardiac_start)
+    overlap_end = min(eeg_end, cardiac_end)
+    return max(0.0, overlap_end - overlap_start)
+
+
+def segment_bounds(
+    raw: mne.io.BaseRaw,
+    cfg: TemporalCouplingConfig,
+    *,
+    task: str | None = None,
+) -> tuple[float, float]:
     sfreq = float(raw.info["sfreq"])
     duration_s = max(0.0, float(raw.n_times) / sfreq)
-    if duration_s <= 0.0:
-        return 0.0, 0.0
+    start_time_s, end_time_s = _signal_window_bounds(cfg, task=task, signal="cardiac")
+    return _window_start_end(duration_s, start_time_s=start_time_s, end_time_s=end_time_s)
 
-    start_s = cfg.ppg.start_time_s
-    end_s = cfg.ppg.end_time_s
-    if start_s is None and end_s is None:
-        return 0.0, duration_s
 
-    window_start = 0.0 if start_s is None else max(0.0, float(start_s))
-    window_end = duration_s if end_s is None else min(float(end_s), duration_s)
-    if window_end <= window_start:
-        return 0.0, duration_s
-    return window_start, window_end
+def eeg_segment_bounds(
+    raw: mne.io.BaseRaw,
+    cfg: TemporalCouplingConfig,
+    *,
+    task: str | None = None,
+) -> tuple[float, float]:
+    sfreq = float(raw.info["sfreq"])
+    duration_s = max(0.0, float(raw.n_times) / sfreq)
+    start_time_s, end_time_s = _signal_window_bounds(cfg, task=task, signal="eeg")
+    return _window_start_end(duration_s, start_time_s=start_time_s, end_time_s=end_time_s)
 
 
 def classify_ibi(

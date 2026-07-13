@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -177,6 +177,14 @@ class TemporalCouplingAuditConfig:
 
 
 @dataclass(frozen=True)
+class TemporalCouplingTaskTimeWindowConfig:
+    eeg_start_time_s: float | None = None
+    eeg_end_time_s: float | None = None
+    cardiac_start_time_s: float | None = None
+    cardiac_end_time_s: float | None = None
+
+
+@dataclass(frozen=True)
 class TemporalCouplingSectionConfig:
     audit: TemporalCouplingAuditConfig
     eeg: TemporalCouplingEegSectionConfig
@@ -186,6 +194,7 @@ class TemporalCouplingSectionConfig:
     events: TemporalCouplingEventsConfig
     output: TemporalCouplingOutputConfig
     group: TemporalCouplingGroupConfig
+    task_time_windows: dict[str, TemporalCouplingTaskTimeWindowConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -263,6 +272,30 @@ def _as_roi_channels(value: Any, *, name: str) -> tuple[str, ...]:
     return channels
 
 
+def _as_task_time_windows(value: Any) -> dict[str, TemporalCouplingTaskTimeWindowConfig]:
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("temporal_coupling.task_time_windows must be a mapping of task -> window settings.")
+    windows: dict[str, TemporalCouplingTaskTimeWindowConfig] = {}
+    for task_name, window_raw in value.items():
+        task_key = str(task_name).strip().casefold()
+        if not task_key:
+            continue
+        if window_raw is None:
+            windows[task_key] = TemporalCouplingTaskTimeWindowConfig()
+            continue
+        if not isinstance(window_raw, dict):
+            raise ValueError(f"temporal_coupling.task_time_windows.{task_name} must be a mapping.")
+        windows[task_key] = TemporalCouplingTaskTimeWindowConfig(
+            eeg_start_time_s=_as_optional_float(window_raw.get("eeg_start_time_s")),
+            eeg_end_time_s=_as_optional_float(window_raw.get("eeg_end_time_s")),
+            cardiac_start_time_s=_as_optional_float(window_raw.get("cardiac_start_time_s")),
+            cardiac_end_time_s=_as_optional_float(window_raw.get("cardiac_end_time_s")),
+        )
+    return windows
+
+
 def validate_stage(stage: str) -> str:
     normalized = str(stage).strip().casefold()
     if normalized not in VALID_STAGES:
@@ -314,6 +347,7 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
     events_raw = tc_raw.get("events") or {}
     output_raw = tc_raw.get("output") or {}
     group_raw = tc_raw.get("group") or {}
+    task_time_windows_raw = tc_raw.get("task_time_windows") or {}
 
     bands_raw = eeg_tc_raw.get("bands") or {}
     rois_raw = eeg_tc_raw.get("rois") or eeg_tc_raw.get("channels") or {}
@@ -473,6 +507,7 @@ def load_config(path: str | Path) -> TemporalCouplingConfig:
                 plot_common_lag_only=bool(_get(group_raw, "plot_common_lag_only", True)),
                 n_group_permutations=int(_get(group_raw, "n_group_permutations", 500)),
             ),
+            task_time_windows=_as_task_time_windows(task_time_windows_raw),
         ),
     )
     return cfg
