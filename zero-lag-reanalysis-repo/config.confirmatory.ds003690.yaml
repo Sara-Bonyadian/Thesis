@@ -1,0 +1,14 @@
+# Confirmatory zero-lag analysis — ds003690 full cohort (discover all tasks/runs).
+schema_version: 1
+dataset_id: ds003690
+role: primary
+
+paths:
+  raw_root: ../data/raw/ds003690
+  output_subdir: primary/ds003690
+
+selection:
+  subjects: []
+  tasks: []
+  conditions: []
+  sessions: []

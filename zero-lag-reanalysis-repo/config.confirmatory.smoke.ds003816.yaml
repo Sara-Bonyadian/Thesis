@@ -1,0 +1,28 @@
+# Confirmatory smoke — ds003816 (7-subject subset).
+schema_version: 1
+dataset_id: ds003816
+role: sensitivity
+
+paths:
+  raw_root: ../data/raw/ds003816
+  output_subdir: smoke/ds003816
+
+selection:
+  subjects:
+    - 01lt
+    - 02st
+    - 03lt
+    - 05st
+    - 06st
+    - 07lt
+    - 08lt
+  tasks:
+    - preresting
+    - lkmself
+    - postresting
+  conditions:
+    - preresting
+    - lkmself
+    - postresting
+  sessions:
+    - "01"

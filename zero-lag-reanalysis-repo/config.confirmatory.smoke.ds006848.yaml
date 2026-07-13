@@ -1,0 +1,24 @@
+# Confirmatory smoke — ds006848 (5 subjects: 3 rest + 2 verbalwm).
+schema_version: 1
+dataset_id: ds006848
+role: primary
+
+paths:
+  raw_root: ../data/raw/ds006848
+  output_subdir: smoke/ds006848
+
+selection:
+  subjects:
+    - sub-001
+    - sub-007
+    - sub-010
+    - sub-002
+    - sub-003
+  tasks:
+    - rest
+    - verbalwm
+  conditions:
+    - rest
+    - verbalwm
+  sessions:
+    - single

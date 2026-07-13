@@ -1,0 +1,14 @@
+# Confirmatory zero-lag analysis — ds004587 full cohort (ig + rest).
+schema_version: 1
+dataset_id: ds004587
+role: primary
+
+paths:
+  raw_root: ../data/raw/ds004587
+  output_subdir: primary/ds004587
+
+selection:
+  subjects: []
+  tasks: []
+  conditions: []
+  sessions: []

@@ -1,0 +1,21 @@
+schema_version: 1
+dataset_id: ds003838
+role: primary
+
+paths:
+  raw_root: ../data/raw/ds003838
+  output_subdir: smoke/ds003838
+
+selection:
+  subjects:
+    - sub-032
+    - sub-033
+    - sub-034
+  tasks:
+    - rest
+    - memory
+  conditions:
+    - rest
+    - memory
+  sessions:
+    - single

@@ -1,0 +1,24 @@
+# Confirmatory smoke — Mindfulness (7-subject subset).
+schema_version: 1
+dataset_id: mindfulness
+role: sensitivity
+
+paths:
+  raw_root: ../data/raw/Mindfulness project
+  output_subdir: smoke/mindfulness
+
+selection:
+  subjects:
+    - mbd-01
+    - mbd-04
+    - mbd-05
+    - mbd-06
+    - mbd-07
+    - mbd-08
+    - mbd-09
+  tasks:
+    - step1
+  conditions:
+    - step1
+  sessions:
+    - part1

@@ -1,0 +1,17 @@
+# Confirmatory zero-lag analysis — ds004582 full cohort (task FF).
+schema_version: 1
+dataset_id: ds004582
+role: sensitivity
+
+paths:
+  raw_root: ../data/raw/ds004582
+  output_subdir: sensitivity/ds004582
+
+selection:
+  subjects: []
+  tasks:
+    - ff
+  conditions:
+    - ff
+  sessions:
+    - "01"

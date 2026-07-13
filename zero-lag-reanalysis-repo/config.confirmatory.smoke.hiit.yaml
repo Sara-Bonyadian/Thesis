@@ -1,0 +1,27 @@
+# Confirmatory smoke — HIIT (7 participants, task-only partition).
+schema_version: 1
+dataset_id: hiit
+role: sensitivity
+
+paths:
+  raw_root: ../data/raw/HIIT
+  output_subdir: smoke/hiit
+
+selection:
+  subjects:
+    - "01"
+    - "02"
+    - "03"
+    - "04"
+    - "05"
+    - "06"
+    - "07"
+  tasks:
+    - rest
+    - tetris
+  conditions:
+    - pre_rest
+    - pre_tetris
+    - post_rest
+    - post_tetris
+  sessions: []

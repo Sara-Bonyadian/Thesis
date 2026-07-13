@@ -1,0 +1,19 @@
+# Confirmatory zero-lag analysis — ds006848 full cohort (rest + verbalwm).
+schema_version: 1
+dataset_id: ds006848
+role: primary
+
+paths:
+  raw_root: ../data/raw/ds006848
+  output_subdir: primary/ds006848
+
+selection:
+  subjects: []
+  tasks:
+    - rest
+    - verbalwm
+  conditions:
+    - rest
+    - verbalwm
+  sessions:
+    - single

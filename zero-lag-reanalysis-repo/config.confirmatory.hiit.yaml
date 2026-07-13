@@ -1,0 +1,26 @@
+# Confirmatory zero-lag analysis — HIIT full cohort (4 tasks × 2 modalities).
+schema_version: 1
+dataset_id: hiit
+role: sensitivity
+
+paths:
+  raw_root: ../data/raw/HIIT
+  output_subdir: sensitivity/hiit
+
+selection:
+  subjects: []
+  tasks:
+    - rest
+    - tetris
+  conditions:
+    - ph_pre_rest
+    - ph_pre_tetris
+    - ph_post_rest
+    - ph_post_tetris
+    - ps_pre_rest
+    - ps_pre_tetris
+    - ps_post_rest
+    - ps_post_tetris
+  sessions:
+    - ph
+    - ps

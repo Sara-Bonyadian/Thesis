@@ -1,0 +1,30 @@
+# Confirmatory smoke — ds004587 (16-subject subset).
+schema_version: 1
+dataset_id: ds004587
+role: primary
+
+paths:
+  raw_root: ../data/raw/ds004587
+  output_subdir: smoke/ds004587
+
+selection:
+  subjects:
+    - ffe001
+    - ffe002
+    - ffe003
+    - ffe004
+    - ffe005
+    - ffe006
+    - ffe007
+    - ffe008
+    - ffe009
+    - ffe010
+    - ffe020
+    - ffe149
+    - ffe150
+    - ffe151
+    - ffe152
+    - ffe153
+  tasks: []
+  conditions: []
+  sessions: []

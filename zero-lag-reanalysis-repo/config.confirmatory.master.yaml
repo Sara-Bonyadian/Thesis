@@ -1,0 +1,41 @@
+schema_version: 1
+
+confirmatory:
+  # Confirmatory derivatives must never share a root with exploratory runs.
+  output_root: ../derivatives/confirmatory_temporal_coupling
+  root_seed: 20260713
+
+  bands:
+    theta: [4, 7]
+    alpha: [8, 12]
+    beta: [13, 29]
+    low_gamma: [30, 45]
+
+  durations:
+    all_s: [240, 180, 120, 60]
+    primary_s: 240
+
+  lag:
+    min_s: -60
+    max_s: 60
+    step_s: 1
+
+  endpoints:
+    zlpi_flanks_s: [20, 60]
+    shoulders_s: [5, 15]
+    peak_center_equivalence_s: 2
+
+  cardiac:
+    hr_mode: instantaneous
+
+  dataset_roles:
+    primary:
+      - ds003838
+      - ds006848
+      - ds003690
+      - ds004587
+    sensitivity:
+      - ds004582
+      - ds003816
+      - hiit
+      - mindfulness

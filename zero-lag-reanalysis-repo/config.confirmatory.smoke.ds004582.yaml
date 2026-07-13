@@ -1,0 +1,24 @@
+# Confirmatory smoke — ds004582 (7-subject subset).
+schema_version: 1
+dataset_id: ds004582
+role: sensitivity
+
+paths:
+  raw_root: ../data/raw/ds004582
+  output_subdir: smoke/ds004582
+
+selection:
+  subjects:
+    - ffe001
+    - ffe002
+    - ffe003
+    - ffe010
+    - ffe020
+    - ffe149
+    - ffe150
+  tasks:
+    - ff
+  conditions:
+    - ff
+  sessions:
+    - "01"
