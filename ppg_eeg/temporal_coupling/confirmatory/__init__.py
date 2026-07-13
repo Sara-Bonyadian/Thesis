@@ -58,6 +58,12 @@ from .peak_model import (
     run_confirmatory_peak_fits,
     write_peak_fit_outputs,
 )
+from .production import (
+    build_synthetic_aligned_tables,
+    primary_blockers_summary,
+    run_production,
+    run_production_preflight,
+)
 from .protocol_audit import (
     run_protocol_audit,
     write_duration_eligibility,
@@ -84,6 +90,8 @@ __all__ = [
     "generate_confirmatory_figures",
     "generate_confirmatory_report",
     "harmonize_observation",
+    "build_synthetic_aligned_tables",
+    "primary_blockers_summary",
     "reconstruct_instant_hr",
     "reconstruct_instant_hr_file",
     "run_artifact_controls",
@@ -97,6 +105,8 @@ __all__ = [
     "run_confirmatory_peak_fits",
     "run_confirmatory_reporting",
     "run_null_battery",
+    "run_production",
+    "run_production_preflight",
     "run_protocol_audit",
     "standard_zlpi_pool_durations",
     "write_artifact_control_outputs",
