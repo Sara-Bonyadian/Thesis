@@ -6,6 +6,11 @@ from .config import (
     load_dataset_config,
     load_master_config,
 )
+from .correlation import (
+    compute_signed_lag_curves,
+    run_confirmatory_correlations,
+    write_correlation_outputs,
+)
 from .harmonize import (
     harmonize_observation,
     write_harmonize_outputs,
@@ -28,12 +33,15 @@ __all__ = [
     "load_dataset_config",
     "load_master_config",
     "compute_multitaper_power",
+    "compute_signed_lag_curves",
     "extract_multitaper_file",
     "extract_multitaper_from_raw",
     "harmonize_observation",
     "reconstruct_instant_hr",
     "reconstruct_instant_hr_file",
+    "run_confirmatory_correlations",
     "run_protocol_audit",
+    "write_correlation_outputs",
     "write_duration_eligibility",
     "write_harmonize_outputs",
     "write_protocol_audit",
