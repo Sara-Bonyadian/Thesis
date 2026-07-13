@@ -1,0 +1,943 @@
+"""Protocol metadata and participant pairing for confirmatory datasets.
+
+This module deliberately audits protocol structure only.  It does not inspect
+signal durations, derive cardiac or EEG features, or calculate eligibility.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import math
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Mapping, Sequence
+
+from ...datasets import CanonicalObservation, build_observations
+from .config import (
+    EXPECTED_DURATIONS_S,
+    ConfirmatoryDatasetConfig,
+    ConfirmatoryMasterConfig,
+)
+
+PROTOCOL_AUDIT_FILENAME = "protocol_audit.csv"
+PAIRED_SUBJECT_SETS_FILENAME = "paired_subject_sets.json"
+ELIGIBILITY_BY_DURATION_FILENAME = "eligibility_by_duration.csv"
+ELIGIBILITY_QC_SUMMARY_FILENAME = "eligibility_qc_summary.csv"
+
+ELIGIBILITY_STATUSES = ("eligible", "ineligible", "not_computable", "not_supplied")
+EXCLUSION_CODES = (
+    "missing_paired_state",
+    "insufficient_raw_duration",
+    "insufficient_beat_span",
+    "missing_eeg",
+    "missing_cardiac_data",
+    "unresolved_pairing",
+    "protocol_mismatch",
+    "data_not_supplied",
+)
+
+
+@dataclass(frozen=True)
+class ContrastSpec:
+    contrast_id: str
+    low_demand_condition: str
+    cognitive_effort_condition: str
+    pair_within: tuple[str, ...] = ("participant_id", "session_id")
+
+
+@dataclass(frozen=True)
+class ProtocolSpec:
+    dataset_id: str
+    low_demand_conditions: tuple[str, ...]
+    cognitive_effort_conditions: tuple[str, ...]
+    contrasts: tuple[ContrastSpec, ...]
+    cardiac_modality: str
+    cardiac_source: str
+    eye_state: str
+    posture: str
+    task_timing: str
+    nuisance_signals: tuple[str, ...]
+    run_pairing_policy: str
+    unresolved_assumptions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EligibilityMetadata:
+    """Metadata needed to evaluate one observation at fixed durations.
+
+    ``None`` means unknown/not supplied.  Unknown source fields produce
+    ``not_supplied`` or ``not_computable`` outcomes, never ``ineligible``.
+    """
+
+    dataset_id: str
+    observation_id: str
+    participant_id: str
+    condition: str
+    contrast_id: str = ""
+    source_data_supplied: bool = True
+    eeg_exists: bool | None = None
+    cardiac_exists: bool | None = None
+    raw_overlap_s: float | None = None
+    clean_beat_span_s: float | None = None
+    requires_paired_state: bool = False
+    paired_state_available: bool | None = None
+    pairing_resolved: bool | None = True
+    protocol_match: bool | None = True
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class EligibilityDecision:
+    dataset_id: str
+    observation_id: str
+    participant_id: str
+    condition: str
+    contrast_id: str
+    duration_s: int
+    status: str
+    exclusion_code: str
+    raw_overlap_s: float | None
+    clean_beat_span_s: float | None
+    source_data_supplied: bool
+    eeg_exists: bool | None
+    cardiac_exists: bool | None
+    requires_paired_state: bool
+    paired_state_available: bool | None
+    pairing_resolved: bool | None
+    protocol_match: bool | None
+    notes: str
+
+    def to_row(self) -> dict[str, object]:
+        return {
+            "dataset_id": self.dataset_id,
+            "observation_id": self.observation_id,
+            "participant_id": self.participant_id,
+            "condition": self.condition,
+            "contrast_id": self.contrast_id,
+            "duration_s": self.duration_s,
+            "duration_role": (
+                "primary" if self.duration_s == EXPECTED_DURATIONS_S[0] else "sensitivity"
+            ),
+            "status": self.status,
+            "exclusion_code": self.exclusion_code,
+            "raw_overlap_s": self.raw_overlap_s,
+            "clean_beat_span_s": self.clean_beat_span_s,
+            "source_data_supplied": self.source_data_supplied,
+            "eeg_exists": self.eeg_exists,
+            "cardiac_exists": self.cardiac_exists,
+            "requires_paired_state": self.requires_paired_state,
+            "paired_state_available": self.paired_state_available,
+            "pairing_resolved": self.pairing_resolved,
+            "protocol_match": self.protocol_match,
+            "notes": self.notes,
+        }
+
+
+PROTOCOL_SPECS: dict[str, ProtocolSpec] = {
+    "ds003838": ProtocolSpec(
+        dataset_id="ds003838",
+        low_demand_conditions=("rest",),
+        cognitive_effort_conditions=("memory",),
+        contrasts=(ContrastSpec("rest__memory", "rest", "memory"),),
+        cardiac_modality="ECG",
+        cardiac_source="separate ECG EEGLAB recording",
+        eye_state="unknown",
+        posture="unknown",
+        task_timing="rest and memory are separate recordings",
+        nuisance_signals=("ECG",),
+        run_pairing_policy="single recording per participant and condition",
+        unresolved_assumptions=(
+            "Confirm eye state and posture from source documentation.",
+        ),
+    ),
+    "ds006848": ProtocolSpec(
+        dataset_id="ds006848",
+        low_demand_conditions=("rest",),
+        cognitive_effort_conditions=("verbalwm",),
+        contrasts=(ContrastSpec("rest__verbalwm", "rest", "verbalwm"),),
+        cardiac_modality="ECG;PPG",
+        cardiac_source=(
+            "ECG and PPG embedded in BrainVision EEG; ECG confirmatory primary, "
+            "PPG modality sensitivity"
+        ),
+        eye_state="unknown",
+        posture="unknown",
+        task_timing="rest and verbal working-memory are separate recordings",
+        nuisance_signals=("embedded ECG", "embedded PPG/MISC"),
+        run_pairing_policy="single recording per participant and condition",
+        unresolved_assumptions=(
+            "Confirm eye state, posture, and exact ECG/PPG channel labels.",
+        ),
+    ),
+    "ds003690": ProtocolSpec(
+        dataset_id="ds003690",
+        low_demand_conditions=("passive",),
+        cognitive_effort_conditions=("simplert", "gonogo"),
+        contrasts=(
+            ContrastSpec("passive__simplert", "passive", "simplert"),
+            ContrastSpec("passive__gonogo", "passive", "gonogo"),
+        ),
+        cardiac_modality="ECG",
+        cardiac_source="EKG channel embedded in EEGLAB EEG",
+        eye_state="unknown",
+        posture="unknown",
+        task_timing="passive, simple reaction-time, and go/no-go runs",
+        nuisance_signals=("EKG", "VEO", "HEO"),
+        run_pairing_policy="pair by participant/session; retain run and aggregate duplicate runs later",
+        unresolved_assumptions=(
+            "Confirm eye-state instruction and posture.",
+            "Endpoint aggregation across duplicate runs is deferred beyond M1b.",
+        ),
+    ),
+    "ds004587": ProtocolSpec(
+        dataset_id="ds004587",
+        low_demand_conditions=("rest",),
+        cognitive_effort_conditions=("ig",),
+        contrasts=(ContrastSpec("rest__ig", "rest", "ig"),),
+        cardiac_modality="ECG",
+        cardiac_source="ECGBIT in external BIDS physio (OXIBIT also available)",
+        eye_state="rest eyes closed; IG task eye state not explicitly recorded",
+        posture="unknown",
+        task_timing="rest is first 480 s of session-start IG EEG; IG uses run 01",
+        nuisance_signals=("OXIBIT", "device HR"),
+        run_pairing_policy="normalize IG run-01 and pair within participant/session",
+        unresolved_assumptions=(
+            "Confirm posture and IG eye-state description.",
+            "Treat ECGBIT as primary; OXIBIT is modality sensitivity only.",
+        ),
+    ),
+    "ds004582": ProtocolSpec(
+        dataset_id="ds004582",
+        low_demand_conditions=("ff",),
+        cognitive_effort_conditions=(),
+        contrasts=(),
+        cardiac_modality="ECG",
+        cardiac_source="ECGBIT in external BIDS physio (OXIBIT also available)",
+        eye_state="unknown",
+        posture="unknown",
+        task_timing="single FF condition",
+        nuisance_signals=("OXIBIT", "device HR", "respiration"),
+        run_pairing_policy="single-state dataset; no state pairing",
+        unresolved_assumptions=(
+            "FF is treated as a low-demand single-state replication; verify task interpretation.",
+            "Confirm eye state and posture.",
+        ),
+    ),
+    "ds003816": ProtocolSpec(
+        dataset_id="ds003816",
+        low_demand_conditions=("preresting", "postresting"),
+        cognitive_effort_conditions=(
+            "lkmself",
+            "lkmother",
+            "visualizeself",
+            "visualizeother",
+        ),
+        contrasts=(),
+        cardiac_modality="ECG",
+        cardiac_source="ECG embedded in BrainVision EEG",
+        eye_state="unknown",
+        posture="unknown",
+        task_timing="resting and short meditation/visualization task recordings",
+        nuisance_signals=("embedded ECG",),
+        run_pairing_policy="preserve participant/session/run; no confirmatory contrast prespecified",
+        unresolved_assumptions=(
+            "No cognitive-effort contrast is prespecified for confirmatory inference.",
+            "Confirm task semantics, eye state, posture, and any additional task label.",
+        ),
+    ),
+    "hiit": ProtocolSpec(
+        dataset_id="hiit",
+        low_demand_conditions=(
+            "ph_pre_rest",
+            "ph_post_rest",
+            "ps_pre_rest",
+            "ps_post_rest",
+        ),
+        cognitive_effort_conditions=(
+            "ph_pre_tetris",
+            "ph_post_tetris",
+            "ps_pre_tetris",
+            "ps_post_tetris",
+        ),
+        contrasts=(
+            ContrastSpec("ph_pre_rest__tetris", "ph_pre_rest", "ph_pre_tetris"),
+            ContrastSpec("ph_post_rest__tetris", "ph_post_rest", "ph_post_tetris"),
+            ContrastSpec("ps_pre_rest__tetris", "ps_pre_rest", "ps_pre_tetris"),
+            ContrastSpec("ps_post_rest__tetris", "ps_post_rest", "ps_post_tetris"),
+        ),
+        cardiac_modality="PPG;ECG",
+        cardiac_source=(
+            "embedded PPG primary sensitivity modality; embedded ECG sensor "
+            "sensitivity when channel QC passes"
+        ),
+        eye_state="unknown",
+        posture="unknown",
+        task_timing="PRE and POST rest/Tetris recordings in PH and PS sessions",
+        nuisance_signals=("photosensor", "ECG", "respiration", "protocol modality PH/PS"),
+        run_pairing_policy="pair rest/Tetris by participant, modality session, and timepoint",
+        unresolved_assumptions=(
+            "Confirm posture and eye-state instructions.",
+            "Confirm whether PH and PS should remain separate modality sessions.",
+        ),
+    ),
+    "mindfulness": ProtocolSpec(
+        dataset_id="mindfulness",
+        low_demand_conditions=("step1",),
+        cognitive_effort_conditions=("step2", "step3"),
+        contrasts=(
+            ContrastSpec("step1__step2", "step1", "step2"),
+            ContrastSpec("step1__step3", "step1", "step3"),
+        ),
+        cardiac_modality="PPG;ECG",
+        cardiac_source=(
+            "embedded PPG primary sensitivity modality; inventory co-recorded "
+            "ECG for modality sensitivity"
+        ),
+        eye_state="unknown",
+        posture="unknown",
+        task_timing="ordered steps 1-3 within part1/part2 sessions",
+        nuisance_signals=("photosensor",),
+        run_pairing_policy="strip task suffix and pair by underlying participant/session",
+        unresolved_assumptions=(
+            "Steps are treated as graded states; confirm cognitive-effort interpretation.",
+            "Confirm eye state, posture, and whether part1/part2 are directly comparable.",
+        ),
+    ),
+}
+
+_RUN_RE = re.compile(r"(?:^|[-_])run[-_]?([a-zA-Z0-9]+)(?:$|[-_])", re.IGNORECASE)
+
+
+def protocol_spec(dataset_id: str) -> ProtocolSpec:
+    key = dataset_id.strip().casefold()
+    try:
+        return PROTOCOL_SPECS[key]
+    except KeyError as exc:
+        known = ", ".join(sorted(PROTOCOL_SPECS))
+        raise KeyError(f"Unknown confirmatory dataset {dataset_id!r}. Known: {known}") from exc
+
+
+def _participant_id(observation: CanonicalObservation) -> str:
+    dataset_id = observation.dataset_id.casefold()
+    obs_id = observation.observation_id.casefold()
+    subject_id = observation.subject_id.casefold()
+
+    if dataset_id in {"ds003838", "ds006848"}:
+        return subject_id
+    if dataset_id in {"ds003690", "ds003816", "ds004582", "ds004587"}:
+        prefix = f"{dataset_id}-"
+        remainder = obs_id[len(prefix) :] if obs_id.startswith(prefix) else obs_id
+        return remainder.split("-ses-", 1)[0]
+    if dataset_id == "hiit":
+        parts = obs_id.split("-")
+        return parts[1] if len(parts) >= 2 else subject_id.rsplit("_", 1)[0]
+    if dataset_id == "mindfulness":
+        match = re.match(r"mindfulness-(mbd-\d+)-", obs_id)
+        return match.group(1) if match else subject_id.split("_", 1)[0]
+    return subject_id
+
+
+def _run_id(observation: CanonicalObservation) -> str:
+    match = _RUN_RE.search(observation.observation_id)
+    return match.group(1).casefold() if match else "single"
+
+
+def _session_id(observation: CanonicalObservation) -> str:
+    return (observation.session_label or "single").strip().casefold()
+
+
+def _pair_key(
+    observation: CanonicalObservation,
+    contrast: ContrastSpec,
+) -> tuple[str, ...]:
+    values = {
+        "participant_id": _participant_id(observation),
+        "session_id": _session_id(observation),
+        "run_id": _run_id(observation),
+    }
+    return tuple(values[field] for field in contrast.pair_within)
+
+
+def _key_payload(contrast: ContrastSpec, key: tuple[str, ...]) -> dict[str, str]:
+    return dict(zip(contrast.pair_within, key, strict=True))
+
+
+def _observations_for_condition(
+    observations: Sequence[CanonicalObservation],
+    condition: str,
+) -> list[CanonicalObservation]:
+    target = condition.casefold()
+    return [obs for obs in observations if obs.condition_label.casefold() == target]
+
+
+def build_paired_subject_sets(
+    observations_by_dataset: Mapping[str, Sequence[CanonicalObservation]],
+) -> dict[str, object]:
+    """Return deterministic paired participant/session sets for each contrast."""
+    datasets: dict[str, object] = {}
+    for dataset_id in sorted(PROTOCOL_SPECS):
+        spec = PROTOCOL_SPECS[dataset_id]
+        observations = tuple(observations_by_dataset.get(dataset_id, ()))
+        discovery_status = (
+            "not_supplied"
+            if dataset_id not in observations_by_dataset
+            else ("observed" if observations else "no_observations")
+        )
+        contrasts: dict[str, object] = {}
+        for contrast in spec.contrasts:
+            low_rows = _observations_for_condition(
+                observations, contrast.low_demand_condition
+            )
+            effort_rows = _observations_for_condition(
+                observations, contrast.cognitive_effort_condition
+            )
+            low_by_key: dict[tuple[str, ...], list[str]] = {}
+            effort_by_key: dict[tuple[str, ...], list[str]] = {}
+            for obs in low_rows:
+                low_by_key.setdefault(_pair_key(obs, contrast), []).append(
+                    obs.observation_id
+                )
+            for obs in effort_rows:
+                effort_by_key.setdefault(_pair_key(obs, contrast), []).append(
+                    obs.observation_id
+                )
+
+            low_keys = set(low_by_key)
+            effort_keys = set(effort_by_key)
+            paired_keys = sorted(low_keys & effort_keys)
+            contrasts[contrast.contrast_id] = {
+                "low_demand_condition": contrast.low_demand_condition,
+                "cognitive_effort_condition": contrast.cognitive_effort_condition,
+                "pair_within": list(contrast.pair_within),
+                "n_low_demand": len(low_keys),
+                "n_cognitive_effort": len(effort_keys),
+                "n_paired": len(paired_keys),
+                "paired_keys": [_key_payload(contrast, key) for key in paired_keys],
+                "low_demand_only_keys": [
+                    _key_payload(contrast, key)
+                    for key in sorted(low_keys - effort_keys)
+                ],
+                "cognitive_effort_only_keys": [
+                    _key_payload(contrast, key)
+                    for key in sorted(effort_keys - low_keys)
+                ],
+                "observations_by_pair": [
+                    {
+                        **_key_payload(contrast, key),
+                        "low_demand_observation_ids": sorted(low_by_key[key]),
+                        "cognitive_effort_observation_ids": sorted(
+                            effort_by_key[key]
+                        ),
+                    }
+                    for key in paired_keys
+                ],
+            }
+
+        datasets[dataset_id] = {
+            "has_prespecified_pairing": bool(spec.contrasts),
+            "n_observations": len(observations),
+            "observation_discovery_status": discovery_status,
+            "contrasts": contrasts,
+            "unresolved_assumptions": list(spec.unresolved_assumptions),
+        }
+    return {"schema_version": 1, "datasets": datasets}
+
+
+def _audit_rows(
+    observations_by_dataset: Mapping[str, Sequence[CanonicalObservation]],
+    paired_sets: Mapping[str, object],
+    dataset_roles: Mapping[str, str],
+) -> list[dict[str, object]]:
+    datasets_payload = paired_sets["datasets"]
+    assert isinstance(datasets_payload, Mapping)
+    rows: list[dict[str, object]] = []
+    for dataset_id in sorted(PROTOCOL_SPECS):
+        spec = PROTOCOL_SPECS[dataset_id]
+        observations = tuple(observations_by_dataset.get(dataset_id, ()))
+        conditions = spec.low_demand_conditions + spec.cognitive_effort_conditions
+        contrast_by_condition: dict[str, list[str]] = {}
+        for contrast in spec.contrasts:
+            contrast_by_condition.setdefault(
+                contrast.low_demand_condition, []
+            ).append(contrast.contrast_id)
+            contrast_by_condition.setdefault(
+                contrast.cognitive_effort_condition, []
+            ).append(contrast.contrast_id)
+
+        dataset_payload = datasets_payload[dataset_id]
+        assert isinstance(dataset_payload, Mapping)
+        contrasts_payload = dataset_payload["contrasts"]
+        assert isinstance(contrasts_payload, Mapping)
+        for condition in conditions:
+            condition_rows = _observations_for_condition(observations, condition)
+            participants = sorted({_participant_id(obs) for obs in condition_rows})
+            contrast_ids = contrast_by_condition.get(condition, [])
+            pair_counts = [
+                int(contrasts_payload[contrast_id]["n_paired"])
+                for contrast_id in contrast_ids
+            ]
+            rows.append(
+                {
+                    "dataset_id": dataset_id,
+                    "dataset_role": dataset_roles.get(dataset_id, ""),
+                    "condition": condition,
+                    "demand_class": (
+                        "low_demand"
+                        if condition in spec.low_demand_conditions
+                        else "cognitive_effort"
+                    ),
+                    "contrast_ids": ";".join(contrast_ids),
+                    "subject_pairing_key": "participant_id",
+                    "session_pairing_key": "session_id",
+                    "run_pairing_key": spec.run_pairing_policy,
+                    "cardiac_modality": spec.cardiac_modality,
+                    "cardiac_source": spec.cardiac_source,
+                    "eye_state": spec.eye_state,
+                    "posture": spec.posture,
+                    "task_timing": spec.task_timing,
+                    "nuisance_signals": ";".join(spec.nuisance_signals),
+                    "observation_discovery_status": dataset_payload[
+                        "observation_discovery_status"
+                    ],
+                    "n_observations": len(condition_rows),
+                    "n_participants": len(participants),
+                    "n_paired_participants": min(pair_counts) if pair_counts else 0,
+                    "participant_ids": ";".join(participants),
+                    "unresolved_assumptions": " | ".join(
+                        spec.unresolved_assumptions
+                    ),
+                }
+            )
+    return rows
+
+
+def _known_nonnegative(value: float | None, *, field: str) -> float | None:
+    if value is None:
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{field} must be a finite nonnegative number or None.")
+    return number
+
+
+def evaluate_duration_eligibility(
+    metadata: EligibilityMetadata,
+    duration_s: int,
+) -> EligibilityDecision:
+    """Evaluate one fixed duration without interpreting absent data as failure."""
+    if duration_s not in EXPECTED_DURATIONS_S:
+        raise ValueError(
+            f"duration_s must be one of {EXPECTED_DURATIONS_S}, got {duration_s}."
+        )
+    raw_overlap_s = _known_nonnegative(
+        metadata.raw_overlap_s, field="raw_overlap_s"
+    )
+    clean_beat_span_s = _known_nonnegative(
+        metadata.clean_beat_span_s, field="clean_beat_span_s"
+    )
+
+    status = "eligible"
+    exclusion_code = ""
+    if not metadata.source_data_supplied:
+        status, exclusion_code = "not_supplied", "data_not_supplied"
+    elif metadata.protocol_match is False:
+        status, exclusion_code = "ineligible", "protocol_mismatch"
+    elif metadata.protocol_match is None:
+        status, exclusion_code = "not_computable", "data_not_supplied"
+    elif metadata.pairing_resolved is False:
+        status, exclusion_code = "ineligible", "unresolved_pairing"
+    elif metadata.pairing_resolved is None:
+        status, exclusion_code = "not_computable", "unresolved_pairing"
+    elif (
+        metadata.requires_paired_state
+        and metadata.paired_state_available is False
+    ):
+        status, exclusion_code = "ineligible", "missing_paired_state"
+    elif (
+        metadata.requires_paired_state
+        and metadata.paired_state_available is None
+    ):
+        status, exclusion_code = "not_computable", "unresolved_pairing"
+    elif metadata.eeg_exists is False:
+        status, exclusion_code = "not_computable", "missing_eeg"
+    elif metadata.cardiac_exists is False:
+        status, exclusion_code = "not_computable", "missing_cardiac_data"
+    elif metadata.eeg_exists is None or metadata.cardiac_exists is None:
+        status, exclusion_code = "not_computable", "data_not_supplied"
+    elif raw_overlap_s is not None and raw_overlap_s < duration_s:
+        status, exclusion_code = "ineligible", "insufficient_raw_duration"
+    elif clean_beat_span_s is not None and clean_beat_span_s < duration_s:
+        status, exclusion_code = "ineligible", "insufficient_beat_span"
+    elif raw_overlap_s is None or clean_beat_span_s is None:
+        status, exclusion_code = "not_computable", "data_not_supplied"
+
+    return EligibilityDecision(
+        dataset_id=metadata.dataset_id.casefold(),
+        observation_id=metadata.observation_id,
+        participant_id=metadata.participant_id.casefold(),
+        condition=metadata.condition.casefold(),
+        contrast_id=metadata.contrast_id.casefold(),
+        duration_s=duration_s,
+        status=status,
+        exclusion_code=exclusion_code,
+        raw_overlap_s=raw_overlap_s,
+        clean_beat_span_s=clean_beat_span_s,
+        source_data_supplied=metadata.source_data_supplied,
+        eeg_exists=metadata.eeg_exists,
+        cardiac_exists=metadata.cardiac_exists,
+        requires_paired_state=metadata.requires_paired_state,
+        paired_state_available=metadata.paired_state_available,
+        pairing_resolved=metadata.pairing_resolved,
+        protocol_match=metadata.protocol_match,
+        notes=metadata.notes,
+    )
+
+
+def evaluate_all_durations(
+    metadata_rows: Iterable[EligibilityMetadata],
+) -> list[EligibilityDecision]:
+    """Evaluate D240/D180/D120/D60 in deterministic observation order."""
+    ordered = sorted(
+        metadata_rows,
+        key=lambda row: (
+            row.dataset_id.casefold(),
+            row.participant_id.casefold(),
+            row.observation_id,
+            row.condition.casefold(),
+        ),
+    )
+    return [
+        evaluate_duration_eligibility(metadata, duration_s)
+        for metadata in ordered
+        for duration_s in EXPECTED_DURATIONS_S
+    ]
+
+
+def _eligibility_qc_rows(
+    decisions: Sequence[EligibilityDecision],
+) -> list[dict[str, object]]:
+    participant_counts: dict[tuple[str, int, str, str], set[str]] = {}
+    observation_counts: dict[tuple[str, int, str, str], set[str]] = {}
+    row_counts: dict[tuple[str, int, str, str], int] = {}
+    for decision in decisions:
+        key = (
+            decision.dataset_id,
+            decision.duration_s,
+            decision.status,
+            decision.exclusion_code,
+        )
+        row_counts[key] = row_counts.get(key, 0) + 1
+        if decision.participant_id:
+            participant_counts.setdefault(key, set()).add(decision.participant_id)
+        else:
+            participant_counts.setdefault(key, set())
+        if decision.observation_id:
+            observation_counts.setdefault(key, set()).add(decision.observation_id)
+        else:
+            observation_counts.setdefault(key, set())
+    return [
+        {
+            "dataset_id": dataset_id,
+            "duration_s": duration_s,
+            "duration_role": "primary" if duration_s == 240 else "sensitivity",
+            "status": status,
+            "exclusion_code": exclusion_code,
+            "n_records": row_counts[
+                (dataset_id, duration_s, status, exclusion_code)
+            ],
+            "n_observations": len(
+                observation_counts[
+                    (dataset_id, duration_s, status, exclusion_code)
+                ]
+            ),
+            "n_participants": len(
+                participant_counts[
+                    (dataset_id, duration_s, status, exclusion_code)
+                ]
+            ),
+        }
+        for dataset_id, duration_s, status, exclusion_code in sorted(row_counts)
+    ]
+
+
+def write_duration_eligibility(
+    metadata_rows: Iterable[EligibilityMetadata],
+    output_dir: str | Path,
+) -> tuple[Path, Path]:
+    """Write duration-level decisions and their exclusion/QC counts."""
+    output_path = Path(output_dir).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    decisions = evaluate_all_durations(metadata_rows)
+
+    eligibility_columns = list(
+        EligibilityDecision(
+            dataset_id="",
+            observation_id="",
+            participant_id="",
+            condition="",
+            contrast_id="",
+            duration_s=240,
+            status="not_supplied",
+            exclusion_code="data_not_supplied",
+            raw_overlap_s=None,
+            clean_beat_span_s=None,
+            source_data_supplied=False,
+            eeg_exists=None,
+            cardiac_exists=None,
+            requires_paired_state=False,
+            paired_state_available=None,
+            pairing_resolved=None,
+            protocol_match=None,
+            notes="",
+        ).to_row()
+    )
+    eligibility_path = output_path / ELIGIBILITY_BY_DURATION_FILENAME
+    with eligibility_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=eligibility_columns)
+        writer.writeheader()
+        writer.writerows(decision.to_row() for decision in decisions)
+
+    summary_columns = [
+        "dataset_id",
+        "duration_s",
+        "duration_role",
+        "status",
+        "exclusion_code",
+        "n_records",
+        "n_observations",
+        "n_participants",
+    ]
+    summary_path = output_path / ELIGIBILITY_QC_SUMMARY_FILENAME
+    with summary_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=summary_columns)
+        writer.writeheader()
+        writer.writerows(_eligibility_qc_rows(decisions))
+    return eligibility_path, summary_path
+
+
+def write_protocol_audit(
+    observations_by_dataset: Mapping[str, Sequence[CanonicalObservation]],
+    output_dir: str | Path,
+    *,
+    dataset_roles: Mapping[str, str] | None = None,
+) -> tuple[Path, Path]:
+    """Write protocol declarations and participant-pair intersections."""
+    output_path = Path(output_dir).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    roles = {
+        key.casefold(): value.casefold()
+        for key, value in (dataset_roles or {}).items()
+    }
+    paired_sets = build_paired_subject_sets(observations_by_dataset)
+    rows = _audit_rows(observations_by_dataset, paired_sets, roles)
+
+    csv_path = output_path / PROTOCOL_AUDIT_FILENAME
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    json_path = output_path / PAIRED_SUBJECT_SETS_FILENAME
+    json_path.write_text(
+        json.dumps(paired_sets, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return csv_path, json_path
+
+
+def observations_from_dataset_config(
+    config: ConfirmatoryDatasetConfig,
+) -> list[CanonicalObservation]:
+    """Discover observations using the existing dataset adapters."""
+    return build_observations(
+        config.dataset_id,
+        config.paths.raw_root,
+        subjects=config.selection.subjects or None,
+        tasks=config.selection.tasks or None,
+        conditions=config.selection.conditions or None,
+        sessions=config.selection.sessions or None,
+    )
+
+
+def eligibility_metadata_from_observations(
+    observations_by_dataset: Mapping[str, Sequence[CanonicalObservation]],
+) -> list[EligibilityMetadata]:
+    """Create structural M1c inputs; duration fields remain unknown.
+
+    Raw overlap and clean beat span must be supplied by their metadata
+    producers.  This helper intentionally does not read signals or derive
+    beats.
+    """
+    paired_sets = build_paired_subject_sets(observations_by_dataset)
+    datasets_payload = paired_sets["datasets"]
+    assert isinstance(datasets_payload, Mapping)
+    result: list[EligibilityMetadata] = []
+    for dataset_id in sorted(PROTOCOL_SPECS):
+        observations = tuple(observations_by_dataset.get(dataset_id, ()))
+        if not observations:
+            result.append(
+                EligibilityMetadata(
+                    dataset_id=dataset_id,
+                    observation_id="",
+                    participant_id="",
+                    condition="",
+                    source_data_supplied=False,
+                    eeg_exists=None,
+                    cardiac_exists=None,
+                    pairing_resolved=None,
+                    protocol_match=None,
+                    notes="No observation metadata supplied for this dataset.",
+                )
+            )
+            continue
+
+        spec = PROTOCOL_SPECS[dataset_id]
+        dataset_payload = datasets_payload[dataset_id]
+        assert isinstance(dataset_payload, Mapping)
+        contrasts_payload = dataset_payload["contrasts"]
+        assert isinstance(contrasts_payload, Mapping)
+        paired_ids: set[str] = set()
+        unpaired_ids: set[str] = set()
+        contrast_for_id: dict[str, str] = {}
+        for contrast_id, raw_contrast in contrasts_payload.items():
+            assert isinstance(raw_contrast, Mapping)
+            for pair in raw_contrast["observations_by_pair"]:
+                for field in (
+                    "low_demand_observation_ids",
+                    "cognitive_effort_observation_ids",
+                ):
+                    for observation_id in pair[field]:
+                        paired_ids.add(observation_id)
+                        contrast_for_id[observation_id] = str(contrast_id)
+            for field in (
+                "low_demand_only_keys",
+                "cognitive_effort_only_keys",
+            ):
+                keys = raw_contrast[field]
+                key_tuples = {
+                    tuple(str(key[name]) for name in raw_contrast["pair_within"])
+                    for key in keys
+                }
+                contrast_spec = next(
+                    item
+                    for item in spec.contrasts
+                    if item.contrast_id == contrast_id
+                )
+                for observation in observations:
+                    if _pair_key(observation, contrast_spec) in key_tuples:
+                        unpaired_ids.add(observation.observation_id)
+                        contrast_for_id[observation.observation_id] = str(
+                            contrast_id
+                        )
+
+        paired_conditions = {
+            condition
+            for contrast in spec.contrasts
+            for condition in (
+                contrast.low_demand_condition,
+                contrast.cognitive_effort_condition,
+            )
+        }
+        for observation in observations:
+            eeg_exists = observation.eeg_path.is_file()
+            cardiac_exists = (
+                eeg_exists
+                if observation.ppg_source == "embedded_eeg"
+                else (
+                    observation.ppg_path is not None
+                    and observation.ppg_path.is_file()
+                )
+            )
+            requires_pairing = observation.condition_label.casefold() in paired_conditions
+            paired_available: bool | None = None
+            if requires_pairing:
+                paired_available = observation.observation_id in paired_ids
+                if observation.observation_id not in paired_ids | unpaired_ids:
+                    paired_available = None
+            result.append(
+                EligibilityMetadata(
+                    dataset_id=dataset_id,
+                    observation_id=observation.observation_id,
+                    participant_id=_participant_id(observation),
+                    condition=observation.condition_label,
+                    contrast_id=contrast_for_id.get(observation.observation_id, ""),
+                    source_data_supplied=True,
+                    eeg_exists=eeg_exists,
+                    cardiac_exists=cardiac_exists,
+                    raw_overlap_s=None,
+                    clean_beat_span_s=None,
+                    requires_paired_state=requires_pairing,
+                    paired_state_available=paired_available,
+                    pairing_resolved=True,
+                    protocol_match=(
+                        observation.condition_label.casefold()
+                        in spec.low_demand_conditions
+                        + spec.cognitive_effort_conditions
+                    ),
+                    notes=(
+                        "Raw overlap and clean beat-span metadata not supplied."
+                    ),
+                )
+            )
+    return result
+
+
+def run_protocol_audit(
+    master: ConfirmatoryMasterConfig,
+    dataset_configs: Iterable[ConfirmatoryDatasetConfig],
+    *,
+    output_dir: str | Path | None = None,
+    eligibility_metadata: Iterable[EligibilityMetadata] | None = None,
+) -> tuple[Path, Path, Path, Path]:
+    """Discover observations and write M1b/M1c audit outputs."""
+    observations_by_dataset: dict[str, Sequence[CanonicalObservation]] = {}
+    roles: dict[str, str] = {}
+    for config in dataset_configs:
+        if config.dataset_id in observations_by_dataset:
+            raise ValueError(
+                f"Duplicate dataset config for {config.dataset_id!r}; "
+                "run full and smoke audits separately."
+            )
+        observations_by_dataset[config.dataset_id] = observations_from_dataset_config(
+            config
+        )
+        roles[config.dataset_id] = config.role
+    target = Path(output_dir) if output_dir is not None else master.output_root / "audit"
+    protocol_paths = write_protocol_audit(
+        observations_by_dataset,
+        target,
+        dataset_roles=roles,
+    )
+    metadata_rows = (
+        list(eligibility_metadata)
+        if eligibility_metadata is not None
+        else eligibility_metadata_from_observations(observations_by_dataset)
+    )
+    eligibility_paths = write_duration_eligibility(metadata_rows, target)
+    return (*protocol_paths, *eligibility_paths)
+
+
+__all__ = [
+    "PAIRED_SUBJECT_SETS_FILENAME",
+    "PROTOCOL_AUDIT_FILENAME",
+    "ELIGIBILITY_BY_DURATION_FILENAME",
+    "ELIGIBILITY_QC_SUMMARY_FILENAME",
+    "ELIGIBILITY_STATUSES",
+    "EXCLUSION_CODES",
+    "PROTOCOL_SPECS",
+    "ContrastSpec",
+    "EligibilityDecision",
+    "EligibilityMetadata",
+    "ProtocolSpec",
+    "build_paired_subject_sets",
+    "eligibility_metadata_from_observations",
+    "evaluate_all_durations",
+    "evaluate_duration_eligibility",
+    "observations_from_dataset_config",
+    "protocol_spec",
+    "run_protocol_audit",
+    "write_duration_eligibility",
+    "write_protocol_audit",
+]
