@@ -4,47 +4,71 @@ overview: Incrementally add a confirmatory Zero-Lag EEG–Heart Rate analysis pa
 todos:
   - id: m1-audit-config
     content: Define confirmatory schemas, protocol audit, pairing keys, and eligibility outputs
-    status: pending
+    status: completed
   - id: m2-instant-hr
     content: Build and validate instantaneous HR from saved beat detections
-    status: pending
+    status: completed
   - id: m3-multitaper
     content: Build and validate four-band multitaper EEG power extraction
-    status: pending
+    status: completed
   - id: m4-harmonize
     content: Implement common support and deterministic nested duration segments
-    status: pending
+    status: completed
   - id: m5-correlations
     content: Adapt signed HR-only lag curves while preserving legacy Stage 2
-    status: pending
+    status: completed
   - id: m6-endpoints
     content: Implement Fisher-z, ZLPI, local prominence, and endpoint QC
-    status: pending
+    status: completed
   - id: m7-peak-model
     content: Implement weighted Gaussian fits and hierarchical peak inference
-    status: pending
+    status: completed
   - id: m8-group-tables
     content: Build normalized participant tables and paired state contrasts
-    status: pending
+    status: completed
   - id: m9-nulls
     content: Implement deterministic temporal surrogate and mismatch analyses
-    status: pending
+    status: completed
   - id: m10-inference
     content: Implement mixed models, equivalence, meta-analysis, LOO, and FDR
-    status: pending
+    status: completed
   - id: m11-sensitivities
     content: Implement artifact, nuisance, duration, and modality sensitivities
-    status: pending
+    status: completed
   - id: m12-reporting
     content: Generate publication figures, result tables, reports, and manifests
+    status: completed
+  - id: m13a-production-preflight
+    content: "M13a: production preflight + synthetic smoke orchestration (modes, schemas, manifests)"
+    status: completed
+  - id: m13b-hiit-smoke
+    content: "M13b: HIIT real-smoke config (PPG/photosensor, PRE/POST×PH/PS); operator runs stages"
+    status: in_progress
+  - id: c-stage-cli
+    content: "Architecture: confirmatory/__main__.py + run.py with stages C0,C1a,C1b,C1c,C2,C3,C4,C5,C6,C7,all"
     status: pending
-  - id: m13-production
-    content: Run smoke, primary, sensitivity, and clean-root reproducibility analyses
+  - id: m13c-primary-run
+    content: "M13c: freeze configs; run primary cohorts once raw data complete; no hypothesis changes mid-run"
+    status: pending
+  - id: m13d-sensitivity-cleanroot
+    content: "M13d: sensitivity cohorts + clean-root reproducibility; lock hashes; manuscript tables"
     status: pending
 isProject: false
 ---
 
 # Zero-Lag EEG–Heart Rate Pipeline Implementation Plan
+
+## Status (2026-07-13)
+
+| Milestone | Status | Notes |
+|-----------|--------|-------|
+| M1–M12 | **Done** | Package under `ppg_eeg/temporal_coupling/confirmatory/`; configs in `zero-lag-reanalysis-repo/` |
+| M13a | **Done** | `production.py` modes: preflight / smoke / primary / sensitivity / clean_root; synthetic E2E smoke; artifacts under `derivatives/confirmatory_temporal_coupling/production/` |
+| M13b | **In progress** | HIIT smoke configs + stage CLI ready; **operator must run** stages (no full cohort yet) |
+| C-stage CLI | **Pending** | Planned `__main__.py` / `run.py` with `C0`…`C7`,`all` — see §3; HIIT bridge is interim |
+| M13c–d | **Blocked** | Primary raw missing for `ds003838`, `ds006848`, `ds003690` (and sensitivity `ds004582`) |
+
+**Duration contracts (frozen):** D240/D180 → ZLPI (±60); D120 → MWPI; D60 → SWPI; never pool MWPI/SWPI with ZLPI. Primary = D240 absolute-power ZLPI.
 
 ## 1. Executive summary
 
@@ -144,25 +168,53 @@ flowchart TD
 
 ## 3. Architecture redesign
 
-Add these modules:
+Add these modules (status as of 2026-07-13):
 
-- `confirmatory/__main__.py`: CLI with stages `C0`, `C1a`, `C1b`, `C1c`, `C2`, `C3`, `C4`, `C5`, `C6`, `C7`, `all`.
-- `confirmatory/config.py`: immutable dataclasses, master/dataset config loading, cross-field validation.
-- `confirmatory/run.py`: stage dependency checks and resumable dispatch; no implicit deletion or overwrite.
-- `confirmatory/protocol_audit.py`: eligibility, nuisance inventory, participant-key normalization, paired sets.
-- `confirmatory/instant_hr.py`: derivative-based beat-to-HR reconstruction and QC.
-- `confirmatory/multitaper_power.py`: raw EEG preprocessing and DPSS features.
-- `confirmatory/harmonize.py`: 1 Hz alignment, clean blocks, nested duration windows, representations, z-scoring.
-- `confirmatory/correlation.py`: thin adapter around reusable lag functions and HR-only pair schemas.
-- `confirmatory/endpoints.py`: Fisher-z, ZLPI, local prominence, endpoint QC.
-- `confirmatory/peak_model.py`: weighted Gaussian fitting and hierarchical parameter tables.
-- `confirmatory/nulls.py`: circular shift, phase randomization, block shuffle, cross-subject mismatch, AR(1) innovations.
-- `confirmatory/group_tables.py`: subject/state/band tidy tables and paired contrasts.
-- `confirmatory/inference.py`: mixed models, equivalence, dataset effects, random-effects meta-analysis, LOO, multiplicity.
-- `confirmatory/artifact_controls.py`: QRS/ICA/nuisance/modality sensitivity orchestration.
-- `confirmatory/figures.py`: Figures 1–3 and supplementary duration/QC panels.
-- `confirmatory/manifest.py`: provenance, hashes, seeds, versions, inclusion counts.
-- `confirmatory/report.py`: methods/results-ready tables and machine-readable result bundle.
+| Module | Role | Status |
+|--------|------|--------|
+| `confirmatory/__main__.py` | CLI with stages `C0`, `C1a`, `C1b`, `C1c`, `C2`, `C3`, `C4`, `C5`, `C6`, `C7`, `all` | **Partial** — exists but currently dispatches production modes (`preflight` / `smoke` / `primary` / `sensitivity` / `clean_root`) via `production.main`. **Still required:** unified stage CLI matching the C0–C7 contract below (one `--config` + `--stage`, resumable). Until that lands, real-data smokes (e.g. HIIT M13b) temporarily bridge exploratory Stage 0/1b + confirmatory M modules. |
+| `confirmatory/run.py` | Stage dependency checks and resumable dispatch; no implicit deletion or overwrite | **Missing** — write with `__main__.py` C-stage CLI |
+| `confirmatory/config.py` | Immutable dataclasses, master/dataset config loading, cross-field validation | Done |
+| `confirmatory/protocol_audit.py` | Eligibility, nuisance inventory, participant-key normalization, paired sets | Done (`C0` / M1) |
+| `confirmatory/instant_hr.py` | Derivative-based beat-to-HR reconstruction and QC | Done (`C1b` / M2) |
+| `confirmatory/multitaper_power.py` | Raw EEG preprocessing and DPSS features | Done (`C1a` / M3) |
+| `confirmatory/harmonize.py` | 1 Hz alignment, clean blocks, nested duration windows, representations, z-scoring | Done (`C1c` / M4) |
+| `confirmatory/correlation.py` | Thin adapter around reusable lag functions and HR-only pair schemas | Done (`C2` / M5) |
+| `confirmatory/endpoints.py` | Fisher-z, ZLPI, local prominence, endpoint QC | Done (`C3` endpoints / M6) |
+| `confirmatory/peak_model.py` | Weighted Gaussian fitting and hierarchical parameter tables | Done (`C3` peaks / M7) |
+| `confirmatory/nulls.py` | Circular shift, phase randomization, block shuffle, cross-subject mismatch, AR(1) innovations | Done (`C4` / M9) |
+| `confirmatory/group_tables.py` | Subject/state/band tidy tables and paired contrasts | Done (`C5` / M8) |
+| `confirmatory/inference.py` | Mixed models, equivalence, dataset effects, random-effects meta-analysis, LOO, multiplicity | Done (`C6` / M10) |
+| `confirmatory/artifact_controls.py` | QRS/ICA/nuisance/modality sensitivity orchestration | Done (M11; expose under `C6` sensitivities or dedicated flag) |
+| `confirmatory/figures.py` | Figures 1–3 and supplementary duration/QC panels | Done (`C7` / M12) |
+| `confirmatory/manifest.py` | Provenance, hashes, seeds, versions, inclusion counts | Done (`C7` / M12) |
+| `confirmatory/report.py` | Methods/results-ready tables and machine-readable result bundle | Done (`C7` / M12) |
+| `confirmatory/production.py` | Production preflight / synthetic smoke / run-plan orchestration (M13a) | Done (ops layer; not a substitute for C-stage CLI) |
+| `confirmatory/hiit_smoke_m13b.py` | Temporary HIIT M13b operator driver | Interim until C-stage `__main__.py` covers real-data smoke end-to-end |
+
+### Intended C-stage CLI (still the architecture target)
+
+```text
+python -m ppg_eeg.temporal_coupling.confirmatory \
+  --config zero-lag-reanalysis-repo/config.confirmatory.<dataset>.yaml \
+  --stage C0|C1a|C1b|C1c|C2|C3|C4|C5|C6|C7|all
+```
+
+| Stage | Name | Implements |
+|-------|------|------------|
+| `C0` | Protocol audit | `protocol_audit.py` |
+| `C1a` | Multitaper EEG power | `multitaper_power.py` |
+| `C1b` | Instantaneous HR | `instant_hr.py` (from saved beats) |
+| `C1c` | Harmonize / nested durations | `harmonize.py` |
+| `C2` | Signed lag curves | `correlation.py` |
+| `C3` | Endpoints + peaks | `endpoints.py`, `peak_model.py` |
+| `C4` | Temporal nulls | `nulls.py` |
+| `C5` | Group / paired tables | `group_tables.py` |
+| `C6` | Inference (+ sensitivities) | `inference.py`, `artifact_controls.py` |
+| `C7` | Figures, report, manifest | `figures.py`, `report.py`, `manifest.py` |
+| `all` | Dependency-ordered full run | `run.py` dispatch |
+
+Production modes (`--mode preflight|smoke|…`) stay as an **ops** entrypoint for cohort gating; they should call the same C-stage runner rather than reimplement stages.
 
 Preserve the current observation layout helper in [`paths.py`](ppg_eeg/temporal_coupling/paths.py), but add confirmatory path constants so legacy and confirmatory outputs cannot collide.
 
@@ -366,16 +418,21 @@ Validation must reject: D ≤ max lag for confirmatory ZLPI, flank outside lag g
 ### Add tests
 
 - `tests/test_confirmatory_config.py`
+- `tests/test_protocol_audit.py`
+- `tests/test_duration_contracts.py`
 - `tests/test_instant_hr.py`
 - `tests/test_multitaper_power.py`
 - `tests/test_confirmatory_harmonize.py`
 - `tests/test_confirmatory_correlation.py`
 - `tests/test_zlpi.py`
 - `tests/test_peak_model.py`
+- `tests/test_group_tables.py`
 - `tests/test_temporal_nulls.py`
 - `tests/test_confirmatory_inference.py`
+- `tests/test_artifact_controls.py`
 - `tests/test_confirmatory_outputs.py`
-- `tests/test_confirmatory_smoke.py`
+- `tests/test_production_preflight.py` (M13a synthetic E2E)
+- `tests/test_m13b_hiit_smoke_config.py` (M13b config/verification lock)
 
 ## 10. Milestone roadmap
 
@@ -465,8 +522,35 @@ Validation must reject: D ≤ max lag for confirmatory ZLPI, flank outside lag g
 
 ### M13 — Full reproducible run and manuscript lock (Very Large compute/operations)
 
-- Run smoke configs, then primary datasets, then sensitivities.
-- Freeze configs and manifest before inspecting primary inferential results.
+Split into operational sub-milestones so engineering (preflight/orchestration) can finish before raw cohorts are available.
+
+#### M13a — Production preflight + synthetic smoke (done)
+
+- Module: [`production.py`](ppg_eeg/temporal_coupling/confirmatory/production.py); CLI: `python -m ppg_eeg.temporal_coupling.confirmatory --mode {preflight,smoke,primary,sensitivity,clean_root}`.
+- Modes verify configs, pairing inventory, channel/protocol declarations, raw/derivative availability; missing data = **blockers**, never participant exclusions.
+- Synthetic smoke runs M1 + fixture M4 → M5–M12 with schema checks; records commit, config hashes, runtime.
+- Artifacts: `production_preflight.csv`, `production_run_plan.json`, `stage_execution_log.csv`, `smoke_run_manifest.json` under `derivatives/confirmatory_temporal_coupling/production/`.
+- Confirmatory unit suite last green at M13a: **141** tests (includes production E2E smoke).
+
+#### M13b — HIIT real-smoke subset (in progress; operator-run)
+
+- Configs:
+  - [`config.confirmatory.smoke.hiit.yaml`](zero-lag-reanalysis-repo/config.confirmatory.smoke.hiit.yaml) — participants `01–03`, sessions `ph`/`ps`, PRE/POST rest↔Tetris (`protocol_task` labels).
+  - [`m13b.hiit.smoke.verification.json`](zero-lag-reanalysis-repo/m13b.hiit.smoke.verification.json) — PPG/`photosensor` lock, D240/D180 gates, stop rules.
+  - [`config.smoke.hiit.m13b.temporal_coupling.yaml`](config.smoke.hiit.m13b.temporal_coupling.yaml) — Stage 0/1b companion forcing photosensor PPG.
+- Stage driver: [`hiit_smoke_m13b.py`](ppg_eeg/temporal_coupling/confirmatory/hiit_smoke_m13b.py) — one `--stage` at a time; hard-stops on pairing/modality failures.
+- Pairing: PRE-rest↔PRE-Tetris and POST-rest↔POST-Tetris within each PH/PS session; never collapse to task-only.
+- Remaining: operator executes Stage 0 → 1b → M2–M4 assembly → M5–M12; confirm photosensor on PS sessions; stop if assumptions fail.
+
+#### M13c — Primary production run (pending; blocked on raw)
+
+- Freeze configs/manifest before inspecting primary inferential results.
+- Require raw for all primary datasets: `ds003838`, `ds006848`, `ds003690`, `ds004587` (latter present; first three missing as of 2026-07-13).
+- Refuse full cohort when raw incomplete; do not silently drop participants as “exclusions.”
+
+#### M13d — Sensitivities, clean-root reproducibility, manuscript lock (pending)
+
+- Run sensitivity datasets (`ds004582`, `ds003816`, HIIT, mindfulness) after primary QC review.
 - Re-run from clean output root; compare hashes and inclusion counts; archive logs.
 - Populate manuscript only from generated tables/figure-source files.
 
@@ -520,20 +604,21 @@ Expected engineering effort is roughly 25–35 person-days for the mandatory cor
 
 ## 14. Final recommended implementation order
 
-1. Commit output contracts, confirmatory config schemas, protocol audit, and pairing rules.
-2. Commit instant-HR reconstruction and duration validation.
-3. Commit multitaper theta/alpha/beta/gamma features and spectral QC.
-4. Commit common-support alignment and deterministic nested D240/D180/D120 segments.
-5. Commit signed HR-only 1-s lag curves while proving legacy Stage 2 unchanged.
-6. Commit Fisher-z, ZLPI, local prominence, and endpoint QC.
-7. Commit Gaussian peak fitting and two-stage hierarchical parameter inference.
-8. Commit participant tables, paired contrasts, and inclusion-flow outputs.
-9. Commit temporal null battery with deterministic parallel execution.
-10. Commit mixed-effects, equivalence, meta-analysis, LOO, and multiplicity registry.
-11. Commit artifact, nuisance, duration, and modality sensitivities.
-12. Commit Figures 1–3, source-data exports, report generator, and manifests.
-13. Run and freeze smoke tests; then freeze primary configs before production analysis.
-14. Run primary datasets, review QC without changing hypotheses, then run sensitivities.
-15. Reproduce from a clean output root, lock hashes, and populate manuscript outputs.
+1. ~~Commit output contracts, confirmatory config schemas, protocol audit, and pairing rules.~~ **Done (M1)**
+2. ~~Commit instant-HR reconstruction and duration validation.~~ **Done (M2)**
+3. ~~Commit multitaper theta/alpha/beta/gamma features and spectral QC.~~ **Done (M3)**
+4. ~~Commit common-support alignment and deterministic nested D240/D180/D120 segments.~~ **Done (M4)**
+5. ~~Commit signed HR-only 1-s lag curves while proving legacy Stage 2 unchanged.~~ **Done (M5)**
+6. ~~Commit Fisher-z, ZLPI, local prominence, and endpoint QC.~~ **Done (M6)**
+7. ~~Commit Gaussian peak fitting and two-stage hierarchical parameter inference.~~ **Done (M7)**
+8. ~~Commit participant tables, paired contrasts, and inclusion-flow outputs.~~ **Done (M8)**
+9. ~~Commit temporal null battery with deterministic parallel execution.~~ **Done (M9)**
+10. ~~Commit mixed-effects, equivalence, meta-analysis, LOO, and multiplicity registry.~~ **Done (M10)**
+11. ~~Commit artifact, nuisance, duration, and modality sensitivities.~~ **Done (M11)**
+12. ~~Commit Figures 1–3, source-data exports, report generator, and manifests.~~ **Done (M12)**
+13. ~~Production preflight + synthetic smoke orchestration.~~ **Done (M13a)**
+14. **Next:** Operator-run HIIT real smoke (M13b) — Stage 0/1b PPG photosensor → M2–M12; stop on pairing/modality/D240–D180 failures.
+15. Freeze primary configs; run primary cohorts when raw complete (M13c).
+16. Sensitivities, clean-root reproducibility, lock hashes, manuscript tables (M13d).
 
 This order keeps each commit independently testable, delays expensive raw-data computation until schemas are fixed, and prevents exploratory outputs or sensitivity results from contaminating the primary confirmatory analysis.
