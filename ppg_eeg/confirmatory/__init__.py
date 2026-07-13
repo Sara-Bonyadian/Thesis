@@ -75,6 +75,12 @@ from .protocol_audit import (
     write_protocol_audit,
 )
 from .report import generate_confirmatory_report, run_confirmatory_reporting
+from .run import (
+    STAGE_ORDER,
+    VALID_STAGES,
+    expand_stages,
+    run_stages,
+)
 
 __all__ = [
     "ConfirmatoryDatasetConfig",
@@ -113,7 +119,11 @@ __all__ = [
     "run_production",
     "run_production_preflight",
     "run_protocol_audit",
+    "run_stages",
+    "STAGE_ORDER",
     "standard_zlpi_pool_durations",
+    "VALID_STAGES",
+    "expand_stages",
     "write_artifact_control_outputs",
     "write_correlation_outputs",
     "write_duration_eligibility",

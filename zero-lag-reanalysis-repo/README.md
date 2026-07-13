@@ -39,20 +39,34 @@ zero-lag-reanalysis-repo/
 
 Raw data stays shared: `./data` (repo root).
 
-## HIIT smoke (one folder)
+## HIIT smoke (C-stage CLI)
 
-Everything for M13b lives under `smoke/hiit/`. Do not hunt for `m13b*.json` or old root-level HIIT smoke configs.
+Everything for HIIT smoke lives under `smoke/hiit/`.
 
 ```bash
-# 1) confirmatory ops / preflight
-.venv/bin/python -m ppg_eeg.confirmatory.hiit_smoke_m13b --stage preflight
+# Protocol audit
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage C0
 
-# 2) beat peaks (exploratory Stage 0 then 1b)
+# Beat peaks still come from exploratory Stage 1b (until peaks are under confirmatory control)
 .venv/bin/python -m ppg_eeg.temporal_coupling \
   --config zero-lag-reanalysis-repo/smoke/hiit/beats.yaml --stage 0
 .venv/bin/python -m ppg_eeg.temporal_coupling \
   --config zero-lag-reanalysis-repo/smoke/hiit/beats.yaml --stage 1b
+
+# Instant HR from those peaks
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage C1b \
+  --peaks-root derivatives/smoke_hiit_m13b_temporal_coupling
+
+# Full remaining pipeline
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage all \
+  --peaks-root derivatives/smoke_hiit_m13b_temporal_coupling
 ```
+
+Stages: `C0` `C1a` `C1b` `C1c` `C2` `C3` `C4` `C5` `C6` `C7` (or `all`).
+Production ops remain: `python -m ppg_eeg.confirmatory --mode preflight|smoke|…`.
 
 ## Duration–lag–endpoint contracts
 
@@ -67,4 +81,5 @@ Canonical source: `ppg_eeg/confirmatory/duration_contracts.py`.
 
 ## Status
 
-M1–M12 confirmatory modules are implemented. Production preflight/smoke: `production.py`. Unified C0–C7 CLI still planned (see project plan §3).
+M1–M12 modules + **C0–C7 stage CLI** (`ppg_eeg/confirmatory/run.py`) are implemented.
+Production ops: `python -m ppg_eeg.confirmatory --mode preflight|smoke|…`.

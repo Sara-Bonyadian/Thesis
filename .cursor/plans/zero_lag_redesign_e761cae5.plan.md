@@ -46,7 +46,7 @@ todos:
     status: in_progress
   - id: c-stage-cli
     content: "Architecture: confirmatory/__main__.py + run.py with stages C0,C1a,C1b,C1c,C2,C3,C4,C5,C6,C7,all"
-    status: pending
+    status: completed
   - id: m13c-primary-run
     content: "M13c: freeze configs; run primary cohorts once raw data complete; no hypothesis changes mid-run"
     status: pending
@@ -65,7 +65,7 @@ isProject: false
 | M1–M12 | **Done** | Package under `ppg_eeg/temporal_coupling/confirmatory/`; configs in `zero-lag-reanalysis-repo/` |
 | M13a | **Done** | `production.py` modes: preflight / smoke / primary / sensitivity / clean_root; synthetic E2E smoke; artifacts under `derivatives/confirmatory_temporal_coupling/production/` |
 | M13b | **In progress** | HIIT smoke configs + stage CLI ready; **operator must run** stages (no full cohort yet) |
-| C-stage CLI | **Pending** | Planned `__main__.py` / `run.py` with `C0`…`C7`,`all` — see §3; HIIT bridge is interim |
+| C-stage CLI | **Done** | `python -m ppg_eeg.confirmatory --config … --stage C0…C7|all` (+ `--mode` for M13a ops) |
 | M13c–d | **Blocked** | Primary raw missing for `ds003838`, `ds006848`, `ds003690` (and sensitivity `ds004582`) |
 
 **Duration contracts (frozen):** D240/D180 → ZLPI (±60); D120 → MWPI; D60 → SWPI; never pool MWPI/SWPI with ZLPI. Primary = D240 absolute-power ZLPI.
@@ -172,8 +172,8 @@ Add these modules (status as of 2026-07-13):
 
 | Module | Role | Status |
 |--------|------|--------|
-| `confirmatory/__main__.py` | CLI with stages `C0`, `C1a`, `C1b`, `C1c`, `C2`, `C3`, `C4`, `C5`, `C6`, `C7`, `all` | **Partial** — exists but currently dispatches production modes (`preflight` / `smoke` / `primary` / `sensitivity` / `clean_root`) via `production.main`. **Still required:** unified stage CLI matching the C0–C7 contract below (one `--config` + `--stage`, resumable). Until that lands, real-data smokes (e.g. HIIT M13b) temporarily bridge exploratory Stage 0/1b + confirmatory M modules. |
-| `confirmatory/run.py` | Stage dependency checks and resumable dispatch; no implicit deletion or overwrite | **Missing** — write with `__main__.py` C-stage CLI |
+| `confirmatory/__main__.py` | CLI with stages `C0`, `C1a`, `C1b`, `C1c`, `C2`, `C3`, `C4`, `C5`, `C6`, `C7`, `all` | **Done** — `python -m ppg_eeg.confirmatory --config … --stage C0|…|all`; production `--mode` still available |
+| `confirmatory/run.py` | Stage dependency checks and resumable dispatch; no implicit deletion or overwrite | **Done** |
 | `confirmatory/config.py` | Immutable dataclasses, master/dataset config loading, cross-field validation | Done |
 | `confirmatory/protocol_audit.py` | Eligibility, nuisance inventory, participant-key normalization, paired sets | Done (`C0` / M1) |
 | `confirmatory/instant_hr.py` | Derivative-based beat-to-HR reconstruction and QC | Done (`C1b` / M2) |
@@ -195,7 +195,7 @@ Add these modules (status as of 2026-07-13):
 ### Intended C-stage CLI (still the architecture target)
 
 ```text
-python -m ppg_eeg.temporal_coupling.confirmatory \
+python -m ppg_eeg.confirmatory \
   --config zero-lag-reanalysis-repo/datasets/<dataset>.yaml \
   --stage C0|C1a|C1b|C1c|C2|C3|C4|C5|C6|C7|all
 ```
