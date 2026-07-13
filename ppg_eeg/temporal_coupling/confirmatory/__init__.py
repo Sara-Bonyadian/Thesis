@@ -7,6 +7,11 @@ from .config import (
     load_master_config,
 )
 from .instant_hr import reconstruct_instant_hr, reconstruct_instant_hr_file
+from .multitaper_power import (
+    compute_multitaper_power,
+    extract_multitaper_file,
+    extract_multitaper_from_raw,
+)
 from .protocol_audit import (
     run_protocol_audit,
     write_duration_eligibility,
@@ -18,6 +23,9 @@ __all__ = [
     "ConfirmatoryMasterConfig",
     "load_dataset_config",
     "load_master_config",
+    "compute_multitaper_power",
+    "extract_multitaper_file",
+    "extract_multitaper_from_raw",
     "reconstruct_instant_hr",
     "reconstruct_instant_hr_file",
     "run_protocol_audit",
