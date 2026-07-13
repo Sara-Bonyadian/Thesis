@@ -31,6 +31,11 @@ from .multitaper_power import (
     extract_multitaper_file,
     extract_multitaper_from_raw,
 )
+from .group_tables import (
+    build_group_tables,
+    run_confirmatory_group_tables,
+    write_group_table_outputs,
+)
 from .peak_model import (
     compute_peak_fits_from_curves,
     run_confirmatory_peak_fits,
@@ -48,6 +53,7 @@ __all__ = [
     "DURATION_ANALYSIS_CONTRACTS",
     "load_dataset_config",
     "load_master_config",
+    "build_group_tables",
     "compute_endpoints_from_curves",
     "compute_multitaper_power",
     "compute_peak_fits_from_curves",
@@ -60,12 +66,14 @@ __all__ = [
     "reconstruct_instant_hr_file",
     "run_confirmatory_correlations",
     "run_confirmatory_endpoints",
+    "run_confirmatory_group_tables",
     "run_confirmatory_peak_fits",
     "run_protocol_audit",
     "standard_zlpi_pool_durations",
     "write_correlation_outputs",
     "write_duration_eligibility",
     "write_endpoint_outputs",
+    "write_group_table_outputs",
     "write_harmonize_outputs",
     "write_peak_fit_outputs",
     "write_protocol_audit",
