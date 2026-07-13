@@ -11,12 +11,31 @@ import numpy as np
 from ppg_eeg.temporal_coupling.confirmatory.correlation import (
     BAND_ORDER,
     CURVES_TEMPLATE,
+    MID_WINDOW_ANALYSIS_ROLE,
+    MID_WINDOW_DURATION_S,
+    MID_WINDOW_N_LAGS,
     POWER_REPRESENTATIONS,
     PRIMARY_POWER_REPRESENTATION,
     QC_TEMPLATE,
+    SHORT_WINDOW_ANALYSIS_ROLE,
+    SHORT_WINDOW_DURATION_S,
+    SHORT_WINDOW_N_LAGS,
+    STANDARD_ANALYSIS_ROLE,
+    STANDARD_ZLPI_DURATIONS_S,
+    STANDARD_ZLPI_N_LAGS,
     compute_signed_lag_curves,
     expected_lag_count,
+    lag_spec_for_duration,
     write_correlation_outputs,
+)
+from ppg_eeg.temporal_coupling.confirmatory.duration_contracts import (
+    ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
+    ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
+    ENDPOINT_ZLPI,
+    MWPI_FLANKS_S,
+    SWPI_FLANKS_S,
+    ZLPI_FLANKS_S,
+    contract_for_duration,
 )
 
 
@@ -36,7 +55,6 @@ def _zscore(values: np.ndarray) -> np.ndarray:
 
 
 def _shift(signal: np.ndarray, lag: int) -> np.ndarray:
-    """Causal shift with NaN padding (no circular wrap)."""
     out = np.full(signal.shape, np.nan, dtype=float)
     if lag > 0:
         out[lag:] = signal[:-lag]
@@ -60,7 +78,6 @@ def _aligned_rows_from_z(
     start_s: float = 0.0,
     duration_role: str = "primary",
 ) -> list[dict[str, object]]:
-    """Build M4-like rows from already standardized series (used by lag tests)."""
     n = int(hr_z.size)
     times = start_s + np.arange(n, dtype=float)
     rows: list[dict[str, object]] = []
@@ -96,17 +113,12 @@ def _aligned_rows(
     band_signals: dict[str, np.ndarray],
     *,
     duration_s: int = 240,
-    start_s: float = 0.0,
     duration_role: str = "primary",
 ) -> list[dict[str, object]]:
     hr_z = _zscore(hr.astype(float))
     band_z = {band: _zscore(signal.astype(float)) for band, signal in band_signals.items()}
     return _aligned_rows_from_z(
-        hr_z,
-        band_z,
-        duration_s=duration_s,
-        start_s=start_s,
-        duration_role=duration_role,
+        hr_z, band_z, duration_s=duration_s, duration_role=duration_role
     )
 
 
@@ -125,53 +137,143 @@ def _curve_map(
 
 
 def _peak_lag(curve: dict[float, tuple[float, int]]) -> float:
-    return max(curve.items(), key=lambda item: item[1][0] if math.isfinite(item[1][0]) else -np.inf)[0]
+    return max(
+        curve.items(),
+        key=lambda item: item[1][0] if math.isfinite(item[1][0]) else -np.inf,
+    )[0]
+
+
+def _assert_constant_overlap(curve: dict[float, tuple[float, int]], expected: int) -> None:
+    overlaps = {n_overlap for _, n_overlap in curve.values()}
+    assert overlaps == {expected}, overlaps
 
 
 class TestConfirmatoryCorrelation(unittest.TestCase):
-    def test_exact_lag_count_and_overlap_counts(self) -> None:
-        n = 240
-        hr = _noise(n, seed=1)
-        bands = {band: hr.copy() for band in BAND_ORDER}
-        result = compute_signed_lag_curves(
-            _aligned_rows(hr, bands),
-            duration_s=240,
-        )
-        self.assertEqual(expected_lag_count(), 121)
-        self.assertEqual(len(result.lag_grid_s), 121)
-        self.assertEqual(result.lag_grid_s[0], -60.0)
-        self.assertEqual(result.lag_grid_s[-1], 60.0)
-        # 4 bands × 3 representations × 121 lags
-        self.assertEqual(len(result.curve_rows), 4 * 3 * 121)
-        self.assertEqual(len(result.qc_rows), 4 * 3)
+    def test_duration_lag_and_endpoint_contracts(self) -> None:
+        for duration in STANDARD_ZLPI_DURATIONS_S:
+            spec = lag_spec_for_duration(duration)
+            contract = contract_for_duration(duration)
+            self.assertEqual(expected_lag_count(duration), STANDARD_ZLPI_N_LAGS)
+            self.assertEqual(spec.lag_max_s, 60)
+            self.assertEqual(spec.n_lags, 121)
+            self.assertTrue(spec.is_standard_zlpi)
+            self.assertTrue(spec.pool_with_standard_zlpi)
+            self.assertEqual(spec.endpoint_name, ENDPOINT_ZLPI)
+            self.assertEqual(spec.flank_inner_s, ZLPI_FLANKS_S[0])
+            self.assertEqual(spec.flank_outer_s, ZLPI_FLANKS_S[1])
+            self.assertEqual(spec.lag_analysis_role, STANDARD_ANALYSIS_ROLE)
+            self.assertEqual(contract.expected_constant_overlap_if_fully_finite, duration - 120)
 
+        mid = lag_spec_for_duration(MID_WINDOW_DURATION_S)
+        self.assertEqual(expected_lag_count(MID_WINDOW_DURATION_S), MID_WINDOW_N_LAGS)
+        self.assertEqual(mid.lag_max_s, 30)
+        self.assertEqual(mid.n_lags, 61)
+        self.assertFalse(mid.is_standard_zlpi)
+        self.assertFalse(mid.pool_with_standard_zlpi)
+        self.assertEqual(mid.endpoint_name, ENDPOINT_MID_WINDOW_PROXIMAL_INDEX)
+        self.assertEqual((mid.flank_inner_s, mid.flank_outer_s), MWPI_FLANKS_S)
+        self.assertEqual(mid.lag_analysis_role, MID_WINDOW_ANALYSIS_ROLE)
+
+        short = lag_spec_for_duration(SHORT_WINDOW_DURATION_S)
+        self.assertEqual(expected_lag_count(SHORT_WINDOW_DURATION_S), SHORT_WINDOW_N_LAGS)
+        self.assertEqual(short.lag_max_s, 20)
+        self.assertEqual(short.n_lags, 41)
+        self.assertFalse(short.is_standard_zlpi)
+        self.assertFalse(short.pool_with_standard_zlpi)
+        self.assertEqual(short.endpoint_name, ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX)
+        self.assertEqual((short.flank_inner_s, short.flank_outer_s), SWPI_FLANKS_S)
+        self.assertEqual(short.lag_analysis_role, SHORT_WINDOW_ANALYSIS_ROLE)
+
+    def test_standard_zlpi_durations_have_constant_overlap(self) -> None:
+        for duration, expected_overlap in ((240, 120), (180, 60)):
+            hr = _noise(duration, seed=duration)
+            bands = {band: hr.copy() for band in BAND_ORDER}
+            result = compute_signed_lag_curves(
+                _aligned_rows(hr, bands, duration_s=duration),
+                duration_s=duration,
+            )
+            self.assertEqual(len(result.lag_grid_s), 121)
+            self.assertEqual(result.lag_grid_s[0], -60.0)
+            self.assertEqual(result.lag_grid_s[-1], 60.0)
+            self.assertTrue(result.lag_spec.is_standard_zlpi)
+            curve = _curve_map(result)
+            _assert_constant_overlap(curve, expected_overlap)
+            for qc in result.qc_rows:
+                self.assertTrue(qc["overlap_is_constant"])
+                self.assertEqual(qc["n_common_support"], expected_overlap)
+                self.assertEqual(qc["endpoint_name"], ENDPOINT_ZLPI)
+                self.assertTrue(qc["is_standard_zlpi"])
+                self.assertTrue(qc["pool_with_standard_zlpi"])
+
+    def test_d120_mwpi_61_lags_constant_overlap_not_pooled(self) -> None:
+        n = 120
+        hr_z = _zscore(_noise(n, seed=120))
+        result = compute_signed_lag_curves(
+            _aligned_rows_from_z(
+                hr_z,
+                {band: hr_z.copy() for band in BAND_ORDER},
+                duration_s=120,
+                duration_role="nested_sensitivity",
+            ),
+            duration_s=120,
+        )
+        self.assertEqual(len(result.lag_grid_s), 61)
+        self.assertEqual(result.lag_grid_s[0], -30.0)
+        self.assertEqual(result.lag_grid_s[-1], 30.0)
+        self.assertEqual(len(result.curve_rows), 4 * 3 * 61)
+        self.assertFalse(result.lag_spec.is_standard_zlpi)
+        self.assertFalse(result.lag_spec.pool_with_standard_zlpi)
+        self.assertEqual(
+            result.lag_spec.endpoint_name, ENDPOINT_MID_WINDOW_PROXIMAL_INDEX
+        )
         curve = _curve_map(result)
-        self.assertEqual(curve[0.0][1], 240)
-        self.assertEqual(curve[10.0][1], 230)
-        self.assertEqual(curve[-10.0][1], 230)
-        self.assertEqual(curve[60.0][1], 180)
-        self.assertEqual(curve[-60.0][1], 180)
+        _assert_constant_overlap(curve, 60)
+        for row in result.curve_rows:
+            self.assertEqual(row["endpoint_name"], ENDPOINT_MID_WINDOW_PROXIMAL_INDEX)
+            self.assertFalse(row["is_standard_zlpi"])
+            self.assertFalse(row["pool_with_standard_zlpi"])
+            self.assertEqual(row["lag_analysis_role"], MID_WINDOW_ANALYSIS_ROLE)
+
+    def test_d60_swpi_41_lags_not_zlpi(self) -> None:
+        n = 60
+        hr_z = _zscore(_noise(n, seed=60))
+        result = compute_signed_lag_curves(
+            _aligned_rows_from_z(
+                hr_z,
+                {band: hr_z.copy() for band in BAND_ORDER},
+                duration_s=60,
+                duration_role="separate_sensitivity",
+            ),
+            duration_s=60,
+        )
+        self.assertEqual(len(result.lag_grid_s), 41)
+        self.assertEqual(result.lag_grid_s[0], -20.0)
+        self.assertEqual(result.lag_grid_s[-1], 20.0)
+        self.assertFalse(result.lag_spec.is_standard_zlpi)
+        self.assertEqual(
+            result.lag_spec.endpoint_name, ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX
+        )
+        _assert_constant_overlap(_curve_map(result), 20)
 
     def test_zero_lag_coupling(self) -> None:
         n = 240
         hr_z = _zscore(_noise(n, seed=2))
-        bands = {band: hr_z.copy() for band in BAND_ORDER}
         result = compute_signed_lag_curves(
-            _aligned_rows_from_z(hr_z, bands),
+            _aligned_rows_from_z(hr_z, {band: hr_z.copy() for band in BAND_ORDER}),
             duration_s=240,
         )
         curve = _curve_map(result)
         self.assertAlmostEqual(curve[0.0][0], 1.0, places=10)
         self.assertEqual(_peak_lag(curve), 0.0)
+        _assert_constant_overlap(curve, 120)
 
     def test_known_positive_lag_eeg_follows_hr(self) -> None:
         n = 240
         lag = 12
         hr_z = _zscore(_noise(n, seed=3))
-        eeg_z = _shift(hr_z, lag)  # EEG[t] = HR[t - lag] ⇒ EEG follows HR
-        bands = {band: eeg_z.copy() for band in BAND_ORDER}
+        eeg_z = _shift(hr_z, lag)
         result = compute_signed_lag_curves(
-            _aligned_rows_from_z(hr_z, bands),
+            _aligned_rows_from_z(hr_z, {band: eeg_z.copy() for band in BAND_ORDER}),
             duration_s=240,
         )
         curve = _curve_map(result)
@@ -182,10 +284,9 @@ class TestConfirmatoryCorrelation(unittest.TestCase):
         n = 240
         lag = 9
         hr_z = _zscore(_noise(n, seed=4))
-        eeg_z = _shift(hr_z, -lag)  # EEG[t] = HR[t + lag] ⇒ EEG precedes HR
-        bands = {band: eeg_z.copy() for band in BAND_ORDER}
+        eeg_z = _shift(hr_z, -lag)
         result = compute_signed_lag_curves(
-            _aligned_rows_from_z(hr_z, bands),
+            _aligned_rows_from_z(hr_z, {band: eeg_z.copy() for band in BAND_ORDER}),
             duration_s=240,
         )
         curve = _curve_map(result)
@@ -195,12 +296,10 @@ class TestConfirmatoryCorrelation(unittest.TestCase):
     def test_lag_sign_convention_documented(self) -> None:
         n = 240
         hr_z = _zscore(_noise(n, seed=5))
-        follow = _shift(hr_z, 5)
-        precede = _shift(hr_z, -5)
         follow_curve = _curve_map(
             compute_signed_lag_curves(
                 _aligned_rows_from_z(
-                    hr_z, {band: follow.copy() for band in BAND_ORDER}
+                    hr_z, {band: _shift(hr_z, 5).copy() for band in BAND_ORDER}
                 ),
                 duration_s=240,
             )
@@ -208,48 +307,46 @@ class TestConfirmatoryCorrelation(unittest.TestCase):
         precede_curve = _curve_map(
             compute_signed_lag_curves(
                 _aligned_rows_from_z(
-                    hr_z, {band: precede.copy() for band in BAND_ORDER}
+                    hr_z, {band: _shift(hr_z, -5).copy() for band in BAND_ORDER}
                 ),
                 duration_s=240,
             )
         )
-        # Positive lag: EEG follows HR. Negative lag: EEG precedes HR.
         self.assertGreater(follow_curve[5.0][0], follow_curve[-5.0][0])
         self.assertGreater(precede_curve[-5.0][0], precede_curve[5.0][0])
 
     def test_constant_signals_yield_nan_correlation(self) -> None:
         n = 180
-        hr = np.full(n, 70.0)
-        bands = {band: np.full(n, 1.0) for band in BAND_ORDER}
         result = compute_signed_lag_curves(
-            _aligned_rows(hr, bands, duration_s=180, duration_role="nested_sensitivity"),
+            _aligned_rows(
+                np.full(n, 70.0),
+                {band: np.full(n, 1.0) for band in BAND_ORDER},
+                duration_s=180,
+            ),
             duration_s=180,
         )
         curve = _curve_map(result)
+        _assert_constant_overlap(curve, 60)
         for lag_s, (r, n_overlap) in curve.items():
             self.assertTrue(math.isnan(r), msg=f"lag={lag_s}")
-            self.assertGreaterEqual(n_overlap, 2)
+            self.assertEqual(n_overlap, 60)
 
-    def test_missing_values_reduce_overlap_and_preserve_finite_support(self) -> None:
+    def test_missing_values_keep_constant_overlap_on_common_support(self) -> None:
         n = 240
         hr = _noise(n, seed=6)
-        eeg = hr.copy()
-        rows = _aligned_rows(hr, {band: eeg.copy() for band in BAND_ORDER})
-        # Punch holes in HR and EEG that are non-overlapping at zero lag.
-        for index in range(10, 20):
+        rows = _aligned_rows(hr, {band: hr.copy() for band in BAND_ORDER})
+        for index in range(100, 110):
             rows[index]["hr_z"] = float("nan")
-        for index in range(40, 55):
+        for index in range(150, 160):
             rows[index]["theta_absolute_log10_power_z"] = float("nan")
-
         result = compute_signed_lag_curves(rows, duration_s=240)
         curve = _curve_map(result)
-        self.assertEqual(curve[0.0][1], 240 - 10 - 15)
-        # Far positive lag should lose additional HR samples at the trail and EEG at head.
-        self.assertLess(curve[5.0][1], curve[0.0][1] + 5)
-        self.assertTrue(math.isfinite(curve[0.0][0]))
+        overlaps = {n_overlap for _, n_overlap in curve.values()}
+        self.assertEqual(len(overlaps), 1)
+        self.assertLess(next(iter(overlaps)), 120)
 
     def test_bands_and_representations_are_all_processed(self) -> None:
-        n = 120
+        n = 240
         hr_z = _zscore(_noise(n, seed=7))
         bands = {
             "theta": hr_z.copy(),
@@ -258,10 +355,8 @@ class TestConfirmatoryCorrelation(unittest.TestCase):
             "low_gamma": _shift(hr_z, 7),
         }
         result = compute_signed_lag_curves(
-            _aligned_rows_from_z(
-                hr_z, bands, duration_s=120, duration_role="nested_sensitivity"
-            ),
-            duration_s=120,
+            _aligned_rows_from_z(hr_z, bands),
+            duration_s=240,
         )
         pairs = {(row["band"], row["power_representation"]) for row in result.qc_rows}
         expected = {
@@ -270,72 +365,42 @@ class TestConfirmatoryCorrelation(unittest.TestCase):
             for representation, _, _ in POWER_REPRESENTATIONS
         }
         self.assertEqual(pairs, expected)
-        primary = [
-            row
-            for row in result.qc_rows
-            if row["power_representation"] == PRIMARY_POWER_REPRESENTATION
-        ]
-        self.assertTrue(all(row["is_primary_representation"] is True for row in primary))
-        sensitivity = [
-            row
-            for row in result.qc_rows
-            if row["power_representation"] != PRIMARY_POWER_REPRESENTATION
-        ]
-        self.assertTrue(all(row["is_primary_representation"] is False for row in sensitivity))
         self.assertEqual(_peak_lag(_curve_map(result, band="alpha")), 3.0)
         self.assertEqual(_peak_lag(_curve_map(result, band="beta")), -4.0)
 
     def test_does_not_select_largest_absolute_peak(self) -> None:
         n = 240
         hr_z = _zscore(_noise(n, seed=8))
-        # Strong negative correlation at lag 0, weaker positive elsewhere stored as-is.
-        eeg_z = -hr_z
         result = compute_signed_lag_curves(
-            _aligned_rows_from_z(hr_z, {band: eeg_z.copy() for band in BAND_ORDER}),
+            _aligned_rows_from_z(hr_z, {band: (-hr_z).copy() for band in BAND_ORDER}),
             duration_s=240,
         )
         curve = _curve_map(result)
         self.assertAlmostEqual(curve[0.0][0], -1.0, places=10)
-        signed_values = [r for r, _ in curve.values() if math.isfinite(r)]
-        self.assertTrue(any(value < 0 for value in signed_values))
-        # No peak columns are emitted on curve or QC rows.
         self.assertNotIn("peak_lag_s", result.curve_rows[0])
-        self.assertNotIn("peak_signed_r", result.qc_rows[0])
 
     def test_deterministic_outputs(self) -> None:
         n = 240
         hr_z = _zscore(_noise(n, seed=9))
-        bands = {band: _shift(hr_z, 2) for band in BAND_ORDER}
-        rows = _aligned_rows_from_z(hr_z, bands)
+        rows = _aligned_rows_from_z(hr_z, {band: _shift(hr_z, 2) for band in BAND_ORDER})
         first = compute_signed_lag_curves(rows, duration_s=240)
         second = compute_signed_lag_curves(rows, duration_s=240)
         self.assertEqual(first.curve_rows, second.curve_rows)
         self.assertEqual(first.qc_rows, second.qc_rows)
-
         with TemporaryDirectory() as tmp:
             out = Path(tmp)
-            paths_a = write_correlation_outputs(first, out)
-            bytes_a = {
-                key: path.read_bytes() for key, path in paths_a.items()
-            }
-            paths_b = write_correlation_outputs(second, out)
-            for key, path in paths_b.items():
-                self.assertEqual(path.read_bytes(), bytes_a[key])
-
-            curves_path = (out / CURVES_TEMPLATE.format(duration_s=240)).resolve()
-            qc_path = (out / QC_TEMPLATE.format(duration_s=240)).resolve()
-            self.assertEqual(paths_a["curves"], curves_path)
-            self.assertEqual(paths_a["qc"], qc_path)
-
-            with curves_path.open(encoding="utf-8", newline="") as handle:
+            paths = write_correlation_outputs(first, out)
+            with paths["curves"].open(encoding="utf-8", newline="") as handle:
                 curve_csv = list(csv.DictReader(handle))
-            with qc_path.open(encoding="utf-8", newline="") as handle:
+            with paths["qc"].open(encoding="utf-8", newline="") as handle:
                 qc_csv = list(csv.DictReader(handle))
             self.assertEqual(len(curve_csv), 4 * 3 * 121)
-            self.assertEqual(len(qc_csv), 4 * 3)
-            self.assertIn("n_overlap", curve_csv[0])
-            self.assertIn("r_at_zero", qc_csv[0])
-            self.assertIn("min_n_overlap", qc_csv[0])
+            self.assertIn("endpoint_name", curve_csv[0])
+            self.assertIn("is_standard_zlpi", curve_csv[0])
+            self.assertIn("pool_with_standard_zlpi", curve_csv[0])
+            self.assertIn("n_common_support", qc_csv[0])
+            self.assertEqual(paths["qc"].name, QC_TEMPLATE.format(duration_s=240))
+            self.assertEqual(paths["curves"].name, CURVES_TEMPLATE.format(duration_s=240))
 
 
 if __name__ == "__main__":

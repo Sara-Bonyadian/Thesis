@@ -47,10 +47,34 @@ class TestConfirmatoryMasterConfig(unittest.TestCase):
         )
         self.assertEqual(cfg.durations.all_s, EXPECTED_DURATIONS_S)
         self.assertEqual(cfg.durations.primary_s, 240)
-        self.assertEqual((cfg.lag.min_s, cfg.lag.max_s, cfg.lag.step_s), (-60, 60, 1))
+        self.assertEqual(cfg.lag.step_s, 1)
+        self.assertEqual((cfg.lag.min_s, cfg.lag.max_s), (-60, 60))
+        self.assertEqual(
+            (cfg.lag.by_duration[240].min_s, cfg.lag.by_duration[240].max_s),
+            (-60, 60),
+        )
+        self.assertEqual(
+            (cfg.lag.by_duration[120].min_s, cfg.lag.by_duration[120].max_s),
+            (-30, 30),
+        )
+        self.assertEqual(
+            (cfg.lag.by_duration[60].min_s, cfg.lag.by_duration[60].max_s),
+            (-20, 20),
+        )
         self.assertEqual(cfg.endpoints.zlpi_flanks_s, (20, 60))
         self.assertEqual(cfg.endpoints.shoulders_s, (5, 15))
         self.assertEqual(cfg.endpoints.peak_center_equivalence_s, 2)
+        self.assertEqual(cfg.endpoints.by_duration[240].name, "zlpi")
+        self.assertEqual(
+            cfg.endpoints.by_duration[120].name, "mid_window_proximal_index"
+        )
+        self.assertEqual(
+            cfg.endpoints.by_duration[60].name, "short_window_proximal_index"
+        )
+        self.assertFalse(cfg.endpoints.by_duration[120].is_standard_zlpi)
+        self.assertFalse(cfg.endpoints.by_duration[120].pool_with_standard_zlpi)
+        self.assertFalse(cfg.endpoints.by_duration[60].pool_with_standard_zlpi)
+        self.assertTrue(cfg.endpoints.by_duration[180].pool_with_standard_zlpi)
         self.assertEqual(cfg.cardiac.hr_mode, "instantaneous")
         self.assertGreaterEqual(cfg.root_seed, 0)
         self.assertIn("confirmatory", str(cfg.output_root).casefold())
@@ -90,11 +114,22 @@ class TestConfirmatoryMasterConfig(unittest.TestCase):
             (("confirmatory", "bands", "low_gamma"), [30, 44]),
             (("confirmatory", "durations", "all_s"), [240, 180, 120]),
             (("confirmatory", "durations", "primary_s"), 180),
-            (("confirmatory", "lag", "min_s"), -30),
             (("confirmatory", "lag", "step_s"), 5),
-            (("confirmatory", "endpoints", "zlpi_flanks_s"), [15, 60]),
+            (("confirmatory", "lag", "by_duration", 120, "max_s"), 60),
             (("confirmatory", "endpoints", "shoulders_s"), [5, 10]),
             (("confirmatory", "endpoints", "peak_center_equivalence_s"), 3),
+            (
+                ("confirmatory", "endpoints", "by_duration", 120, "name"),
+                "zlpi",
+            ),
+            (
+                ("confirmatory", "endpoints", "by_duration", 120, "pool_with_standard_zlpi"),
+                True,
+            ),
+            (
+                ("confirmatory", "endpoints", "by_duration", 240, "flanks_s"),
+                [15, 60],
+            ),
             (("confirmatory", "cardiac", "hr_mode"), "windowed"),
         ]
         for path, replacement in mutations:

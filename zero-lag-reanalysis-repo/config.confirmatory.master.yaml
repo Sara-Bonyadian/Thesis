@@ -15,15 +15,40 @@ confirmatory:
     all_s: [240, 180, 120, 60]
     primary_s: 240
 
+  # Duration-specific lag grids (common-support M5). Do not override in dataset YAML.
   lag:
-    min_s: -60
-    max_s: 60
     step_s: 1
+    by_duration:
+      240: {min_s: -60, max_s: 60}   # standard ZLPI input
+      180: {min_s: -60, max_s: 60}   # standard ZLPI input
+      120: {min_s: -30, max_s: 30}   # MWPI sensitivity only
+      60:  {min_s: -20, max_s: 20}   # SWPI sensitivity only
 
+  # Named endpoint contracts (computed in M6). D120/D60 are never pooled with ZLPI.
   endpoints:
-    zlpi_flanks_s: [20, 60]
     shoulders_s: [5, 15]
     peak_center_equivalence_s: 2
+    by_duration:
+      240:
+        name: zlpi
+        flanks_s: [20, 60]
+        is_standard_zlpi: true
+        pool_with_standard_zlpi: true
+      180:
+        name: zlpi
+        flanks_s: [20, 60]
+        is_standard_zlpi: true
+        pool_with_standard_zlpi: true
+      120:
+        name: mid_window_proximal_index   # MWPI; not ZLPI
+        flanks_s: [20, 30]
+        is_standard_zlpi: false
+        pool_with_standard_zlpi: false
+      60:
+        name: short_window_proximal_index # SWPI; not ZLPI
+        flanks_s: [10, 20]
+        is_standard_zlpi: false
+        pool_with_standard_zlpi: false
 
   cardiac:
     hr_mode: instantaneous

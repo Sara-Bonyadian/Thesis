@@ -11,6 +11,11 @@ from .correlation import (
     run_confirmatory_correlations,
     write_correlation_outputs,
 )
+from .duration_contracts import (
+    DURATION_ANALYSIS_CONTRACTS,
+    contract_for_duration,
+    standard_zlpi_pool_durations,
+)
 from .harmonize import (
     harmonize_observation,
     write_harmonize_outputs,
@@ -30,10 +35,12 @@ from .protocol_audit import (
 __all__ = [
     "ConfirmatoryDatasetConfig",
     "ConfirmatoryMasterConfig",
+    "DURATION_ANALYSIS_CONTRACTS",
     "load_dataset_config",
     "load_master_config",
     "compute_multitaper_power",
     "compute_signed_lag_curves",
+    "contract_for_duration",
     "extract_multitaper_file",
     "extract_multitaper_from_raw",
     "harmonize_observation",
@@ -41,6 +48,7 @@ __all__ = [
     "reconstruct_instant_hr_file",
     "run_confirmatory_correlations",
     "run_protocol_audit",
+    "standard_zlpi_pool_durations",
     "write_correlation_outputs",
     "write_duration_eligibility",
     "write_harmonize_outputs",

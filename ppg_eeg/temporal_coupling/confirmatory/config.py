@@ -10,19 +10,28 @@ import yaml
 
 SCHEMA_VERSION = 1
 
+from .duration_contracts import (
+    DURATION_ANALYSIS_CONTRACTS,
+    ENDPOINT_ZLPI,
+    EXPECTED_DURATIONS_S,
+    EXPECTED_LAG_STEP_S,
+    EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
+    EXPECTED_PRIMARY_DURATION_S,
+    EXPECTED_SHOULDERS_S,
+    STANDARD_ZLPI_DURATIONS_S,
+    STANDARD_ZLPI_LAG_MAX_S,
+    ZLPI_FLANKS_S,
+)
+
 EXPECTED_BANDS_HZ: dict[str, tuple[float, float]] = {
     "theta": (4.0, 7.0),
     "alpha": (8.0, 12.0),
     "beta": (13.0, 29.0),
     "low_gamma": (30.0, 45.0),
 }
-EXPECTED_DURATIONS_S = (240, 180, 120, 60)
-EXPECTED_PRIMARY_DURATION_S = 240
-EXPECTED_LAG_RANGE_S = (-60, 60)
-EXPECTED_LAG_STEP_S = 1
-EXPECTED_ZLPI_FLANKS_S = (20, 60)
-EXPECTED_SHOULDERS_S = (5, 15)
-EXPECTED_PEAK_CENTER_EQUIVALENCE_S = 2
+# Primary ZLPI lag envelope (D240/D180). Duration-specific grids live in contracts.
+EXPECTED_LAG_RANGE_S = (-STANDARD_ZLPI_LAG_MAX_S, STANDARD_ZLPI_LAG_MAX_S)
+EXPECTED_ZLPI_FLANKS_S = ZLPI_FLANKS_S
 EXPECTED_HR_MODE = "instantaneous"
 
 
@@ -47,17 +56,49 @@ class DurationConfig:
 
 
 @dataclass(frozen=True)
-class LagConfig:
+class DurationLagConfig:
     min_s: int
     max_s: int
+
+
+@dataclass(frozen=True)
+class LagConfig:
+    """Shared lag step plus duration-specific symmetric grids."""
+
     step_s: int
+    by_duration: dict[int, DurationLagConfig]
+
+    @property
+    def min_s(self) -> int:
+        """Widest lag lower bound (standard ZLPI envelope)."""
+        return min(spec.min_s for spec in self.by_duration.values())
+
+    @property
+    def max_s(self) -> int:
+        """Widest lag upper bound (standard ZLPI envelope)."""
+        return max(spec.max_s for spec in self.by_duration.values())
+
+
+@dataclass(frozen=True)
+class DurationEndpointConfig:
+    name: str
+    flanks_s: tuple[int, int]
+    is_standard_zlpi: bool
+    pool_with_standard_zlpi: bool
 
 
 @dataclass(frozen=True)
 class EndpointConfig:
-    zlpi_flanks_s: tuple[int, int]
+    """Shared shoulders plus duration-specific named endpoint contracts."""
+
     shoulders_s: tuple[int, int]
     peak_center_equivalence_s: int
+    by_duration: dict[int, DurationEndpointConfig]
+
+    @property
+    def zlpi_flanks_s(self) -> tuple[int, int]:
+        """Standard ZLPI flanks used by D240/D180 only."""
+        return self.by_duration[EXPECTED_PRIMARY_DURATION_S].flanks_s
 
 
 @dataclass(frozen=True)
@@ -306,31 +347,64 @@ def load_master_config(path: str | Path) -> ConfirmatoryMasterConfig:
 
     lag_raw = _as_mapping(raw["lag"], path="confirmatory.lag")
     _reject_unknown_keys(
-        lag_raw, allowed={"min_s", "max_s", "step_s"}, path="confirmatory.lag"
+        lag_raw, allowed={"step_s", "by_duration"}, path="confirmatory.lag"
     )
     _require_keys(
-        lag_raw, required={"min_s", "max_s", "step_s"}, path="confirmatory.lag"
+        lag_raw, required={"step_s", "by_duration"}, path="confirmatory.lag"
     )
-    lag = LagConfig(
-        min_s=_as_int(lag_raw["min_s"], path="confirmatory.lag.min_s"),
-        max_s=_as_int(lag_raw["max_s"], path="confirmatory.lag.max_s"),
-        step_s=_as_int(lag_raw["step_s"], path="confirmatory.lag.step_s"),
-    )
-    if (lag.min_s, lag.max_s) != EXPECTED_LAG_RANGE_S:
-        raise ValueError(
-            "confirmatory.lag range must be exactly "
-            f"{EXPECTED_LAG_RANGE_S[0]} to {EXPECTED_LAG_RANGE_S[1]} s."
-        )
-    if lag.step_s != EXPECTED_LAG_STEP_S:
+    lag_step_s = _as_int(lag_raw["step_s"], path="confirmatory.lag.step_s")
+    if lag_step_s != EXPECTED_LAG_STEP_S:
         raise ValueError(
             f"confirmatory.lag.step_s must be {EXPECTED_LAG_STEP_S}."
         )
+    lag_by_duration_raw = _as_mapping(
+        lag_raw["by_duration"], path="confirmatory.lag.by_duration"
+    )
+    # YAML may emit integer or string keys; normalize to int durations.
+    normalized_lag_keys = {
+        int(key): value for key, value in lag_by_duration_raw.items()
+    }
+    if tuple(sorted(normalized_lag_keys)) != tuple(sorted(EXPECTED_DURATIONS_S)):
+        raise ValueError(
+            "confirmatory.lag.by_duration must define exact durations "
+            f"{list(EXPECTED_DURATIONS_S)}."
+        )
+    lag_by_duration: dict[int, DurationLagConfig] = {}
+    for duration in EXPECTED_DURATIONS_S:
+        contract = DURATION_ANALYSIS_CONTRACTS[duration]
+        entry = _as_mapping(
+            normalized_lag_keys[duration],
+            path=f"confirmatory.lag.by_duration.{duration}",
+        )
+        _reject_unknown_keys(
+            entry,
+            allowed={"min_s", "max_s"},
+            path=f"confirmatory.lag.by_duration.{duration}",
+        )
+        _require_keys(
+            entry,
+            required={"min_s", "max_s"},
+            path=f"confirmatory.lag.by_duration.{duration}",
+        )
+        min_s = _as_int(
+            entry["min_s"], path=f"confirmatory.lag.by_duration.{duration}.min_s"
+        )
+        max_s = _as_int(
+            entry["max_s"], path=f"confirmatory.lag.by_duration.{duration}.max_s"
+        )
+        if (min_s, max_s) != (contract.lag_min_s, contract.lag_max_s):
+            raise ValueError(
+                f"confirmatory.lag.by_duration.{duration} must be exactly "
+                f"[{contract.lag_min_s}, {contract.lag_max_s}]."
+            )
+        lag_by_duration[duration] = DurationLagConfig(min_s=min_s, max_s=max_s)
+    lag = LagConfig(step_s=lag_step_s, by_duration=lag_by_duration)
 
     endpoints_raw = _as_mapping(raw["endpoints"], path="confirmatory.endpoints")
     endpoint_keys = {
-        "zlpi_flanks_s",
         "shoulders_s",
         "peak_center_equivalence_s",
+        "by_duration",
     }
     _reject_unknown_keys(
         endpoints_raw, allowed=endpoint_keys, path="confirmatory.endpoints"
@@ -338,38 +412,119 @@ def load_master_config(path: str | Path) -> ConfirmatoryMasterConfig:
     _require_keys(
         endpoints_raw, required=endpoint_keys, path="confirmatory.endpoints"
     )
-    endpoints = EndpointConfig(
-        zlpi_flanks_s=_as_int_pair(
-            endpoints_raw["zlpi_flanks_s"],
-            path="confirmatory.endpoints.zlpi_flanks_s",
-        ),
-        shoulders_s=_as_int_pair(
-            endpoints_raw["shoulders_s"],
-            path="confirmatory.endpoints.shoulders_s",
-        ),
-        peak_center_equivalence_s=_as_int(
-            endpoints_raw["peak_center_equivalence_s"],
-            path="confirmatory.endpoints.peak_center_equivalence_s",
-        ),
+    shoulders_s = _as_int_pair(
+        endpoints_raw["shoulders_s"],
+        path="confirmatory.endpoints.shoulders_s",
     )
-    if endpoints.zlpi_flanks_s != EXPECTED_ZLPI_FLANKS_S:
-        raise ValueError(
-            "confirmatory.endpoints.zlpi_flanks_s must be exactly "
-            f"{list(EXPECTED_ZLPI_FLANKS_S)}."
-        )
-    if endpoints.shoulders_s != EXPECTED_SHOULDERS_S:
+    if shoulders_s != EXPECTED_SHOULDERS_S:
         raise ValueError(
             "confirmatory.endpoints.shoulders_s must be exactly "
             f"{list(EXPECTED_SHOULDERS_S)}."
         )
-    if (
-        endpoints.peak_center_equivalence_s
-        != EXPECTED_PEAK_CENTER_EQUIVALENCE_S
-    ):
+    peak_center_equivalence_s = _as_int(
+        endpoints_raw["peak_center_equivalence_s"],
+        path="confirmatory.endpoints.peak_center_equivalence_s",
+    )
+    if peak_center_equivalence_s != EXPECTED_PEAK_CENTER_EQUIVALENCE_S:
         raise ValueError(
             "confirmatory.endpoints.peak_center_equivalence_s must be "
             f"{EXPECTED_PEAK_CENTER_EQUIVALENCE_S}."
         )
+    endpoints_by_duration_raw = _as_mapping(
+        endpoints_raw["by_duration"], path="confirmatory.endpoints.by_duration"
+    )
+    normalized_endpoint_keys = {
+        int(key): value for key, value in endpoints_by_duration_raw.items()
+    }
+    if tuple(sorted(normalized_endpoint_keys)) != tuple(sorted(EXPECTED_DURATIONS_S)):
+        raise ValueError(
+            "confirmatory.endpoints.by_duration must define exact durations "
+            f"{list(EXPECTED_DURATIONS_S)}."
+        )
+    endpoint_by_duration: dict[int, DurationEndpointConfig] = {}
+    for duration in EXPECTED_DURATIONS_S:
+        contract = DURATION_ANALYSIS_CONTRACTS[duration]
+        entry = _as_mapping(
+            normalized_endpoint_keys[duration],
+            path=f"confirmatory.endpoints.by_duration.{duration}",
+        )
+        entry_keys = {
+            "name",
+            "flanks_s",
+            "is_standard_zlpi",
+            "pool_with_standard_zlpi",
+        }
+        _reject_unknown_keys(
+            entry,
+            allowed=entry_keys,
+            path=f"confirmatory.endpoints.by_duration.{duration}",
+        )
+        _require_keys(
+            entry,
+            required=entry_keys,
+            path=f"confirmatory.endpoints.by_duration.{duration}",
+        )
+        name = str(entry["name"]).strip()
+        flanks_s = _as_int_pair(
+            entry["flanks_s"],
+            path=f"confirmatory.endpoints.by_duration.{duration}.flanks_s",
+        )
+        is_standard_zlpi = bool(entry["is_standard_zlpi"])
+        pool_with_standard_zlpi = bool(entry["pool_with_standard_zlpi"])
+        if name != contract.endpoint_name:
+            raise ValueError(
+                f"confirmatory.endpoints.by_duration.{duration}.name must be "
+                f"{contract.endpoint_name!r}."
+            )
+        if flanks_s != contract.flanks_s:
+            raise ValueError(
+                f"confirmatory.endpoints.by_duration.{duration}.flanks_s must be "
+                f"exactly {list(contract.flanks_s)}."
+            )
+        if is_standard_zlpi != contract.is_standard_zlpi:
+            raise ValueError(
+                f"confirmatory.endpoints.by_duration.{duration}.is_standard_zlpi "
+                f"must be {contract.is_standard_zlpi}."
+            )
+        if pool_with_standard_zlpi != contract.pool_with_standard_zlpi:
+            raise ValueError(
+                "confirmatory.endpoints.by_duration."
+                f"{duration}.pool_with_standard_zlpi must be "
+                f"{contract.pool_with_standard_zlpi}."
+            )
+        if is_standard_zlpi and name != ENDPOINT_ZLPI:
+            raise ValueError("Standard ZLPI durations must use endpoint name 'zlpi'.")
+        if (not is_standard_zlpi) and name == ENDPOINT_ZLPI:
+            raise ValueError(
+                "Non-ZLPI durations must not use endpoint name 'zlpi'."
+            )
+        if is_standard_zlpi != pool_with_standard_zlpi:
+            raise ValueError(
+                "is_standard_zlpi and pool_with_standard_zlpi must match for "
+                f"duration {duration}."
+            )
+        endpoint_by_duration[duration] = DurationEndpointConfig(
+            name=name,
+            flanks_s=flanks_s,
+            is_standard_zlpi=is_standard_zlpi,
+            pool_with_standard_zlpi=pool_with_standard_zlpi,
+        )
+    # Guard against accidental pooling of D120/D60 into the ZLPI set.
+    pooled = tuple(
+        duration
+        for duration, spec in endpoint_by_duration.items()
+        if spec.pool_with_standard_zlpi
+    )
+    if pooled != STANDARD_ZLPI_DURATIONS_S:
+        raise ValueError(
+            "Standard ZLPI pool must be exactly durations "
+            f"{list(STANDARD_ZLPI_DURATIONS_S)}, got {list(pooled)}."
+        )
+    endpoints = EndpointConfig(
+        shoulders_s=shoulders_s,
+        peak_center_equivalence_s=peak_center_equivalence_s,
+        by_duration=endpoint_by_duration,
+    )
 
     cardiac_raw = _as_mapping(raw["cardiac"], path="confirmatory.cardiac")
     _reject_unknown_keys(
