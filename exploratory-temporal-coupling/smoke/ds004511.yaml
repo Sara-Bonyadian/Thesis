@@ -1,19 +1,28 @@
-# Temporal EEG–cardiac coupling for Mindfulness project (all subjects, part1/part2, steps 1–3).
-# Cardiac HR/HRV from embedded photosensor (PPG peak detection), not ecg.
-# Analysis settings match config.smoke.mindfulness.temporal_coupling.yaml with smoke recommendations applied.
-# Expect ~164 paired EEG+ECG observations across 29 mbd folders.
+# Smoke config for temporal EEG–cardiac coupling (ds004511 rest).
+# 3-subject cohort before running exploratory-temporal-coupling/datasets/ds004511.yaml on full raw data.
+# See temporal_coupling/README.md and exploratory-temporal-coupling/smoke/ds003838.yaml.
 
-dataset_id: mindfulness
+dataset_id: ds004511
 
 paths:
-  raw_root: ./data/raw/Mindfulness project
-  out_root: ./derivatives/run_mindfulness_temporal_coupling
-  base_root: ./derivatives/run_mindfulness_fast
+  raw_root: ./data/raw/ds004511
+  out_root: ./derivatives/smoke_ds004511_temporal_coupling
+  base_root: ./derivatives/smoke_ds004511_fast
 
-subjects: []
-tasks: []
-conditions: []
-sessions: []
+# Subject IDs match BIDS entity after "sub-" (e.g. sub-S210317 → S210317).
+subjects:
+  - S200116
+  - S210317
+  - S201210
+
+tasks:
+  - rest
+
+conditions:
+  - rest
+
+sessions:
+  - "01"
 
 eeg:
   l_freq: 1.0
@@ -22,6 +31,7 @@ eeg:
   reference: average
 
 ppg:
+  # null = use full EEG/ECG overlap
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4
@@ -42,16 +52,26 @@ temporal_coupling:
     envelope_smooth_s: 2.0
     envelope_output_fs_hz: 10
     rois:
-      theta: [Fz, FCz, Cz]
-      alpha: [Pz, Oz, O1, O2]
-      beta: [Fz, FCz, Cz, C3, C4]
+      theta: [Fz, F1, F2, FCz, FC1, FC2, Cz]
+      alpha: [Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2]
+      beta: [Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4]
     debug_plot:
-      enabled: false
+      enabled: true
+      start_time_s: 40
+      end_time_s: 60
+      auto_window_s: 20
+      also_auto_window: true
+      save_psd: true
+      # ds004511 EDF uses numeric channel labels (1–128), not 10–5 names.
+      channels:
+        theta: "64"
+        alpha: "1"
+        beta: "64"
 
   cardiac:
-    channel: photosensor
-    signal_type: ppg
-    detector: ppg_peak
+    channel: auto
+    signal_type: ecg
+    detector: auto
     ecg:
       bandpass_hz: [5, 30]
       min_peak_distance_s: 0.45
@@ -67,7 +87,16 @@ temporal_coupling:
     min_valid_hr_percent: 50.0
     min_valid_hrv_percent: 30.0
     debug_plot:
-      enabled: false
+      enabled: true
+      windows:
+        - [35, 45]
+        - [50, 60]
+        - [65, 75]
+      auto_window_s: 10
+      overview_window_s: 40
+      save_overview: true
+      also_auto_window: true
+      max_plots_per_subject: 5
 
   resample:
     fs_hz: 1.0
@@ -77,18 +106,17 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
-    n_permutations: 100
+    n_permutations: 0
     detrend: false
     rolling_detrend_window_s: null
-    edge_margin_s: 5
+    edge_margin_s: 0
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto
     peak_selection: abs_peak
 
   events:
-    enabled: true
-    subject_balanced_average: true
+    enabled: false
     hr_percentile: 10
     eeg_threshold_sd: 2.0
     epoch_pre_s: 60
@@ -109,4 +137,3 @@ temporal_coupling:
 
   group:
     plot_common_lag_only: true
-    n_group_permutations: 100

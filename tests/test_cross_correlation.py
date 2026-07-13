@@ -146,7 +146,7 @@ class TestCrossCorrelation(unittest.TestCase):
         self.assertEqual(point.n_overlap, 5)
 
     def test_compute_observation_xcorr_nine_pairs(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         n = 200
         times = np.arange(n, dtype=float)
         aligned_df = pd.DataFrame(
@@ -203,7 +203,7 @@ class TestCrossCorrelation(unittest.TestCase):
             self.assertEqual(len({row["pair"] for row in curve_rows}), 9)
 
     def test_build_qc_summary_warnings(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         peaks_df = pd.DataFrame(
             [
                 {

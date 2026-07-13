@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-from ...datasets import CanonicalObservation, build_observations
+from ..datasets import CanonicalObservation, build_observations
 from .config import (
     EXPECTED_DURATIONS_S,
     ConfirmatoryDatasetConfig,

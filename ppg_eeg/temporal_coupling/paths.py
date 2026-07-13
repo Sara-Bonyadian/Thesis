@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..datasets import CanonicalObservation
-from ..output_layout import safe_subject_dir_name
+from ..core_eeg_ppg.output_layout import safe_subject_dir_name
 from .config import TemporalCouplingConfig
 
 

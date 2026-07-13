@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from ...datasets import build_observations
+from ..datasets import build_observations
 from .config import load_dataset_config, load_master_config
 from .correlation import run_confirmatory_correlations
 from .endpoints import run_confirmatory_endpoints
@@ -32,7 +32,7 @@ from .protocol_audit import (
 from .report import run_confirmatory_reporting
 from .production import master_config_path
 
-REPO_DEFAULT = Path(__file__).resolve().parents[3]
+REPO_DEFAULT = Path(__file__).resolve().parents[2]
 CONFIG_DIR_DEFAULT = REPO_DEFAULT / "zero-lag-reanalysis-repo"
 HIIT_SMOKE_DIR = CONFIG_DIR_DEFAULT / "smoke" / "hiit"
 CONFIRMATORY_SMOKE = HIIT_SMOKE_DIR / "confirmatory.yaml"

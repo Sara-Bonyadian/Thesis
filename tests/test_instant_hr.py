@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.instant_hr import (
+from ppg_eeg.confirmatory.instant_hr import (
     reconstruct_instant_hr,
     reconstruct_instant_hr_file,
 )

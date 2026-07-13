@@ -13,8 +13,8 @@ import numpy as np
 from scipy.signal import filtfilt, iirnotch
 from scipy.signal.windows import dpss
 
-from ...eeg import preprocess_eeg
-from ...features_core import _read_raw
+from ..core_eeg_ppg.eeg import preprocess_eeg
+from ..core_eeg_ppg.features_core import _read_raw
 
 FEATURES_FILENAME = "features_multitaper_power.csv"
 QC_FILENAME = "multitaper_qc.csv"

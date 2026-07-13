@@ -1,27 +1,23 @@
-# Smoke config for temporal EEG–cardiac coupling (HIIT).
-# Small cohort before config.run.hiit_40_ppg.temporal_coupling.yaml on full raw data.
-# Subject IDs are bare participant numbers (e.g. 01 → HIIT_01_PH / HIIT_01_PS).
-# Cardiac: embedded photosensor channel (ppg_peak detection).
+# HIIT temporal coupling: 40 participants, 4 task groups, PPG-only cardiac (photosensor).
 #
-# Run:
-#   python -m ppg_eeg.temporal_coupling --config config.smoke.hiit.temporal_coupling.yaml --stage all
+# Same data model as exploratory-temporal-coupling/datasets/hiit_40.yaml, but HR/HRV are
+# computed from the embedded photosensor channel using ppg_peak detection.
+#
+# Output: derivatives/run_hiit_40_ppg_temporal_coupling/
+#
+# After stages 0–4, run the directional summary plot:
+#   python -m ppg_eeg.temporal_coupling.directional_group_plot \
+#     --config exploratory-temporal-coupling/datasets/hiit_40_ppg.yaml
 
 dataset_id: hiit
 hiit_partition_mode: task_only
 
 paths:
   raw_root: ./data/raw/HIIT
-  out_root: ./derivatives/smoke_hiit_temporal_coupling
-  base_root: ./derivatives/smoke_hiit_fast
+  out_root: ./derivatives/run_hiit_40_ppg_temporal_coupling
+  base_root: ./derivatives/run_hiit_fast
 
-subjects:
-  - "01"
-  - "02"
-  - "03"
-  - "04"
-  - "05"
-  - "06"
-  - "07"
+subjects: []
 
 tasks:
   - rest
@@ -42,7 +38,6 @@ eeg:
   reference: average
 
 ppg:
-  # null = use full EEG/PPG overlap; audit caps lag by overlap/3.
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4

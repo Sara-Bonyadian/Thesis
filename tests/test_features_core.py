@@ -59,7 +59,7 @@ class TestFeaturesCore(unittest.TestCase):
         }
         with (
             patch(
-                "ppg_eeg.features_core.mne.io.read_raw_eeglab",
+                "ppg_eeg.core_eeg_ppg.features_core.mne.io.read_raw_eeglab",
                 side_effect=NotImplementedError("Please use HDF reader for matlab v7.3 files, e.g. h5py"),
             ),
             patch("pymatreader.read_mat", return_value={"EEG": fake_eeg}),
@@ -89,7 +89,7 @@ class TestFeaturesCore(unittest.TestCase):
         )
 
         raw = _synthetic_raw()
-        with patch("ppg_eeg.features_core._read_raw", side_effect=lambda *_args, **_kwargs: raw.copy()):
+        with patch("ppg_eeg.core_eeg_ppg.features_core._read_raw", side_effect=lambda *_args, **_kwargs: raw.copy()):
             result = extract_core_feature_tables([obs], cfg)
 
         self.assertEqual(len(result.eeg_features), 1)
@@ -183,7 +183,7 @@ class TestFeaturesCore(unittest.TestCase):
             ]
         )
 
-        with patch("ppg_eeg.features_core._read_raw", side_effect=RuntimeError("raw loading should be skipped")):
+        with patch("ppg_eeg.core_eeg_ppg.features_core._read_raw", side_effect=RuntimeError("raw loading should be skipped")):
             result = extract_core_feature_tables(
                 [obs],
                 cfg,
@@ -266,7 +266,7 @@ class TestFeaturesCore(unittest.TestCase):
             ]
         )
 
-        with patch("ppg_eeg.features_core._read_raw", side_effect=RuntimeError("raw loading should be skipped")):
+        with patch("ppg_eeg.core_eeg_ppg.features_core._read_raw", side_effect=RuntimeError("raw loading should be skipped")):
             result = extract_core_feature_tables(
                 [obs],
                 cfg,
@@ -350,7 +350,7 @@ class TestFeaturesCore(unittest.TestCase):
             ]
         )
 
-        with patch("ppg_eeg.features_core._read_raw", side_effect=RuntimeError("raw loading should be skipped")):
+        with patch("ppg_eeg.core_eeg_ppg.features_core._read_raw", side_effect=RuntimeError("raw loading should be skipped")):
             result = extract_core_feature_tables(
                 [obs],
                 cfg,

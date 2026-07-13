@@ -339,7 +339,15 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Plot median ± bootstrap CI cross-correlation curves split by peak-lag direction.",
     )
-    ap.add_argument("--config", type=str, required=True, help="Path to temporal coupling YAML config.")
+    ap.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help=(
+            "Path to exploratory temporal-coupling YAML "
+            "(under exploratory-temporal-coupling/)."
+        ),
+    )
     ap.add_argument(
         "--partition",
         type=str,

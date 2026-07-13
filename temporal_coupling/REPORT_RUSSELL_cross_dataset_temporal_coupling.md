@@ -80,7 +80,7 @@ After Stage 1b + 1c, run:
 
 ```bash
 .venv/bin/python -m ppg_eeg.temporal_coupling \
-  --config config.run.<dataset>.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/<dataset>.yaml \
   --recommend-config-values
 ```
 

@@ -15,8 +15,8 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import hilbert, welch
 
-from ..eeg import preprocess_eeg
-from ..features_core import _read_raw
+from ..core_eeg_ppg.eeg import preprocess_eeg
+from ..core_eeg_ppg.features_core import _read_raw
 from .config import TemporalCouplingConfig
 from .cardiac_common import eeg_segment_bounds
 from .data_audit import audit_output_path, group_output_dir

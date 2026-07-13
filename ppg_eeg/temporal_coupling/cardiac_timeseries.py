@@ -22,9 +22,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from ..features_core import _read_raw
-from ..output_layout import safe_subject_dir_name
-from ..ppg import mean_hr_bpm, mean_rr_ms, rmssd_ms, sdnn_ms
+from ..core_eeg_ppg.features_core import _read_raw
+from ..core_eeg_ppg.output_layout import safe_subject_dir_name
+from ..core_eeg_ppg.ppg import mean_hr_bpm, mean_rr_ms, rmssd_ms, sdnn_ms
 from .cardiac_common import (
     CardiacDetectionResult,
     CardiacObservation,

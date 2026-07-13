@@ -7,8 +7,8 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.endpoints import fisher_z
-from ppg_eeg.temporal_coupling.confirmatory.peak_model import (
+from ppg_eeg.confirmatory.endpoints import fisher_z
+from ppg_eeg.confirmatory.peak_model import (
     FWHM_FACTOR,
     MIN_IDENTIFIABLE_A,
     MU_BOUND_S,

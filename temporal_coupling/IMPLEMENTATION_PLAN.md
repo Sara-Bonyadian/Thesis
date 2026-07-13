@@ -64,13 +64,13 @@ ppg_eeg/temporal_coupling/
 
 | Config | Dataset | Scope | Output root |
 |--------|---------|-------|-------------|
-| `config.smoke.ds003838.temporal_coupling.yaml` | ds003838 | rest, 3 subjects | `derivatives/smoke_ds003838_temporal_coupling/` |
+| `exploratory-temporal-coupling/smoke/ds003838.yaml` | ds003838 | rest, 3 subjects | `derivatives/smoke_ds003838_temporal_coupling/` |
 | `config.validation.ds003838.temporal_coupling.yaml` | ds003838 | **rest only** (reference) | `derivatives/validation_ds003838_temporal_coupling/` |
-| `config.run.ds003838.temporal_coupling.yaml` | ds003838 | **rest + memory** | `derivatives/run_ds003838_temporal_coupling/` |
-| `config.run.ds006848.temporal_coupling.yaml` | ds006848 | rest, verbalwm | `derivatives/run_ds006848_temporal_coupling/` |
-| `config.run.hiit.temporal_coupling.yaml` | HIIT | 8 conditions | `derivatives/run_hiit_temporal_coupling/` |
-| `config.run.ds003690.temporal_coupling.yaml` | ds003690 | gonogo, passive, simplert | `derivatives/run_ds003690_temporal_coupling/` |
-| `config.run.ds003816.temporal_coupling.yaml` | ds003816 | 7 tasks × sessions | `derivatives/run_ds003816_temporal_coupling/` |
+| `exploratory-temporal-coupling/datasets/ds003838.yaml` | ds003838 | **rest + memory** | `derivatives/run_ds003838_temporal_coupling/` |
+| `exploratory-temporal-coupling/datasets/ds006848.yaml` | ds006848 | rest, verbalwm | `derivatives/run_ds006848_temporal_coupling/` |
+| `exploratory-temporal-coupling/datasets/hiit.yaml` | HIIT | 8 conditions | `derivatives/run_hiit_temporal_coupling/` |
+| `exploratory-temporal-coupling/datasets/ds003690.yaml` | ds003690 | gonogo, passive, simplert | `derivatives/run_ds003690_temporal_coupling/` |
+| `exploratory-temporal-coupling/datasets/ds003816.yaml` | ds003816 | 7 tasks × sessions | `derivatives/run_ds003816_temporal_coupling/` |
 
 All **run** configs share the same `temporal_coupling` block as validation (ROIs, `fs_hz: 1.0`, `lag_step_s: 5`, `n_permutations: 100`, events on, `n_group_permutations: 100`). Dataset-specific tuning (cardiac channel, `min_overlap_s`, window sizes) is expected — see **Config recommendation** below.
 
@@ -197,7 +197,7 @@ Missing channels: skip, do not crash; report in `eeg_envelope_qc.csv`.
 **Output:** Printed YAML snippet; apply manually to config, then rerun **1b → 1c** (cardiac windows) or **1c only** (`min_overlap_s`).
 
 ```bash
-$PY -m ppg_eeg.temporal_coupling --config config.run.ds003816.temporal_coupling.yaml --recommend-config-values
+$PY -m ppg_eeg.temporal_coupling --config exploratory-temporal-coupling/datasets/ds003816.yaml --recommend-config-values
 ```
 
 **Example (ds003816 after partial run):** `min_overlap_s: 20`, `hr_window_s: 10`, `mean_rr_window_s: 10`, `hrv_window_s: 20`.
@@ -353,7 +353,7 @@ Config `cross_correlation.peak_selection`:
 
 ## Config Reference (run configs)
 
-Shared `temporal_coupling` block across `config.run.*.temporal_coupling.yaml` and `config.validation.ds003838.temporal_coupling.yaml`:
+Shared `temporal_coupling` block across `exploratory-temporal-coupling/datasets/*.yaml` and `config.validation.ds003838.temporal_coupling.yaml`:
 
 ```yaml
 temporal_coupling:
@@ -482,7 +482,7 @@ paths:
 
 ```bash
 PY=".venv/bin/python"
-CFG=config.run.ds006848.temporal_coupling.yaml   # or ds003838 / hiit
+CFG=exploratory-temporal-coupling/datasets/ds006848.yaml   # or ds003838 / hiit
 
 $PY -m ppg_eeg.temporal_coupling --config $CFG --stage 0
 # inspect group/data_audit.csv

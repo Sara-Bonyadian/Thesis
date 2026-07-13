@@ -10,9 +10,21 @@ from .run import run_temporal_coupling
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Within-subject temporal EEG–cardiac coupling pipeline.",
+        description=(
+            "Exploratory temporal EEG–cardiac coupling (Stages 0–4). "
+            "Configs: exploratory-temporal-coupling/datasets|smoke/*.yaml. "
+            "For confirmatory zero-lag use: python -m ppg_eeg.confirmatory"
+        ),
     )
-    ap.add_argument("--config", type=str, required=True, help="Path to YAML config.")
+    ap.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help=(
+            "Path to YAML under exploratory-temporal-coupling/ "
+            "(e.g. exploratory-temporal-coupling/smoke/ds003838.yaml)."
+        ),
+    )
     ap.add_argument(
         "--stage",
         type=str,

@@ -269,7 +269,7 @@ def read_signal_file_info(
 
     fmt = (data_format or "").casefold()
     if fmt == "bids_physio" or path.name.endswith("_physio.tsv.gz"):
-        from ..bids_physio import read_physio_channel_info
+        from ..core_eeg_ppg.bids_physio import read_physio_channel_info
 
         physio_info = read_physio_channel_info(path)
         if physio_info is not None:

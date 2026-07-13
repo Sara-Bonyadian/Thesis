@@ -151,7 +151,7 @@ flowchart TD
 
 ### Configuration: Modify
 
-- Preserve all `config.run.*.temporal_coupling.yaml` files as legacy provenance.
+- Preserve exploratory configs under `exploratory-temporal-coupling/` as legacy provenance.
 - Add confirmatory configs under [`zero-lag-reanalysis-repo/`](zero-lag-reanalysis-repo/): `master.yaml`, `datasets/<id>.yaml`, `smoke/<id>.yaml` (HIIT smoke package in `smoke/hiit/`).
 - Add `confirmatory/config.py`; parse shared dataset/path/filter fields through the current loader and strictly validate a new `confirmatory:` block.
 

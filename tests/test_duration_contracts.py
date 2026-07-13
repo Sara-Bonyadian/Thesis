@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ppg_eeg.temporal_coupling.confirmatory.duration_contracts import (
+from ppg_eeg.confirmatory.duration_contracts import (
     DURATION_ANALYSIS_CONTRACTS,
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,

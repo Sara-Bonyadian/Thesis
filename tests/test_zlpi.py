@@ -5,13 +5,13 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ppg_eeg.temporal_coupling.confirmatory.duration_contracts import (
+from ppg_eeg.confirmatory.duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_ZLPI,
     contract_for_duration,
 )
-from ppg_eeg.temporal_coupling.confirmatory.endpoints import (
+from ppg_eeg.confirmatory.endpoints import (
     FISHER_R_CLIP,
     METRICS_TEMPLATE,
     QC_TEMPLATE,

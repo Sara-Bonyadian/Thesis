@@ -1,4 +1,8 @@
-"""Strict configuration schema for the confirmatory zero-lag reanalysis."""
+"""Strict configuration schema for the confirmatory zero-lag reanalysis.
+
+Configs are loaded from ``zero-lag-reanalysis-repo/`` (``master.yaml``,
+``datasets/<id>.yaml``, ``smoke/<id>.yaml``).
+"""
 
 from __future__ import annotations
 

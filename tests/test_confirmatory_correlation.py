@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.correlation import (
+from ppg_eeg.confirmatory.correlation import (
     BAND_ORDER,
     CURVES_TEMPLATE,
     MID_WINDOW_ANALYSIS_ROLE,
@@ -28,7 +28,7 @@ from ppg_eeg.temporal_coupling.confirmatory.correlation import (
     lag_spec_for_duration,
     write_correlation_outputs,
 )
-from ppg_eeg.temporal_coupling.confirmatory.duration_contracts import (
+from ppg_eeg.confirmatory.duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_ZLPI,

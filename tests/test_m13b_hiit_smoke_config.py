@@ -4,16 +4,16 @@ import json
 import unittest
 from pathlib import Path
 
-from ppg_eeg.temporal_coupling.confirmatory.config import (
+from ppg_eeg.confirmatory.config import (
     load_dataset_config,
     load_master_config,
 )
-from ppg_eeg.temporal_coupling.confirmatory.production import (
+from ppg_eeg.confirmatory.production import (
     iter_dataset_config_paths,
     iter_smoke_config_paths,
     master_config_path,
 )
-from ppg_eeg.temporal_coupling.confirmatory.protocol_audit import protocol_spec
+from ppg_eeg.confirmatory.protocol_audit import protocol_spec
 
 
 class TestM13bHiitSmokeConfig(unittest.TestCase):

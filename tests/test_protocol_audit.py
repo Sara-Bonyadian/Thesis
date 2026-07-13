@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ppg_eeg.datasets import CanonicalObservation
-from ppg_eeg.temporal_coupling.confirmatory.protocol_audit import (
+from ppg_eeg.confirmatory.protocol_audit import (
     EXCLUSION_CODES,
     PROTOCOL_SPECS,
     EligibilityMetadata,

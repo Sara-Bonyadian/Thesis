@@ -232,7 +232,7 @@ def discover_config_dir(config_dir: str | Path | None = None) -> Path:
         return Path(config_dir).expanduser().resolve()
     here = Path(__file__).resolve()
     candidates = [
-        here.parents[3] / "zero-lag-reanalysis-repo",
+        here.parents[2] / "zero-lag-reanalysis-repo",
         Path.cwd() / "zero-lag-reanalysis-repo",
     ]
     for candidate in candidates:
@@ -1652,7 +1652,8 @@ def primary_blockers_summary(result: ProductionResult) -> list[str]:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Confirmatory production preflight and smoke orchestration (M13a)."
+            "Confirmatory production preflight and smoke orchestration (M13a). "
+            "Configs: zero-lag-reanalysis-repo/."
         )
     )
     parser.add_argument(
@@ -1665,7 +1666,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--config-dir",
         type=str,
         default=None,
-        help="Directory containing confirmatory master.yaml / datasets / smoke",
+        help=(
+            "Confirmatory config root (default: zero-lag-reanalysis-repo/). "
+            "Expects master.yaml, datasets/, smoke/."
+        ),
     )
     parser.add_argument(
         "--production-root",

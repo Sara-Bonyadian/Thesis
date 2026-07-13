@@ -4,7 +4,7 @@ import math
 import unittest
 from tempfile import TemporaryDirectory
 
-from ppg_eeg.temporal_coupling.confirmatory.group_tables import (
+from ppg_eeg.confirmatory.group_tables import (
     PAIRING_QC_FILENAME,
     PAIRED_CONTRASTS_FILENAME,
     SUBJECT_LEVEL_FILENAME,

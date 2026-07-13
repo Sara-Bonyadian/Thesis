@@ -33,19 +33,19 @@ zero-lag-reanalysis-repo/
 
 | | Exploratory | Confirmatory |
 |--|-------------|--------------|
-| Code | `ppg_eeg/temporal_coupling/` Stages 0–4 | `ppg_eeg/temporal_coupling/confirmatory/` |
-| Configs | repo-root `config.run.*.yaml`, `config.smoke.*.yaml` | **this folder** |
+| Code | `ppg_eeg/temporal_coupling/` Stages 0–4 | `ppg_eeg/confirmatory/` |
+| Configs | `exploratory-temporal-coupling/` | **this folder** |
 | Results | `derivatives/run_*`, `derivatives/smoke_*` | `derivatives/confirmatory_temporal_coupling/` |
 
 Raw data stays shared: `./data` (repo root).
 
 ## HIIT smoke (one folder)
 
-Everything for M13b lives under `smoke/hiit/`. Do not hunt for `m13b*.json` or root `config.smoke.hiit.m13b.*`.
+Everything for M13b lives under `smoke/hiit/`. Do not hunt for `m13b*.json` or old root-level HIIT smoke configs.
 
 ```bash
 # 1) confirmatory ops / preflight
-.venv/bin/python -m ppg_eeg.temporal_coupling.confirmatory.hiit_smoke_m13b --stage preflight
+.venv/bin/python -m ppg_eeg.confirmatory.hiit_smoke_m13b --stage preflight
 
 # 2) beat peaks (exploratory Stage 0 then 1b)
 .venv/bin/python -m ppg_eeg.temporal_coupling \
@@ -56,7 +56,7 @@ Everything for M13b lives under `smoke/hiit/`. Do not hunt for `m13b*.json` or r
 
 ## Duration–lag–endpoint contracts
 
-Canonical source: `ppg_eeg/temporal_coupling/confirmatory/duration_contracts.py`.
+Canonical source: `ppg_eeg/confirmatory/duration_contracts.py`.
 
 | Duration | Lag grid | Endpoint | Pool with ZLPI? |
 |----------|----------|----------|-----------------|

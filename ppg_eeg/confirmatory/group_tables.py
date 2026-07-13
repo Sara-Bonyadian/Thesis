@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from ...datasets import CanonicalObservation
+from ..datasets import CanonicalObservation
 from .endpoints import METRICS_TEMPLATE
 from .peak_model import PARAMS_FILENAME
 from .protocol_audit import (

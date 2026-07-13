@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ppg_eeg.temporal_coupling.confirmatory.production import (
+from ppg_eeg.confirmatory.production import (
     PRODUCTION_PREFLIGHT_FILENAME,
     PRODUCTION_RUN_PLAN_FILENAME,
     SMOKE_RUN_MANIFEST_FILENAME,
@@ -25,7 +25,7 @@ class TestProductionPreflightAndSmoke(unittest.TestCase):
         repo = Path(__file__).resolve().parents[1]
         cls.config_dir = repo / "zero-lag-reanalysis-repo"
         cls.repo_root = repo
-        from ppg_eeg.temporal_coupling.confirmatory.production import master_config_path
+        from ppg_eeg.confirmatory.production import master_config_path
 
         assert master_config_path(cls.config_dir).is_file()
 

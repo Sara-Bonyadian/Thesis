@@ -75,7 +75,7 @@ def _synthetic_peaks(n_subjects: int = 3) -> pd.DataFrame:
 
 class TestGroupSummary(unittest.TestCase):
     def test_build_peak_summary_counts_and_direction(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         peaks_df = _synthetic_peaks(n_subjects=3)
         peak_rows = build_peak_correlation_summary(peaks_df, cfg)
         interp_rows = build_group_interpretation_summary(
@@ -191,7 +191,7 @@ class TestGroupSummary(unittest.TestCase):
 
         with TemporaryDirectory() as tmpdir:
             out_root = Path(tmpdir)
-            cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+            cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
             cfg = replace(
                 cfg,
                 paths=replace(
@@ -226,7 +226,7 @@ class TestGroupSummary(unittest.TestCase):
             self.assertIn("permutation-controlled group peak strength", notes)
 
     def test_group_permutation_stronger_than_null(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         cfg = replace(
             cfg,
             temporal_coupling=replace(
@@ -285,7 +285,7 @@ class TestGroupSummary(unittest.TestCase):
         self.assertLess(p_value, 0.05)
 
     def test_apply_group_permutation_adds_columns(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         cfg = replace(
             cfg,
             temporal_coupling=replace(

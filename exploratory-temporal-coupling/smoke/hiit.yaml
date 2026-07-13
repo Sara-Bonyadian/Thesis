@@ -1,28 +1,39 @@
-# Smoke config for temporal EEG–cardiac coupling (ds004511 rest).
-# 3-subject cohort before running config.run.ds004511.temporal_coupling.yaml on full raw data.
-# See temporal_coupling/README.md and config.smoke.ds003838.temporal_coupling.yaml.
+# Smoke config for temporal EEG–cardiac coupling (HIIT).
+# Small cohort before exploratory-temporal-coupling/datasets/hiit_40_ppg.yaml on full raw data.
+# Subject IDs are bare participant numbers (e.g. 01 → HIIT_01_PH / HIIT_01_PS).
+# Cardiac: embedded photosensor channel (ppg_peak detection).
+#
+# Run:
+#   python -m ppg_eeg.temporal_coupling --config exploratory-temporal-coupling/smoke/hiit.yaml --stage all
 
-dataset_id: ds004511
+dataset_id: hiit
+hiit_partition_mode: task_only
 
 paths:
-  raw_root: ./data/raw/ds004511
-  out_root: ./derivatives/smoke_ds004511_temporal_coupling
-  base_root: ./derivatives/smoke_ds004511_fast
+  raw_root: ./data/raw/HIIT
+  out_root: ./derivatives/smoke_hiit_temporal_coupling
+  base_root: ./derivatives/smoke_hiit_fast
 
-# Subject IDs match BIDS entity after "sub-" (e.g. sub-S210317 → S210317).
 subjects:
-  - S200116
-  - S210317
-  - S201210
+  - "01"
+  - "02"
+  - "03"
+  - "04"
+  - "05"
+  - "06"
+  - "07"
 
 tasks:
   - rest
+  - tetris
 
 conditions:
-  - rest
+  - pre_rest
+  - pre_tetris
+  - post_rest
+  - post_tetris
 
-sessions:
-  - "01"
+sessions: []
 
 eeg:
   l_freq: 1.0
@@ -31,7 +42,7 @@ eeg:
   reference: average
 
 ppg:
-  # null = use full EEG/ECG overlap
+  # null = use full EEG/PPG overlap; audit caps lag by overlap/3.
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4
@@ -41,7 +52,7 @@ ppg:
 
 temporal_coupling:
   audit:
-    min_overlap_s: 10
+    min_overlap_s: 120
     min_clean_beats: 30
 
   eeg:
@@ -56,22 +67,12 @@ temporal_coupling:
       alpha: [Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2]
       beta: [Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4]
     debug_plot:
-      enabled: true
-      start_time_s: 40
-      end_time_s: 60
-      auto_window_s: 20
-      also_auto_window: true
-      save_psd: true
-      # ds004511 EDF uses numeric channel labels (1–128), not 10–5 names.
-      channels:
-        theta: "64"
-        alpha: "1"
-        beta: "64"
+      enabled: false
 
   cardiac:
-    channel: auto
-    signal_type: ecg
-    detector: auto
+    channel: photosensor
+    signal_type: ppg
+    detector: ppg_peak
     ecg:
       bandpass_hz: [5, 30]
       min_peak_distance_s: 0.45
@@ -87,16 +88,7 @@ temporal_coupling:
     min_valid_hr_percent: 50.0
     min_valid_hrv_percent: 30.0
     debug_plot:
-      enabled: true
-      windows:
-        - [35, 45]
-        - [50, 60]
-        - [65, 75]
-      auto_window_s: 10
-      overview_window_s: 40
-      save_overview: true
-      also_auto_window: true
-      max_plots_per_subject: 5
+      enabled: false
 
   resample:
     fs_hz: 1.0
@@ -106,17 +98,17 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
-    n_permutations: 0
+    n_permutations: 100
     detrend: false
     rolling_detrend_window_s: null
     edge_margin_s: 0
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto
-    peak_selection: abs_peak
 
   events:
-    enabled: false
+    enabled: true
+    subject_balanced_average: true
     hr_percentile: 10
     eeg_threshold_sd: 2.0
     epoch_pre_s: 60
@@ -137,3 +129,4 @@ temporal_coupling:
 
   group:
     plot_common_lag_only: true
+    n_group_permutations: 100

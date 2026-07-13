@@ -6,13 +6,13 @@ from tempfile import TemporaryDirectory
 
 import yaml
 
-from ppg_eeg.temporal_coupling.confirmatory.config import (
+from ppg_eeg.confirmatory.config import (
     EXPECTED_BANDS_HZ,
     EXPECTED_DURATIONS_S,
     load_dataset_config,
     load_master_config,
 )
-from ppg_eeg.temporal_coupling.confirmatory.production import master_config_path
+from ppg_eeg.confirmatory.production import master_config_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = REPO_ROOT / "zero-lag-reanalysis-repo"

@@ -1,31 +1,17 @@
-# Smoke config for temporal EEG–cardiac coupling (ds004582).
-# 7-subject cohort before config.run.ds004582.temporal_coupling.yaml on full raw data.
-# Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
+# Temporal EEG–cardiac coupling for ds003816 (full cohort).
+# Processing settings aligned with exploratory-temporal-coupling/smoke/ds003816.yaml.
 
-dataset_id: ds004582
+dataset_id: ds003816
 
 paths:
-  raw_root: ./data/raw/ds004582
-  out_root: ./derivatives/smoke_ds004582_temporal_coupling
-  base_root: ./derivatives/smoke_ds004582_fast
+  raw_root: ./data/raw/ds003816
+  out_root: ./derivatives/run_ds003816_temporal_coupling
+  base_root: ./derivatives/run_ds003816_fast
 
-subjects:
-  - FFE001
-  - FFE002
-  - FFE003
-  - FFE010
-  - FFE020
-  - FFE149
-  - FFE150
-
-tasks:
-  - ff
-
-conditions:
-  - ff
-
-sessions:
-  - "01"
+subjects: []
+tasks: []
+conditions: []
+sessions: []
 
 eeg:
   l_freq: 1.0
@@ -34,6 +20,7 @@ eeg:
   reference: average
 
 ppg:
+  # null = use full EEG/ECG overlap; audit caps lag by overlap/3.
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4
@@ -43,7 +30,7 @@ ppg:
 
 temporal_coupling:
   audit:
-    min_overlap_s: 60
+    min_overlap_s: 10
     min_clean_beats: 30
 
   eeg:
@@ -61,7 +48,7 @@ temporal_coupling:
       enabled: false
 
   cardiac:
-    channel: ECGBIT
+    channel: ECG
     signal_type: ecg
     detector: ecg_rpeak
     ecg:
@@ -70,14 +57,14 @@ temporal_coupling:
       prominence: auto
       height: auto
       test_inverted: true
-    hr_window_s: 15.0
-    mean_rr_window_s: 15.0
-    hrv_window_s: 60.0
+    hr_window_s: 10.0
+    mean_rr_window_s: 10.0
+    hrv_window_s: 20.0
     hrv_step_s: 2.0
     min_beats_hr: 5
-    min_beats_hrv: 20
+    min_beats_hrv: 12
     min_valid_hr_percent: 50.0
-    min_valid_hrv_percent: 30.0
+    min_valid_hrv_percent: 20.0
     debug_plot:
       enabled: false
 
@@ -88,18 +75,33 @@ temporal_coupling:
 
   cross_correlation:
     lag_max_s: 60
-    lag_step_s: 5
+    lag_step_s: 1
+    peak_selection: abs_peak
     n_permutations: 0
     detrend: false
     rolling_detrend_window_s: null
-    edge_margin_s: 0
+    edge_margin_s: 5
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto
-    peak_selection: abs_peak
 
+  # Smoke segments are often ~40–100 s; ±60 s epochs leave no valid event window.
   events:
-    enabled: false
+    enabled: true
+    subject_balanced_average: true
+    hr_percentile: 10
+    eeg_threshold_sd: 2.0
+    epoch_pre_s: 10
+    epoch_post_s: 10
+    min_event_distance_s: 5
+    min_total_events: 5
+    min_contributing_subjects: 2
+    theta_burst_method: percentile
+    theta_burst_percentile: 90
+    alpha_suppression_method: percentile
+    alpha_suppression_percentile: 10
+    beta_burst_method: percentile
+    beta_burst_percentile: 90
 
   output:
     save_curves: true

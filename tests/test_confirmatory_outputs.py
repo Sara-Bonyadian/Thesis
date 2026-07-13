@@ -9,18 +9,18 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.duration_contracts import (
+from ppg_eeg.confirmatory.duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_ZLPI,
 )
-from ppg_eeg.temporal_coupling.confirmatory.figures import (
+from ppg_eeg.confirmatory.figures import (
     FIGURE_DPI,
     generate_confirmatory_figures,
     mean_ci_by_lag,
     resolve_reporting_inputs,
 )
-from ppg_eeg.temporal_coupling.confirmatory.manifest import (
+from ppg_eeg.confirmatory.manifest import (
     FIGURE_SOURCE_MANIFEST_FILENAME,
     RUN_MANIFEST_FILENAME,
     build_figure_source_manifest,
@@ -30,7 +30,7 @@ from ppg_eeg.temporal_coupling.confirmatory.manifest import (
     sha256_text,
     software_versions,
 )
-from ppg_eeg.temporal_coupling.confirmatory.report import (
+from ppg_eeg.confirmatory.report import (
     RESULTS_BUNDLE_FILENAME,
     generate_confirmatory_report,
     run_confirmatory_reporting,
@@ -337,7 +337,7 @@ class TestManifest(unittest.TestCase):
             self.assertIn("numpy", versions)
 
             panels = []
-            from ppg_eeg.temporal_coupling.confirmatory.manifest import FigurePanelSource
+            from ppg_eeg.confirmatory.manifest import FigurePanelSource
 
             panels.append(
                 FigurePanelSource(

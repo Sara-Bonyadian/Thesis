@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.harmonize import (
+from ppg_eeg.confirmatory.harmonize import (
     ALIGNMENT_QC_FILENAME,
     ALIGNED_FEATURES_TEMPLATE,
     MAX_GAP_S,
@@ -20,7 +20,7 @@ from ppg_eeg.temporal_coupling.confirmatory.harmonize import (
     select_longest_block,
     write_harmonize_outputs,
 )
-from ppg_eeg.temporal_coupling.confirmatory.multitaper_power import BANDS_HZ
+from ppg_eeg.confirmatory.multitaper_power import BANDS_HZ
 
 
 BANDS = tuple(BANDS_HZ)

@@ -58,12 +58,12 @@ We do this **separately for each person**, then combine results at the group lev
 | Dataset | Config | Tasks / conditions | Cardiac source | Pipeline status |
 |---------|--------|-------------------|----------------|-----------------|
 | **ds003838** | `config.validation.ds003838.temporal_coupling.yaml` | **rest only** | Separate ECG (BIDS `.set`) | ✅ Full cohort (65 subjects, Stages 0–4) |
-| **ds003838** | `config.run.ds003838.temporal_coupling.yaml` | **rest + memory** | Separate ECG | ⏳ Config ready; run pending |
-| **ds006848** | `config.run.ds006848.temporal_coupling.yaml` | **rest, verbalwm** | Embedded PPG (BrainVision) | ⏳ Stage 0 done (52/52 usable) |
-| **HIIT** | `config.run.hiit.temporal_coupling.yaml` | **8 conditions** (PS/PH × PRE/POST × REST/TETRIS) | Embedded PPG (BrainVision) | ⏳ Config ready; run pending |
-| **ds003690** | `config.run.ds003690.temporal_coupling.yaml` | gonogo, passive, simplert | Embedded EKG (EEGLAB) | ⏳ In progress |
-| **ds003816** | `config.run.ds003816.temporal_coupling.yaml` | 7 tasks × sessions | Embedded ECG (BrainVision) | ⏳ In progress |
-| **ds003838** | `config.smoke.ds003838.temporal_coupling.yaml` | rest (3 subjects) | Separate ECG | ✅ Smoke / debug |
+| **ds003838** | `exploratory-temporal-coupling/datasets/ds003838.yaml` | **rest + memory** | Separate ECG | ⏳ Config ready; run pending |
+| **ds006848** | `exploratory-temporal-coupling/datasets/ds006848.yaml` | **rest, verbalwm** | Embedded PPG (BrainVision) | ⏳ Stage 0 done (52/52 usable) |
+| **HIIT** | `exploratory-temporal-coupling/datasets/hiit.yaml` | **8 conditions** (PS/PH × PRE/POST × REST/TETRIS) | Embedded PPG (BrainVision) | ⏳ Config ready; run pending |
+| **ds003690** | `exploratory-temporal-coupling/datasets/ds003690.yaml` | gonogo, passive, simplert | Embedded EKG (EEGLAB) | ⏳ In progress |
+| **ds003816** | `exploratory-temporal-coupling/datasets/ds003816.yaml` | 7 tasks × sessions | Embedded ECG (BrainVision) | ⏳ In progress |
+| **ds003838** | `exploratory-temporal-coupling/smoke/ds003838.yaml` | rest (3 subjects) | Separate ECG | ✅ Smoke / debug |
 
 **Important:** Analyze each task or condition **separately** — never concatenate different tasks or HIIT states in one group summary.
 
@@ -135,7 +135,7 @@ After Stage **1b** and **1c**, get suggested `min_overlap_s` and cardiac window 
 
 ```bash
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.ds003816.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/ds003816.yaml \
   --recommend-config-values
 ```
 
@@ -291,11 +291,11 @@ temporal_coupling/          ← you are here (docs)
   README.md
   IMPLEMENTATION_PLAN.md
 
-config.smoke.ds003838.temporal_coupling.yaml       ← 3-subject smoke (rest)
+exploratory-temporal-coupling/smoke/ds003838.yaml       ← 3-subject smoke (rest)
 config.validation.ds003838.temporal_coupling.yaml  ← ds003838 rest only (reference)
-config.run.ds003838.temporal_coupling.yaml         ← ds003838 rest + memory
-config.run.ds006848.temporal_coupling.yaml         ← ds006848 rest + verbalwm
-config.run.hiit.temporal_coupling.yaml             ← HIIT 8 conditions
+exploratory-temporal-coupling/datasets/ds003838.yaml         ← ds003838 rest + memory
+exploratory-temporal-coupling/datasets/ds006848.yaml         ← ds006848 rest + verbalwm
+exploratory-temporal-coupling/datasets/hiit.yaml             ← HIIT 8 conditions
 
 ppg_eeg/temporal_coupling/
   __main__.py               ← CLI entry
@@ -359,30 +359,30 @@ PY=".venv/bin/python"
 
 # Example: ds003838 all tasks — Stage 0
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.ds003838.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/ds003838.yaml \
   --stage 0
 
 # Stage 1 (1a + 1b + 1c)
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.ds003838.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/ds003838.yaml \
   --stage 1
 
 # Optional: suggest min_overlap_s and cardiac windows from QC (needs 1b+1c done)
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.ds003816.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/ds003816.yaml \
   --recommend-config-values
 
 # Stages 2–4 (read aligned CSVs only)
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.ds003838.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/ds003838.yaml \
   --stage 2
 
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.ds003838.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/ds003838.yaml \
   --stage 3
 
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.ds003838.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/ds003838.yaml \
   --stage 4
 ```
 
@@ -390,11 +390,11 @@ Swap the config for ds006848 or HIIT:
 
 ```bash
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.ds006848.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/ds006848.yaml \
   --stage 0
 
 $PY -m ppg_eeg.temporal_coupling \
-  --config config.run.hiit.temporal_coupling.yaml \
+  --config exploratory-temporal-coupling/datasets/hiit.yaml \
   --stage 0
 ```
 

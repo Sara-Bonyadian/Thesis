@@ -1,12 +1,14 @@
-# Temporal EEG–cardiac coupling for ds003816 (full cohort).
-# Processing settings aligned with config.smoke.ds003816.temporal_coupling.yaml.
+# Temporal EEG–cardiac coupling for Mindfulness project (all subjects, part1/part2, steps 1–3).
+# Cardiac HR/HRV from embedded photosensor (PPG peak detection), not ecg.
+# Analysis settings match exploratory-temporal-coupling/smoke/mindfulness.yaml with smoke recommendations applied.
+# Expect ~164 paired EEG+ECG observations across 29 mbd folders.
 
-dataset_id: ds003816
+dataset_id: mindfulness
 
 paths:
-  raw_root: ./data/raw/ds003816
-  out_root: ./derivatives/run_ds003816_temporal_coupling
-  base_root: ./derivatives/run_ds003816_fast
+  raw_root: ./data/raw/Mindfulness project
+  out_root: ./derivatives/run_mindfulness_temporal_coupling
+  base_root: ./derivatives/run_mindfulness_fast
 
 subjects: []
 tasks: []
@@ -20,7 +22,6 @@ eeg:
   reference: average
 
 ppg:
-  # null = use full EEG/ECG overlap; audit caps lag by overlap/3.
   start_time_s: null
   end_time_s: null
   peak_min_distance_s: 0.4
@@ -41,30 +42,30 @@ temporal_coupling:
     envelope_smooth_s: 2.0
     envelope_output_fs_hz: 10
     rois:
-      theta: [Fz, F1, F2, FCz, FC1, FC2, Cz]
-      alpha: [Pz, P3, P4, POz, PO3, PO4, Oz, O1, O2]
-      beta: [Fz, F1, F2, FCz, FC1, FC2, Cz, C3, C4]
+      theta: [Fz, FCz, Cz]
+      alpha: [Pz, Oz, O1, O2]
+      beta: [Fz, FCz, Cz, C3, C4]
     debug_plot:
       enabled: false
 
   cardiac:
-    channel: ECG
-    signal_type: ecg
-    detector: ecg_rpeak
+    channel: photosensor
+    signal_type: ppg
+    detector: ppg_peak
     ecg:
       bandpass_hz: [5, 30]
       min_peak_distance_s: 0.45
       prominence: auto
       height: auto
       test_inverted: true
-    hr_window_s: 10.0
-    mean_rr_window_s: 10.0
-    hrv_window_s: 20.0
+    hr_window_s: 15.0
+    mean_rr_window_s: 15.0
+    hrv_window_s: 60.0
     hrv_step_s: 2.0
     min_beats_hr: 5
-    min_beats_hrv: 12
+    min_beats_hrv: 20
     min_valid_hr_percent: 50.0
-    min_valid_hrv_percent: 20.0
+    min_valid_hrv_percent: 30.0
     debug_plot:
       enabled: false
 
@@ -75,27 +76,26 @@ temporal_coupling:
 
   cross_correlation:
     lag_max_s: 60
-    lag_step_s: 1
-    peak_selection: abs_peak
-    n_permutations: 0
+    lag_step_s: 5
+    n_permutations: 100
     detrend: false
     rolling_detrend_window_s: null
     edge_margin_s: 5
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto
+    peak_selection: abs_peak
 
-  # Smoke segments are often ~40–100 s; ±60 s epochs leave no valid event window.
   events:
     enabled: true
     subject_balanced_average: true
     hr_percentile: 10
     eeg_threshold_sd: 2.0
-    epoch_pre_s: 10
-    epoch_post_s: 10
-    min_event_distance_s: 5
-    min_total_events: 5
-    min_contributing_subjects: 2
+    epoch_pre_s: 60
+    epoch_post_s: 60
+    min_event_distance_s: 10
+    min_total_events: 10
+    min_contributing_subjects: 4
     theta_burst_method: percentile
     theta_burst_percentile: 90
     alpha_suppression_method: percentile
@@ -109,4 +109,4 @@ temporal_coupling:
 
   group:
     plot_common_lag_only: true
-    n_group_permutations: 0
+    n_group_permutations: 100

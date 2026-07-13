@@ -1,3 +1,10 @@
+"""Exploratory temporal-coupling config loader (Stages 0–4).
+
+YAML configs live under ``exploratory-temporal-coupling/`` (``datasets/``,
+``smoke/``). Confirmatory configs use ``ppg_eeg.confirmatory.config``
+and ``zero-lag-reanalysis-repo/``.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

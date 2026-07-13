@@ -1,35 +1,31 @@
-# HIIT temporal coupling: 40 participants, 4 task groups, PPG-only cardiac (photosensor).
-#
-# Same data model as config.run.hiit_40.temporal_coupling.yaml, but HR/HRV are
-# computed from the embedded photosensor channel using ppg_peak detection.
-#
-# Output: derivatives/run_hiit_40_ppg_temporal_coupling/
-#
-# After stages 0–4, run the directional summary plot:
-#   python -m ppg_eeg.temporal_coupling.directional_group_plot \
-#     --config config.run.hiit_40_ppg.temporal_coupling.yaml
+# Smoke config for temporal EEG–cardiac coupling (ds004582).
+# 7-subject cohort before exploratory-temporal-coupling/datasets/ds004582.yaml on full raw data.
+# Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
 
-dataset_id: hiit
-hiit_partition_mode: task_only
+dataset_id: ds004582
 
 paths:
-  raw_root: ./data/raw/HIIT
-  out_root: ./derivatives/run_hiit_40_ppg_temporal_coupling
-  base_root: ./derivatives/run_hiit_fast
+  raw_root: ./data/raw/ds004582
+  out_root: ./derivatives/smoke_ds004582_temporal_coupling
+  base_root: ./derivatives/smoke_ds004582_fast
 
-subjects: []
+subjects:
+  - FFE001
+  - FFE002
+  - FFE003
+  - FFE010
+  - FFE020
+  - FFE149
+  - FFE150
 
 tasks:
-  - rest
-  - tetris
+  - ff
 
 conditions:
-  - pre_rest
-  - pre_tetris
-  - post_rest
-  - post_tetris
+  - ff
 
-sessions: []
+sessions:
+  - "01"
 
 eeg:
   l_freq: 1.0
@@ -47,7 +43,7 @@ ppg:
 
 temporal_coupling:
   audit:
-    min_overlap_s: 120
+    min_overlap_s: 60
     min_clean_beats: 30
 
   eeg:
@@ -65,9 +61,9 @@ temporal_coupling:
       enabled: false
 
   cardiac:
-    channel: photosensor
-    signal_type: ppg
-    detector: ppg_peak
+    channel: ECGBIT
+    signal_type: ecg
+    detector: ecg_rpeak
     ecg:
       bandpass_hz: [5, 30]
       min_peak_distance_s: 0.45
@@ -93,30 +89,17 @@ temporal_coupling:
   cross_correlation:
     lag_max_s: 60
     lag_step_s: 5
-    n_permutations: 100
+    n_permutations: 0
     detrend: false
     rolling_detrend_window_s: null
     edge_margin_s: 0
     min_peak_distance_s: 10
     peak_prominence: auto
     peak_height: auto
+    peak_selection: abs_peak
 
   events:
-    enabled: true
-    subject_balanced_average: true
-    hr_percentile: 10
-    eeg_threshold_sd: 2.0
-    epoch_pre_s: 60
-    epoch_post_s: 60
-    min_event_distance_s: 10
-    min_total_events: 10
-    min_contributing_subjects: 4
-    theta_burst_method: percentile
-    theta_burst_percentile: 90
-    alpha_suppression_method: percentile
-    alpha_suppression_percentile: 10
-    beta_burst_method: percentile
-    beta_burst_percentile: 90
+    enabled: false
 
   output:
     save_curves: true
@@ -124,4 +107,4 @@ temporal_coupling:
 
   group:
     plot_common_lag_only: true
-    n_group_permutations: 100
+    n_group_permutations: 0

@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.duration_contracts import (
+from ppg_eeg.confirmatory.duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_ZLPI,
 )
-from ppg_eeg.temporal_coupling.confirmatory.inference import (
+from ppg_eeg.confirmatory.inference import (
     DATASET_EFFECTS_FILENAME,
     FAMILY_META_BAND,
     FAMILY_PRIMARY_STATE_ATTENUATION,
@@ -389,7 +389,7 @@ class TestMixedModelFallback(unittest.TestCase):
                 raise RuntimeError("forced_convergence_failure")
 
         with patch(
-            "ppg_eeg.temporal_coupling.confirmatory.inference.smf.mixedlm",
+            "ppg_eeg.confirmatory.inference.smf.mixedlm",
             side_effect=lambda *a, **k: (_ for _ in ()).throw(
                 RuntimeError("forced_mixedlm_failure")
             ),
@@ -400,7 +400,7 @@ class TestMixedModelFallback(unittest.TestCase):
         self.assertTrue(coef_rows)
         # Second call identical → deterministic fallback path.
         with patch(
-            "ppg_eeg.temporal_coupling.confirmatory.inference.smf.mixedlm",
+            "ppg_eeg.confirmatory.inference.smf.mixedlm",
             side_effect=RuntimeError("forced_mixedlm_failure"),
         ):
             coef_rows2, qc2 = fit_mixed_model(subjects, endpoint_name=ENDPOINT_ZLPI)

@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.artifact_controls import (
+from ppg_eeg.confirmatory.artifact_controls import (
     ARTIFACT_CONTROL_RESULTS_FILENAME,
     CONTROL_BROADBAND,
     CONTROL_CARDIAC_FIELD,
@@ -32,7 +32,7 @@ from ppg_eeg.temporal_coupling.confirmatory.artifact_controls import (
     run_artifact_controls,
     write_artifact_control_outputs,
 )
-from ppg_eeg.temporal_coupling.confirmatory.duration_contracts import (
+from ppg_eeg.confirmatory.duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_ZLPI,

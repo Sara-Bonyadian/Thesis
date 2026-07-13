@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.multitaper_power import (
+from ppg_eeg.confirmatory.multitaper_power import (
     N_TAPERS,
     TIME_BANDWIDTH,
     compute_multitaper_power,

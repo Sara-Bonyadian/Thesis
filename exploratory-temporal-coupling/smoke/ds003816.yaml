@@ -1,5 +1,5 @@
 # Smoke config for temporal EEG–cardiac coupling (ds003816).
-# 7-subject cohort before config.run.ds003816.temporal_coupling.yaml on full raw data.
+# 7-subject cohort before exploratory-temporal-coupling/datasets/ds003816.yaml on full raw data.
 # Subject IDs match BIDS entity after "sub-" (e.g. sub-01lt → 01lt).
 # Cardiac: embedded ECG channel in BrainVision EEG files.
 

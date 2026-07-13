@@ -1,7 +1,7 @@
 # Temporal EEG–cardiac coupling for ds004587 (all subjects, all analyzable tasks).
 # Tasks: ig (Illusion Game) and rest (8-min eyes-closed before IG; EEG from session-start IG file).
 # Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
-# Analysis settings match config.smoke.ds004587.temporal_coupling.yaml (full cohort; smoke uses subset for QC).
+# Analysis settings match exploratory-temporal-coupling/smoke/ds004587.yaml (full cohort; smoke uses subset for QC).
 # Expect ~100 paired EEG+physio observations per task (103 subjects; a few lack physio per dataset README).
 
 dataset_id: ds004587

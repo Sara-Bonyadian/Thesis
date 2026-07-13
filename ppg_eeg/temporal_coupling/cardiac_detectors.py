@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from scipy import signal as scipy_signal
 
-from ..ppg import detect_heartbeats, extract_ppg_signal, normalize_signal
+from ..core_eeg_ppg.ppg import detect_heartbeats, extract_ppg_signal, normalize_signal
 from .cardiac_common import (
     CardiacDetectionResult,
     CardiacObservation,

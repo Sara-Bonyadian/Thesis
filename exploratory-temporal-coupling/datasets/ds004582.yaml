@@ -1,6 +1,6 @@
 # Temporal EEG–cardiac coupling for ds004582 (all 73 subjects, task FF).
 # Cardiac HR/HRV from beh/*_physio.tsv.gz ECGBIT (ECG peak detection), not device HR or OXIBIT.
-# Analysis settings match config.smoke.ds004582.temporal_coupling.yaml (full cohort; smoke uses 7 subjects for QC).
+# Analysis settings match exploratory-temporal-coupling/smoke/ds004582.yaml (full cohort; smoke uses 7 subjects for QC).
 
 dataset_id: ds004582
 

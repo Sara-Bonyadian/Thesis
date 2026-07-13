@@ -6,13 +6,13 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ppg_eeg.temporal_coupling.confirmatory.duration_contracts import (
+from ppg_eeg.confirmatory.duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_ZLPI,
     contract_for_duration,
 )
-from ppg_eeg.temporal_coupling.confirmatory.nulls import (
+from ppg_eeg.confirmatory.nulls import (
     BLOCK_LENGTH_S,
     NULL_QC_FILENAME,
     NULL_SUBJECT_RESULTS_FILENAME,

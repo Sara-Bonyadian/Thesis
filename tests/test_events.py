@@ -54,7 +54,7 @@ def _synthetic_aligned_df(
 
 class TestEvents(unittest.TestCase):
     def test_epoch_window_skips_recording_edges(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         events_cfg = cfg.temporal_coupling.events
         time_s = np.arange(30, 230, dtype=float)
         valid = _valid_event_indices(
@@ -71,7 +71,7 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(epoch_times[-1], 60.0)
 
     def test_hr_increase_and_decrease_detection(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         events_cfg = cfg.temporal_coupling.events
         time_s = np.arange(30, 230, dtype=float)
         hr_z = np.zeros(len(time_s))
@@ -89,7 +89,7 @@ class TestEvents(unittest.TestCase):
         self.assertGreater(len(decrease_idx), 0)
 
     def test_fixed_z_burst_requires_minimum_duration(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         events_cfg = cfg.temporal_coupling.events
         time_s = np.arange(30, 230, dtype=float)
         theta = np.zeros(len(time_s))
@@ -124,7 +124,7 @@ class TestEvents(unittest.TestCase):
         self.assertNotIn(15, filtered)
 
     def test_event_qc_flags_exploratory_counts(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         counts_df = pd.DataFrame(
             [
                 {
@@ -156,7 +156,7 @@ class TestEvents(unittest.TestCase):
         self.assertIn("zero_events", alpha_qc.warning)
 
     def test_event_qc_includes_averaging_metadata(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         counts_df = pd.DataFrame(
             [
                 {
@@ -178,7 +178,7 @@ class TestEvents(unittest.TestCase):
         self.assertEqual(hr_qc.min_subjects_required, 4)
 
     def test_process_subject_reports_counts(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         aligned_df = _synthetic_aligned_df(duration_s=200, hr_step=0.05, theta_level=3.0)
         epoch_times = _build_epoch_times(
             cfg.temporal_coupling.events,

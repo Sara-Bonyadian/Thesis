@@ -78,7 +78,7 @@ class TestResample(unittest.TestCase):
         self.assertTrue(np.isfinite(out[12]))
 
     def test_align_observation_zscore_and_overlap(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         eeg_df, cardiac_df = _synthetic_frames()
         aligned = align_observation(eeg_df, cardiac_df, cfg)
 
@@ -102,7 +102,7 @@ class TestResample(unittest.TestCase):
             self.assertAlmostEqual(float(np.std(finite, ddof=0)), 1.0, places=5)
 
     def test_build_alignment_qc(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         eeg_df, _cardiac_df = _synthetic_frames()
         times_car = np.arange(20.0, 150.1, 2.0)
         cardiac_df = pd.DataFrame(
@@ -173,7 +173,7 @@ class TestResample(unittest.TestCase):
         )
 
     def test_build_alignment_qc_usable_when_overlap_long_enough(self) -> None:
-        cfg = load_config("config.smoke.ds003838.temporal_coupling.yaml")
+        cfg = load_config("exploratory-temporal-coupling/smoke/ds003838.yaml")
         times_eeg = np.arange(0.0, 200.1, 0.1)
         eeg_df = pd.DataFrame(
             {
