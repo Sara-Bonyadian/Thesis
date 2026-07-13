@@ -16,6 +16,11 @@ from .duration_contracts import (
     contract_for_duration,
     standard_zlpi_pool_durations,
 )
+from .endpoints import (
+    compute_endpoints_from_curves,
+    run_confirmatory_endpoints,
+    write_endpoint_outputs,
+)
 from .harmonize import (
     harmonize_observation,
     write_harmonize_outputs,
@@ -38,6 +43,7 @@ __all__ = [
     "DURATION_ANALYSIS_CONTRACTS",
     "load_dataset_config",
     "load_master_config",
+    "compute_endpoints_from_curves",
     "compute_multitaper_power",
     "compute_signed_lag_curves",
     "contract_for_duration",
@@ -47,10 +53,12 @@ __all__ = [
     "reconstruct_instant_hr",
     "reconstruct_instant_hr_file",
     "run_confirmatory_correlations",
+    "run_confirmatory_endpoints",
     "run_protocol_audit",
     "standard_zlpi_pool_durations",
     "write_correlation_outputs",
     "write_duration_eligibility",
+    "write_endpoint_outputs",
     "write_harmonize_outputs",
     "write_protocol_audit",
 ]
