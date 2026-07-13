@@ -31,6 +31,11 @@ from .multitaper_power import (
     extract_multitaper_file,
     extract_multitaper_from_raw,
 )
+from .artifact_controls import (
+    run_artifact_controls,
+    run_confirmatory_artifact_controls,
+    write_artifact_control_outputs,
+)
 from .group_tables import (
     build_group_tables,
     run_confirmatory_group_tables,
@@ -74,6 +79,8 @@ __all__ = [
     "harmonize_observation",
     "reconstruct_instant_hr",
     "reconstruct_instant_hr_file",
+    "run_artifact_controls",
+    "run_confirmatory_artifact_controls",
     "run_confirmatory_correlations",
     "run_confirmatory_endpoints",
     "run_confirmatory_group_tables",
@@ -84,6 +91,7 @@ __all__ = [
     "run_null_battery",
     "run_protocol_audit",
     "standard_zlpi_pool_durations",
+    "write_artifact_control_outputs",
     "write_correlation_outputs",
     "write_duration_eligibility",
     "write_endpoint_outputs",
