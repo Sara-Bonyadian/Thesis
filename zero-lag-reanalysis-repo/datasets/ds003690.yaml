@@ -4,7 +4,7 @@ dataset_id: ds003690
 role: primary
 
 paths:
-  raw_root: ../data/raw/ds003690
+  raw_root: ../../data/raw/ds003690
   output_subdir: primary/ds003690
 
 selection:

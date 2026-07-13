@@ -236,12 +236,48 @@ def discover_config_dir(config_dir: str | Path | None = None) -> Path:
         Path.cwd() / "zero-lag-reanalysis-repo",
     ]
     for candidate in candidates:
-        if (candidate / "config.confirmatory.master.yaml").is_file():
+        if master_config_path(candidate).is_file():
             return candidate.resolve()
     raise FileNotFoundError(
-        "Could not locate zero-lag-reanalysis-repo with "
-        "config.confirmatory.master.yaml."
+        "Could not locate zero-lag-reanalysis-repo with master.yaml "
+        "(or legacy config.confirmatory.master.yaml)."
     )
+
+
+def master_config_path(config_dir: str | Path) -> Path:
+    """Prefer ``master.yaml``; fall back to legacy flat filename."""
+    root = Path(config_dir)
+    preferred = root / "master.yaml"
+    if preferred.is_file():
+        return preferred
+    legacy = root / "config.confirmatory.master.yaml"
+    return legacy
+
+
+def iter_dataset_config_paths(config_dir: Path) -> list[Path]:
+    """Full-cohort dataset YAMLs under ``datasets/`` (new) or legacy flat names."""
+    root = Path(config_dir)
+    nested = sorted((root / "datasets").glob("*.yaml")) if (root / "datasets").is_dir() else []
+    if nested:
+        return nested
+    return [
+        path
+        for path in sorted(root.glob("config.confirmatory.*.yaml"))
+        if path.name != "config.confirmatory.master.yaml" and ".smoke." not in path.name
+    ]
+
+
+def iter_smoke_config_paths(config_dir: Path) -> list[Path]:
+    """Smoke YAMLs: ``smoke/*.yaml`` plus ``smoke/*/confirmatory.yaml`` (e.g. HIIT)."""
+    root = Path(config_dir)
+    smoke_root = root / "smoke"
+    paths: list[Path] = []
+    if smoke_root.is_dir():
+        paths.extend(sorted(smoke_root.glob("*.yaml")))
+        paths.extend(sorted(smoke_root.glob("*/confirmatory.yaml")))
+    if paths:
+        return paths
+    return sorted(root.glob("config.confirmatory.smoke.*.yaml"))
 
 
 def default_production_root(master: ConfirmatoryMasterConfig) -> Path:
@@ -460,12 +496,10 @@ def build_synthetic_aligned_tables(
 
 
 def _primary_dataset_config_paths(config_dir: Path) -> list[Path]:
-    master = load_master_config(config_dir / "config.confirmatory.master.yaml")
+    master = load_master_config(master_config_path(config_dir))
     primary_ids = set(master.dataset_roles.primary)
     paths: list[Path] = []
-    for path in sorted(config_dir.glob("config.confirmatory.*.yaml")):
-        if path.name == "config.confirmatory.master.yaml" or ".smoke." in path.name:
-            continue
+    for path in iter_dataset_config_paths(config_dir):
         try:
             cfg = load_dataset_config(path, master=master)
         except Exception:
@@ -476,12 +510,10 @@ def _primary_dataset_config_paths(config_dir: Path) -> list[Path]:
 
 
 def _sensitivity_dataset_config_paths(config_dir: Path) -> list[Path]:
-    master = load_master_config(config_dir / "config.confirmatory.master.yaml")
+    master = load_master_config(master_config_path(config_dir))
     sens_ids = set(master.dataset_roles.sensitivity)
     paths: list[Path] = []
-    for path in sorted(config_dir.glob("config.confirmatory.*.yaml")):
-        if path.name == "config.confirmatory.master.yaml" or ".smoke." in path.name:
-            continue
+    for path in iter_dataset_config_paths(config_dir):
         try:
             cfg = load_dataset_config(path, master=master)
         except Exception:
@@ -498,16 +530,15 @@ def resolve_dataset_configs_for_mode(
     master: ConfirmatoryMasterConfig,
 ) -> list[ConfirmatoryDatasetConfig]:
     if mode == "smoke":
-        paths = sorted(config_dir.glob("config.confirmatory.smoke.*.yaml"))
+        paths = iter_smoke_config_paths(config_dir)
     elif mode in {"primary", "clean_root"}:
         paths = _primary_dataset_config_paths(config_dir)
     elif mode == "sensitivity":
         paths = _sensitivity_dataset_config_paths(config_dir)
     elif mode == "preflight":
         paths = [
-            path
-            for path in sorted(config_dir.glob("config.confirmatory*.yaml"))
-            if path.name != "config.confirmatory.master.yaml"
+            *iter_dataset_config_paths(config_dir),
+            *iter_smoke_config_paths(config_dir),
         ]
     else:
         raise ValueError(f"Unknown mode {mode!r}.")
@@ -1443,7 +1474,7 @@ def run_production(
         raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}.")
 
     config_root = discover_config_dir(config_dir)
-    master_path = config_root / "config.confirmatory.master.yaml"
+    master_path = master_config_path(config_root)
     master = load_master_config(master_path)
     repo = (
         Path(repo_root).expanduser().resolve()
@@ -1634,7 +1665,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--config-dir",
         type=str,
         default=None,
-        help="Directory containing config.confirmatory.*.yaml",
+        help="Directory containing confirmatory master.yaml / datasets / smoke",
     )
     parser.add_argument(
         "--production-root",
@@ -1711,7 +1742,10 @@ __all__ = [
     "default_production_root",
     "discover_config_dir",
     "execute_smoke_pipeline",
+    "iter_dataset_config_paths",
+    "iter_smoke_config_paths",
     "main",
+    "master_config_path",
     "primary_blockers_summary",
     "resolve_dataset_configs_for_mode",
     "run_production",

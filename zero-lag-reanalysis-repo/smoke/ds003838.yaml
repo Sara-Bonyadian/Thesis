@@ -3,7 +3,7 @@ dataset_id: ds003838
 role: primary
 
 paths:
-  raw_root: ../data/raw/ds003838
+  raw_root: ../../data/raw/ds003838
   output_subdir: smoke/ds003838
 
 selection:

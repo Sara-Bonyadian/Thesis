@@ -12,11 +12,12 @@ from ppg_eeg.temporal_coupling.confirmatory.config import (
     load_dataset_config,
     load_master_config,
 )
+from ppg_eeg.temporal_coupling.confirmatory.production import master_config_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = REPO_ROOT / "zero-lag-reanalysis-repo"
-MASTER_PATH = CONFIG_DIR / "config.confirmatory.master.yaml"
-SMOKE_PATH = CONFIG_DIR / "config.confirmatory.smoke.ds003838.yaml"
+MASTER_PATH = master_config_path(CONFIG_DIR)
+SMOKE_PATH = CONFIG_DIR / "smoke" / "ds003838.yaml"
 
 
 def _master_payload() -> dict[str, object]:

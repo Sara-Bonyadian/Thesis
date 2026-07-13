@@ -4,7 +4,7 @@ dataset_id: ds003816
 role: sensitivity
 
 paths:
-  raw_root: ../data/raw/ds003816
+  raw_root: ../../data/raw/ds003816
   output_subdir: sensitivity/ds003816
 
 selection:

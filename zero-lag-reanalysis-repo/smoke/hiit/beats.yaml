@@ -1,12 +1,9 @@
-# M13b companion — exploratory Stage 0/1b prerequisites for confirmatory HIIT smoke.
-# Same participant/session subset as config.confirmatory.smoke.hiit.yaml.
-# Forces PPG via embedded photosensor (do not use ECG for this smoke).
+# HIIT smoke — exploratory Stage 0 / 1b only (beat detection).
+# Same subset as confirmatory.yaml in this folder. Forces photosensor PPG.
 #
-# After this succeeds, feed detected_peaks.csv into confirmatory M2 instant-HR.
-#
-# Run (one stage at a time; see operator runbook):
-#   python -m ppg_eeg.temporal_coupling --config config.smoke.hiit.m13b.temporal_coupling.yaml --stage 0
-#   python -m ppg_eeg.temporal_coupling --config config.smoke.hiit.m13b.temporal_coupling.yaml --stage 1b
+# From repo root:
+#   .venv/bin/python -m ppg_eeg.temporal_coupling --config zero-lag-reanalysis-repo/smoke/hiit/beats.yaml --stage 0
+#   .venv/bin/python -m ppg_eeg.temporal_coupling --config zero-lag-reanalysis-repo/smoke/hiit/beats.yaml --stage 1b
 
 dataset_id: hiit
 # Confirmatory pairing uses protocol_task labels; keep discovery aligned.

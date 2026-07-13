@@ -2,15 +2,18 @@
   "schema_version": "m13b_hiit_smoke_verification_v1",
   "dataset_id": "hiit",
   "role": "sensitivity",
-  "confirmatory_config": "config.confirmatory.smoke.hiit.yaml",
-  "exploratory_stage1_config": "config.smoke.hiit.m13b.temporal_coupling.yaml",
+  "confirmatory_config": "smoke/hiit/confirmatory.yaml",
+  "beats_config": "smoke/hiit/beats.yaml",
   "primary_cardiac_modality": "ppg",
   "primary_cardiac_channel": "photosensor",
   "primary_cardiac_detector": "ppg_peak",
   "signal_type": "ppg",
   "pairing": {
     "mode": "protocol_task",
-    "pair_within": ["participant_id", "session_id"],
+    "pair_within": [
+      "participant_id",
+      "session_id"
+    ],
     "contrasts": [
       {
         "contrast_id": "ph_pre_rest__tetris",
@@ -47,26 +50,42 @@
     ]
   },
   "selection": {
-    "participants": ["01", "02", "03"],
-    "sessions": ["ph", "ps"],
+    "participants": [
+      "01",
+      "02",
+      "03"
+    ],
+    "sessions": [
+      "ph",
+      "ps"
+    ],
     "expected_observations_per_complete_participant": 8,
     "expected_observation_id_pattern": "hiit-{participant}-{ph|ps}-{pre|post}-{rest|tetris}"
   },
   "duration_gates": {
-    "check_durations_s": [240, 180],
-    "required_for_smoke_continue": [240, 180],
+    "check_durations_s": [
+      240,
+      180
+    ],
+    "required_for_smoke_continue": [
+      240,
+      180
+    ],
     "note": "D240 and D180 must be eligible (or explicitly not_supplied with stop). Missing duration support is a blocker, not exclusion."
   },
   "eeg": {
     "format": "brainvision",
     "reference": "average",
-    "bandpass_hz": [1.0, 60.0],
+    "bandpass_hz": [
+      1.0,
+      60.0
+    ],
     "verify": "M3 multitaper QC must retain EEG channels after bad-channel rejection; empty clean set is a stop."
   },
   "stop_if": [
     "raw_root missing or observation discovery raises FileNotFoundError",
-    "any selected participant lacks a complete PRE rest↔Tetris pair within a session",
-    "any selected participant lacks a complete POST rest↔Tetris pair within a session",
+    "any selected participant lacks a complete PRE rest-Tetris pair within a session",
+    "any selected participant lacks a complete POST rest-Tetris pair within a session",
     "cardiac channel used is not photosensor (or inferred type is not ppg)",
     "Stage-1b inventory shows no photosensor/optical PPG candidate",
     "clean_beat_span_s or overlap cannot support D240 (and nested D180) for paired observations intended for ZLPI",
@@ -82,6 +101,6 @@
     "Eye-state and posture instructions remain unverified from adapters.",
     "Whether PS (pressure-protocol) recordings always contain a usable photosensor PPG channel must be verified in Stage-1b inventory; stop if not.",
     "Exact photosensor channel label spelling may vary (photosensor vs Photosensor); selection must resolve to PPG signal_type.",
-    "Participants 01–03 completeness on disk was not verified by the agent for M13b (no analysis run); operator must confirm before Stage 1."
+    "Participants 01\u201303 completeness on disk must be confirmed by the operator before Stage 0."
   ]
 }

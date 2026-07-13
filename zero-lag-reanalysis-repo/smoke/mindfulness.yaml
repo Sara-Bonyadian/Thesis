@@ -4,7 +4,7 @@ dataset_id: mindfulness
 role: sensitivity
 
 paths:
-  raw_root: ../data/raw/Mindfulness project
+  raw_root: ../../data/raw/Mindfulness project
   output_subdir: smoke/mindfulness
 
 selection:

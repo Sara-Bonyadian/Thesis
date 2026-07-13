@@ -30,13 +30,15 @@ from .protocol_audit import (
     run_protocol_audit,
 )
 from .report import run_confirmatory_reporting
+from .production import master_config_path
 
 REPO_DEFAULT = Path(__file__).resolve().parents[3]
 CONFIG_DIR_DEFAULT = REPO_DEFAULT / "zero-lag-reanalysis-repo"
-CONFIRMATORY_SMOKE = CONFIG_DIR_DEFAULT / "config.confirmatory.smoke.hiit.yaml"
-VERIFICATION_JSON = CONFIG_DIR_DEFAULT / "m13b.hiit.smoke.verification.json"
-EXPLORATORY_SMOKE = REPO_DEFAULT / "config.smoke.hiit.m13b.temporal_coupling.yaml"
-MASTER_CONFIG = CONFIG_DIR_DEFAULT / "config.confirmatory.master.yaml"
+HIIT_SMOKE_DIR = CONFIG_DIR_DEFAULT / "smoke" / "hiit"
+CONFIRMATORY_SMOKE = HIIT_SMOKE_DIR / "confirmatory.yaml"
+VERIFICATION_JSON = HIIT_SMOKE_DIR / "verification.json"
+EXPLORATORY_SMOKE = HIIT_SMOKE_DIR / "beats.yaml"
+MASTER_CONFIG = master_config_path(CONFIG_DIR_DEFAULT)
 
 REQUIRED_CONTRASTS = (
     "ph_pre_rest__tetris",

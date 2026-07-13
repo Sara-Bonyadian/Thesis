@@ -25,7 +25,9 @@ class TestProductionPreflightAndSmoke(unittest.TestCase):
         repo = Path(__file__).resolve().parents[1]
         cls.config_dir = repo / "zero-lag-reanalysis-repo"
         cls.repo_root = repo
-        assert (cls.config_dir / "config.confirmatory.master.yaml").is_file()
+        from ppg_eeg.temporal_coupling.confirmatory.production import master_config_path
+
+        assert master_config_path(cls.config_dir).is_file()
 
     def test_synthetic_aligned_tables_cover_durations(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -4,7 +4,7 @@ dataset_id: ds004587
 role: primary
 
 paths:
-  raw_root: ../data/raw/ds004587
+  raw_root: ../../data/raw/ds004587
   output_subdir: smoke/ds004587
 
 selection:

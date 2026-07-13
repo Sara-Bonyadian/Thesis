@@ -4,7 +4,7 @@ dataset_id: hiit
 role: sensitivity
 
 paths:
-  raw_root: ../data/raw/HIIT
+  raw_root: ../../data/raw/HIIT
   output_subdir: sensitivity/hiit
 
 selection:

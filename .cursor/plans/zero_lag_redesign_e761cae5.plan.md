@@ -152,7 +152,7 @@ flowchart TD
 ### Configuration: Modify
 
 - Preserve all `config.run.*.temporal_coupling.yaml` files as legacy provenance.
-- Add separate `config.confirmatory.<dataset>.yaml` files plus `config.confirmatory.master.yaml`.
+- Add confirmatory configs under [`zero-lag-reanalysis-repo/`](zero-lag-reanalysis-repo/): `master.yaml`, `datasets/<id>.yaml`, `smoke/<id>.yaml` (HIIT smoke package in `smoke/hiit/`).
 - Add `confirmatory/config.py`; parse shared dataset/path/filter fields through the current loader and strictly validate a new `confirmatory:` block.
 
 ### QC: Modify and add
@@ -196,7 +196,7 @@ Add these modules (status as of 2026-07-13):
 
 ```text
 python -m ppg_eeg.temporal_coupling.confirmatory \
-  --config zero-lag-reanalysis-repo/config.confirmatory.<dataset>.yaml \
+  --config zero-lag-reanalysis-repo/datasets/<dataset>.yaml \
   --stage C0|C1a|C1b|C1c|C2|C3|C4|C5|C6|C7|all
 ```
 
@@ -534,10 +534,10 @@ Split into operational sub-milestones so engineering (preflight/orchestration) c
 
 #### M13b — HIIT real-smoke subset (in progress; operator-run)
 
-- Configs:
-  - [`config.confirmatory.smoke.hiit.yaml`](zero-lag-reanalysis-repo/config.confirmatory.smoke.hiit.yaml) — participants `01–03`, sessions `ph`/`ps`, PRE/POST rest↔Tetris (`protocol_task` labels).
-  - [`m13b.hiit.smoke.verification.json`](zero-lag-reanalysis-repo/m13b.hiit.smoke.verification.json) — PPG/`photosensor` lock, D240/D180 gates, stop rules.
-  - [`config.smoke.hiit.m13b.temporal_coupling.yaml`](config.smoke.hiit.m13b.temporal_coupling.yaml) — Stage 0/1b companion forcing photosensor PPG.
+- Configs (all under one folder):
+  - [`smoke/hiit/confirmatory.yaml`](zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml) — participants `01–03`, sessions `ph`/`ps`, PRE/POST rest↔Tetris.
+  - [`smoke/hiit/beats.yaml`](zero-lag-reanalysis-repo/smoke/hiit/beats.yaml) — Stage 0/1b photosensor PPG.
+  - [`smoke/hiit/verification.json`](zero-lag-reanalysis-repo/smoke/hiit/verification.json) — PPG lock + stop rules.
 - Stage driver: [`hiit_smoke_m13b.py`](ppg_eeg/temporal_coupling/confirmatory/hiit_smoke_m13b.py) — one `--stage` at a time; hard-stops on pairing/modality failures.
 - Pairing: PRE-rest↔PRE-Tetris and POST-rest↔POST-Tetris within each PH/PS session; never collapse to task-only.
 - Remaining: operator executes Stage 0 → 1b → M2–M4 assembly → M5–M12; confirm photosensor on PS sessions; stop if assumptions fail.
