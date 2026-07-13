@@ -1,6 +1,7 @@
 # HIIT confirmatory smoke (M13b) — PPG / photosensor primary.
 # Pairing: PRE rest↔Tetris and POST rest↔Tetris within each PH/PS session.
-# Companion files in this folder: beats.yaml (Stage 0/1b), verification.json (stop rules).
+# Companion files: beats.yaml (exploratory Stage 1b peaks), verification.json (stop rules).
+# C0 runs the raw-data audit internally — do not require temporal_coupling --stage 0.
 schema_version: 1
 dataset_id: hiit
 role: sensitivity

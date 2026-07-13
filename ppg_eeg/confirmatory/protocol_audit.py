@@ -1,7 +1,8 @@
-"""Protocol metadata and participant pairing for confirmatory datasets.
+"""Protocol metadata, pairing, and duration eligibility for confirmatory C0.
 
-This module deliberately audits protocol structure only.  It does not inspect
-signal durations, derive cardiac or EEG features, or calculate eligibility.
+C0 also runs an observation-level raw-data audit (see ``data_audit.py``).
+This module still does not derive cardiac beats; ``clean_beat_span_s`` remains
+unknown until a later stage supplies it.
 """
 
 from __future__ import annotations
@@ -570,8 +571,19 @@ def evaluate_duration_eligibility(
         status, exclusion_code = "ineligible", "insufficient_raw_duration"
     elif clean_beat_span_s is not None and clean_beat_span_s < duration_s:
         status, exclusion_code = "ineligible", "insufficient_beat_span"
-    elif raw_overlap_s is None or clean_beat_span_s is None:
+    elif raw_overlap_s is None:
+        # Raw overlap is required for duration gates; clean beat span is optional
+        # at C0 (beat detection is deferred).
         status, exclusion_code = "not_computable", "data_not_supplied"
+
+    notes = metadata.notes
+    if (
+        status == "eligible"
+        and clean_beat_span_s is None
+        and "clean_beat_span_not_computed" not in notes
+    ):
+        suffix = "clean_beat_span_not_computed"
+        notes = f"{notes} {suffix}".strip() if notes else suffix
 
     return EligibilityDecision(
         dataset_id=metadata.dataset_id.casefold(),
@@ -591,7 +603,7 @@ def evaluate_duration_eligibility(
         paired_state_available=metadata.paired_state_available,
         pairing_resolved=metadata.pairing_resolved,
         protocol_match=metadata.protocol_match,
-        notes=metadata.notes,
+        notes=notes,
     )
 
 
@@ -876,9 +888,7 @@ def eligibility_metadata_from_observations(
                         in spec.low_demand_conditions
                         + spec.cognitive_effort_conditions
                     ),
-                    notes=(
-                        "Raw overlap and clean beat-span metadata not supplied."
-                    ),
+                    notes="clean_beat_span_not_computed",
                 )
             )
     return result
@@ -931,10 +941,11 @@ def enrich_eligibility_metadata_from_csv(
     raw_audit_paths: Iterable[str | Path] = (),
     cardiac_qc_paths: Iterable[str | Path] = (),
 ) -> list[EligibilityMetadata]:
-    """Join existing Stage 0 raw overlap and cardiac clean-span metadata.
+    """Join C0 raw-overlap audit and optional cardiac clean-span metadata.
 
     Missing files or rows leave fields unknown; this function does not run
-    signal processing or peak detection.
+    signal processing or peak detection. Raw overlap is never copied into
+    ``clean_beat_span_s``.
     """
     raw_by_key = _csv_rows_by_observation(raw_audit_paths)
     cardiac_by_key = _csv_rows_by_observation(cardiac_qc_paths)
@@ -945,9 +956,17 @@ def enrich_eligibility_metadata_from_csv(
         cardiac = cardiac_by_key.get(key)
         notes = [metadata.notes] if metadata.notes else []
         if raw is not None:
-            notes.append("Raw overlap loaded from protocol audit metadata.")
+            notes.append("Raw overlap loaded from C0 data_audit.csv.")
         if cardiac is not None:
             notes.append("Clean beat span loaded from cardiac QC metadata.")
+        elif "clean_beat_span_not_computed" not in " ".join(notes):
+            notes.append("clean_beat_span_not_computed")
+        raw_overlap = metadata.raw_overlap_s
+        if raw is not None:
+            # Prefer explicit raw_overlap_s; fall back to Stage-0-style column.
+            raw_overlap = _optional_float(
+                raw.get("raw_overlap_s") or raw.get("overlap_duration_s")
+            )
         enriched.append(
             replace(
                 metadata,
@@ -961,17 +980,13 @@ def enrich_eligibility_metadata_from_csv(
                     if raw is not None
                     else metadata.cardiac_exists
                 ),
-                raw_overlap_s=(
-                    _optional_float(raw.get("overlap_duration_s"))
-                    if raw is not None
-                    else metadata.raw_overlap_s
-                ),
+                raw_overlap_s=raw_overlap,
                 clean_beat_span_s=(
                     _optional_float(cardiac.get("clean_ibi_coverage_s"))
                     if cardiac is not None
                     else metadata.clean_beat_span_s
                 ),
-                notes=" ".join(notes),
+                notes=" ".join(part for part in notes if part),
             )
         )
     return enriched

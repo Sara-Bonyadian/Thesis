@@ -101,8 +101,8 @@ def cmd_preflight() -> int:
         raise SmokeStop("M13b requires PPG as primary cardiac modality.")
     print("preflight_pass=True")
     print(
-        "NEXT: run exploratory Stage 0, then Stage 1b with "
-        f"{EXPLORATORY_SMOKE.name} before confirmatory M2+."
+        "NEXT: run confirmatory C0 (includes raw-data audit), then exploratory "
+        f"Stage 1b with {EXPLORATORY_SMOKE.name} for detected_peaks before C1b+."
     )
     return 0
 
@@ -312,11 +312,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_verify_pairing()
         if args.stage == "stage0_hint":
             print(
-                "Run exploratory Stage 0 (file/overlap audit) with:\n"
-                f"  .venv/bin/python -m ppg_eeg.temporal_coupling "
-                f"--config {EXPLORATORY_SMOKE} --stage 0\n"
-                "STOP if Stage 0 reports missing files, no_cardiac_channels, "
-                "or insufficient overlap for paired PRE/POST states."
+                "C0 now includes the observation-level raw-data audit. Run:\n"
+                f"  .venv/bin/python -m ppg_eeg.confirmatory "
+                f"--config {CONFIRMATORY_SMOKE} --stage C0\n"
+                "Expect C0/data_audit.csv plus pairing and eligibility outputs. "
+                "Exploratory temporal_coupling --stage 0 is not a C0 prerequisite."
             )
             return 0
         if args.stage == "stage1b_hint":

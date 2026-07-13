@@ -16,7 +16,7 @@ zero-lag-reanalysis-repo/
     ...
     hiit/                  # HIIT needs an extra beats file (see below)
       confirmatory.yaml    # who/what to analyze (pairing × PH/PS)
-      beats.yaml           # Stage 0/1b only: photosensor PPG peaks
+      beats.yaml           # exploratory Stage 1b peaks (optional; not required for C0)
       verification.json    # stop rules / PPG lock (not a run config)
   README.md                # this file
 ```
@@ -26,7 +26,7 @@ zero-lag-reanalysis-repo/
 | Frozen protocol | `master.yaml` |
 | Full HIIT cohort | `datasets/hiit.yaml` |
 | HIIT smoke (confirmatory) | `smoke/hiit/confirmatory.yaml` |
-| HIIT smoke (get `detected_peaks.csv`) | `smoke/hiit/beats.yaml` |
+| HIIT smoke (get `detected_peaks.csv`) | `smoke/hiit/beats.yaml` (Stage 1b; optional for C0) |
 | Other dataset smoke | `smoke/<dataset>.yaml` |
 
 ## Separation from exploratory work
@@ -44,13 +44,11 @@ Raw data stays shared: `./data` (repo root).
 Everything for HIIT smoke lives under `smoke/hiit/`.
 
 ```bash
-# Protocol audit
+# C0: raw-data audit + pairing + duration eligibility (no separate Stage 0 needed)
 .venv/bin/python -m ppg_eeg.confirmatory \
   --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage C0
 
 # Beat peaks still come from exploratory Stage 1b (until peaks are under confirmatory control)
-.venv/bin/python -m ppg_eeg.temporal_coupling \
-  --config zero-lag-reanalysis-repo/smoke/hiit/beats.yaml --stage 0
 .venv/bin/python -m ppg_eeg.temporal_coupling \
   --config zero-lag-reanalysis-repo/smoke/hiit/beats.yaml --stage 1b
 

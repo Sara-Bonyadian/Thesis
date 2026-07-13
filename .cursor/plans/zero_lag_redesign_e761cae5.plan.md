@@ -175,7 +175,8 @@ Add these modules (status as of 2026-07-13):
 | `confirmatory/__main__.py` | CLI with stages `C0`, `C1a`, `C1b`, `C1c`, `C2`, `C3`, `C4`, `C5`, `C6`, `C7`, `all` | **Done** — `python -m ppg_eeg.confirmatory --config … --stage C0|…|all`; production `--mode` still available |
 | `confirmatory/run.py` | Stage dependency checks and resumable dispatch; no implicit deletion or overwrite | **Done** |
 | `confirmatory/config.py` | Immutable dataclasses, master/dataset config loading, cross-field validation | Done |
-| `confirmatory/protocol_audit.py` | Eligibility, nuisance inventory, participant-key normalization, paired sets | Done (`C0` / M1) |
+| `confirmatory/protocol_audit.py` | Eligibility, nuisance inventory, participant-key normalization, paired sets | Done (`C0` / M1; raw overlap from in-C0 `data_audit`) |
+| `confirmatory/data_audit.py` | Observation-level raw EEG–cardiac audit written under `C0/` | Done — no separate temporal_coupling Stage 0 required |
 | `confirmatory/instant_hr.py` | Derivative-based beat-to-HR reconstruction and QC | Done (`C1b` / M2) |
 | `confirmatory/multitaper_power.py` | Raw EEG preprocessing and DPSS features | Done (`C1a` / M3) |
 | `confirmatory/harmonize.py` | 1 Hz alignment, clean blocks, nested duration windows, representations, z-scoring | Done (`C1c` / M4) |
@@ -202,7 +203,7 @@ python -m ppg_eeg.confirmatory \
 
 | Stage | Name | Implements |
 |-------|------|------------|
-| `C0` | Protocol audit | `protocol_audit.py` |
+| `C0` | Protocol + raw-data + duration eligibility audit | `protocol_audit.py`, `data_audit.py` |
 | `C1a` | Multitaper EEG power | `multitaper_power.py` |
 | `C1b` | Instantaneous HR | `instant_hr.py` (from saved beats) |
 | `C1c` | Harmonize / nested durations | `harmonize.py` |

@@ -53,7 +53,10 @@ from .multitaper_power import (
 from .nulls import SMOKE_N_SURROGATES, run_confirmatory_nulls
 from .peak_model import run_confirmatory_peak_fits
 from .production import discover_config_dir, master_config_path
+from .data_audit import run_confirmatory_data_audit
 from .protocol_audit import (
+    eligibility_metadata_from_observations,
+    enrich_eligibility_metadata_from_csv,
     observations_from_dataset_config,
     run_protocol_audit,
 )
@@ -190,15 +193,71 @@ def _load_observations(ctx: StageContext) -> list[CanonicalObservation]:
         ) from exc
 
 
+def _write_c0_stage_status(
+    out: Path,
+    *,
+    dataset_id: str,
+    artifacts: Mapping[str, Path],
+) -> Path:
+    """Record that raw-data, pairing, and duration-eligibility audits ran in C0."""
+    path = out / STAGE_STATUS_FILENAME
+    payload = {
+        "dataset_id": dataset_id,
+        "stage": "C0",
+        "status": "ok",
+        "finished_at_utc": _utc_now(),
+        "audits_completed": [
+            "raw_data_audit",
+            "pairing_audit",
+            "duration_eligibility_audit",
+        ],
+        "artifacts": {key: str(value) for key, value in artifacts.items()},
+        "notes": (
+            "C0 performs the observation-level raw-data audit internally; "
+            "exploratory temporal_coupling --stage 0 is not required. "
+            "clean_beat_span_s is not computed here (beat detection deferred)."
+        ),
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def run_c0(ctx: StageContext) -> dict[str, Path]:
     out = ctx.stage_dir("C0")
-    paths = run_protocol_audit(ctx.master, [ctx.dataset], output_dir=out)
+    out.mkdir(parents=True, exist_ok=True)
+    observations = _load_observations(ctx)
+    lag_max_s = float(ctx.master.lag.max_s)
+    data_audit_path, _records = run_confirmatory_data_audit(
+        observations,
+        out,
+        lag_max_s=lag_max_s,
+    )
+    metadata = eligibility_metadata_from_observations(
+        {ctx.dataset.dataset_id: observations}
+    )
+    metadata = enrich_eligibility_metadata_from_csv(
+        metadata,
+        raw_audit_paths=[data_audit_path],
+    )
+    paths = run_protocol_audit(
+        ctx.master,
+        [ctx.dataset],
+        output_dir=out,
+        eligibility_metadata=metadata,
+    )
     mapping = {
         "protocol_audit": paths[0],
         "paired_subject_sets": paths[1],
+        "data_audit": data_audit_path,
         "eligibility_by_duration": paths[2],
         "eligibility_qc_summary": paths[3],
     }
+    mapping["stage_status"] = _write_c0_stage_status(
+        out,
+        dataset_id=ctx.dataset.dataset_id,
+        artifacts=mapping,
+    )
     return mapping
 
 

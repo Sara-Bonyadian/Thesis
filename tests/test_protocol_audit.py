@@ -342,10 +342,6 @@ class TestDurationEligibility(unittest.TestCase):
                 {"raw_overlap_s": None, "clean_beat_span_s": 240.0},
                 "data_not_supplied",
             ),
-            (
-                {"raw_overlap_s": 240.0, "clean_beat_span_s": None},
-                "data_not_supplied",
-            ),
             ({"pairing_resolved": None}, "unresolved_pairing"),
         ]
         for overrides, expected_code in cases:
@@ -355,6 +351,16 @@ class TestDurationEligibility(unittest.TestCase):
                 )
                 self.assertEqual(decision.status, "not_computable")
                 self.assertEqual(decision.exclusion_code, expected_code)
+
+    def test_missing_clean_beat_span_is_deferred_not_blocking(self) -> None:
+        decision = evaluate_duration_eligibility(
+            self._complete(raw_overlap_s=240.0, clean_beat_span_s=None),
+            240,
+        )
+        self.assertEqual(decision.status, "eligible")
+        self.assertEqual(decision.exclusion_code, "")
+        self.assertIsNone(decision.clean_beat_span_s)
+        self.assertIn("clean_beat_span_not_computed", decision.notes)
 
     def test_known_protocol_and_pairing_exclusions_are_ineligible(self) -> None:
         cases = [
