@@ -76,12 +76,19 @@ FAMILY_LOCAL_PROMINENCE = "local_prominence"
 MU_LOW = -float(EXPECTED_PEAK_CENTER_EQUIVALENCE_S)
 MU_UPP = float(EXPECTED_PEAK_CENTER_EQUIVALENCE_S)
 
+MODEL_USED_RANDOM_EFFECTS = "random_effects"
+MODEL_USED_FIXED_EFFECTS_FALLBACK = "fixed_effects_fallback"
+
+ANALYSIS_STATUS_COMPLETED = "completed"
+ANALYSIS_STATUS_SKIPPED_INSUFFICIENT = "skipped_insufficient_datasets"
+
 MIXED_MODEL_FIELDS = (
     "endpoint_name",
     "duration_s",
     "power_representation",
     "is_primary_analysis",
     "model_backend",
+    "model_used",
     "converged",
     "term",
     "coef",
@@ -122,6 +129,7 @@ META_FIELDS = (
     "band",
     "power_representation",
     "is_primary_analysis",
+    "analysis_status",
     "estimator",
     "n_datasets",
     "pooled_effect",
@@ -142,6 +150,7 @@ LOO_FIELDS = (
     "duration_s",
     "band",
     "power_representation",
+    "analysis_status",
     "omitted_dataset_id",
     "estimator",
     "n_datasets",
@@ -155,6 +164,7 @@ LOO_FIELDS = (
     "i2",
     "p_value",
     "delta_vs_full",
+    "notes",
 )
 
 EQUIVALENCE_FIELDS = (
@@ -286,6 +296,16 @@ def prediction_interval(
     return float(pooled_effect - z * se), float(pooled_effect + z * se)
 
 
+def model_used_from_backend(backend: str) -> str:
+    """Coarse model class for reporting (distinct from technical ``model_backend``)."""
+    text = _as_str(backend).casefold()
+    if text.startswith("mixedlm"):
+        return MODEL_USED_RANDOM_EFFECTS
+    if text.startswith("ols"):
+        return MODEL_USED_FIXED_EFFECTS_FALLBACK
+    return ""
+
+
 def clip_i2(i2: float) -> float:
     """Clip statsmodels I² (may be negative when Q < df) to [0, 1]."""
     if not math.isfinite(i2):
@@ -313,6 +333,7 @@ def random_effects_meta(
     if effect.size < 2:
         return {
             "estimator": "insufficient_studies",
+            "analysis_status": ANALYSIS_STATUS_SKIPPED_INSUFFICIENT,
             "n_datasets": int(effect.size),
             "pooled_effect": float(effect[0]) if effect.size == 1 else float("nan"),
             "ci_low": float("nan"),
@@ -366,6 +387,7 @@ def random_effects_meta(
     pred_low, pred_high = prediction_interval(pooled, var_pooled, tau2, alpha=alpha)
     return {
         "estimator": estimator,
+        "analysis_status": ANALYSIS_STATUS_COMPLETED,
         "n_datasets": int(effect.size),
         "pooled_effect": pooled,
         "ci_low": ci_low,
@@ -629,6 +651,7 @@ def fit_mixed_model(
                 "power_representation": power_representation,
                 "is_primary_analysis": is_primary,
                 "model_backend": backend,
+                "model_used": model_used_from_backend(backend),
                 "converged": bool(qc["converged"]),
                 "term": str(term),
                 "coef": coef,
@@ -799,6 +822,7 @@ def run_meta_analysis(
                     duration_s=duration_s,
                     power_representation=representation,
                 ),
+                "analysis_status": meta["analysis_status"],
                 "estimator": meta["estimator"],
                 "n_datasets": meta["n_datasets"],
                 "pooled_effect": meta["pooled_effect"],
@@ -855,10 +879,36 @@ def leave_one_dataset_out(
                 row
             )
         dataset_ids = sorted(by_dataset)
+        endpoint_name, duration_s_s, band, representation = key
         if len(dataset_ids) < 3:
             # LOO needs at least 2 remaining studies after omission.
+            loo_rows.append(
+                {
+                    "endpoint_name": endpoint_name,
+                    "duration_s": int(duration_s_s),
+                    "band": band,
+                    "power_representation": representation,
+                    "analysis_status": ANALYSIS_STATUS_SKIPPED_INSUFFICIENT,
+                    "omitted_dataset_id": "",
+                    "estimator": "",
+                    "n_datasets": len(dataset_ids),
+                    "pooled_effect": float("nan"),
+                    "ci_low": float("nan"),
+                    "ci_high": float("nan"),
+                    "prediction_low": float("nan"),
+                    "prediction_high": float("nan"),
+                    "q": float("nan"),
+                    "tau2": float("nan"),
+                    "i2": float("nan"),
+                    "p_value": float("nan"),
+                    "delta_vs_full": float("nan"),
+                    "notes": (
+                        "LOO skipped: requires ≥3 datasets "
+                        "(so ≥2 remain after omission)."
+                    ),
+                }
+            )
             continue
-        endpoint_name, duration_s_s, band, representation = key
         duration_s = int(duration_s_s)
         full_effect = full_by_key.get(key, float("nan"))
 
@@ -898,6 +948,9 @@ def leave_one_dataset_out(
                     "duration_s": duration_s,
                     "band": band,
                     "power_representation": representation,
+                    "analysis_status": _as_str(
+                        meta.get("analysis_status"), ANALYSIS_STATUS_COMPLETED
+                    ),
                     "omitted_dataset_id": omitted,
                     "estimator": meta["estimator"],
                     "n_datasets": meta["n_datasets"],
@@ -915,6 +968,7 @@ def leave_one_dataset_out(
                         if math.isfinite(pooled) and math.isfinite(full_effect)
                         else float("nan")
                     ),
+                    "notes": _as_str(meta.get("notes")),
                 }
             )
     return loo_rows
@@ -1379,10 +1433,38 @@ def write_inference_outputs(
         "multiplicity_results": output_path / MULTIPLICITY_RESULTS_FILENAME,
         "inference_qc": output_path / INFERENCE_QC_FILENAME,
     }
+    loo_rows = list(result.loo_rows)
+    if not loo_rows:
+        loo_rows = [
+            {
+                "endpoint_name": "",
+                "duration_s": "",
+                "band": "",
+                "power_representation": "",
+                "analysis_status": ANALYSIS_STATUS_SKIPPED_INSUFFICIENT,
+                "omitted_dataset_id": "",
+                "estimator": "",
+                "n_datasets": 0,
+                "pooled_effect": float("nan"),
+                "ci_low": float("nan"),
+                "ci_high": float("nan"),
+                "prediction_low": float("nan"),
+                "prediction_high": float("nan"),
+                "q": float("nan"),
+                "tau2": float("nan"),
+                "i2": float("nan"),
+                "p_value": float("nan"),
+                "delta_vs_full": float("nan"),
+                "notes": (
+                    "LOO table empty: no primary meta cells with ≥3 datasets "
+                    "(requires ≥2 remaining after omission)."
+                ),
+            }
+        ]
     _write_csv(paths["mixed_model_results"], result.mixed_model_rows, MIXED_MODEL_FIELDS)
     _write_csv(paths["dataset_effects"], result.dataset_effect_rows, DATASET_EFFECT_FIELDS)
     _write_csv(paths["meta_analysis_results"], result.meta_rows, META_FIELDS)
-    _write_csv(paths["leave_one_dataset_out"], result.loo_rows, LOO_FIELDS)
+    _write_csv(paths["leave_one_dataset_out"], loo_rows, LOO_FIELDS)
     _write_csv(
         paths["peak_center_equivalence"], result.equivalence_rows, EQUIVALENCE_FIELDS
     )

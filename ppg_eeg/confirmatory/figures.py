@@ -20,6 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from .config import EXPECTED_BANDS_HZ
 from .duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
@@ -37,14 +38,254 @@ from .manifest import (
 )
 
 FIGURE_DPI = 300
-BAND_ORDER = ("delta", "theta", "alpha", "beta")
+
+# Colorblind-safe (Okabe–Ito–style) palette.
+PALETTE = {
+    "blue": "#0072B2",
+    "orange": "#E69F00",
+    "green": "#009E73",
+    "vermillion": "#D55E00",
+    "purple": "#CC79A7",
+    "dark_gray": "#4D4D4D",
+    "light_gray": "#D0D0D0",
+    "flank": "#E8E8E8",
+}
+
+# Match confirmatory band set (θ/α/β/low-γ); presentation order only.
+BAND_ORDER = tuple(EXPECTED_BANDS_HZ)
+BAND_COLORS: dict[str, str] = {
+    "delta": PALETTE["dark_gray"],
+    "theta": PALETTE["blue"],
+    "alpha": PALETTE["orange"],
+    "beta": PALETTE["green"],
+    "low_gamma": PALETTE["vermillion"],
+}
+# Marker + linestyle cues keep bands distinguishable in grayscale.
+BAND_MARKERS: dict[str, str] = {
+    "delta": "o",
+    "theta": "o",
+    "alpha": "s",
+    "beta": "o",
+    "low_gamma": "s",
+}
+BAND_LINESTYLES: dict[str, str | tuple] = {
+    "delta": ":",
+    "theta": "-",
+    "alpha": "-",
+    "beta": "-",
+    "low_gamma":"-",
+}
+DATASET_DISPLAY: dict[str, str] = {
+    "hiit": "HIIT",
+}
+ENDPOINT_DISPLAY: dict[str, str] = {
+    ENDPOINT_ZLPI: "ZLPI",
+    ENDPOINT_MID_WINDOW_PROXIMAL_INDEX: "MWPI",
+    ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX: "SWPI",
+}
 PRIMARY_REPRESENTATION = "absolute_log10"
-LAG_XLABEL = "Lag τ (s): corr(HR(t), EEG(t+τ)); +τ = EEG follows HR"
+
+# Typography (pt).
+FS_SUPTITLE = 22
+FS_PANEL_TITLE = 20
+FS_PANEL_LABEL = 22
+FS_AXIS = 18
+FS_TICK = 15
+FS_LEGEND = 14
+FS_EMPTY = 15
+LINE_WIDTH = 2.4
+AXIS_LINE_WIDTH = 1.5
+CI_ALPHA = 0.25
+MARKER_SIZE = 9.0
+SCATTER_SIZE = 48.0
+GRID_COLOR = PALETTE["light_gray"]
+REF_LINE_COLOR = PALETTE["dark_gray"]
+
+LAG_XLABEL = "Lag (s)"
 Z_YLABEL = "Fisher z"
+CI_95_LABEL = "95% CI"
+ZLPI_METRIC = "Fisher z"
+EEG_BAND_YLABEL = "EEG frequency band"
+EQUIVALENCE_REGION_LABEL = "±2 s"
+MEDIAN_PEAK_CENTER_LABEL = "Median peak center (μ)"
+MSG_NOT_INCLUDED = "Not included in the confirmatory analysis."
+MSG_NOT_APPLICABLE = "Not applicable for this dataset"
+
+FIGURE1_TITLE = "Lag-resolved EEG–cardiac coupling"
+FIGURE2_TITLE = "State-dependent attenuation of coupling"
+FIGURE3_TITLE = "Temporal specificity and artifact controls"
 
 FIGURE1_STEM = "figure1_lag_resolved_zero_lag"
 FIGURE2_STEM = "figure2_state_attenuation_replication"
 FIGURE3_STEM = "figure3_temporal_artifact_specificity"
+
+_STYLE_CONFIGURED = False
+
+
+def _configure_publication_style() -> None:
+    """Apply journal-style matplotlib defaults once per process."""
+    global _STYLE_CONFIGURED
+    if _STYLE_CONFIGURED:
+        return
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": [
+                "DejaVu Sans",
+                "Arial",
+                "Helvetica",
+                "Source Sans Pro",
+                "Liberation Sans",
+                "sans-serif",
+            ],
+            "axes.titlesize": FS_PANEL_TITLE,
+            "axes.titleweight": "bold",
+            "axes.labelsize": FS_AXIS,
+            "axes.labelpad": 12,
+            "axes.linewidth": AXIS_LINE_WIDTH,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.edgecolor": PALETTE["dark_gray"],
+            "xtick.labelsize": FS_TICK,
+            "ytick.labelsize": FS_TICK,
+            "xtick.major.width": 1.2,
+            "ytick.major.width": 1.2,
+            "xtick.major.size": 4.5,
+            "ytick.major.size": 4.5,
+            "xtick.minor.visible": False,
+            "ytick.minor.visible": False,
+            "legend.fontsize": FS_LEGEND,
+            "legend.frameon": False,
+            "lines.linewidth": LINE_WIDTH,
+            "lines.markersize": MARKER_SIZE,
+            "grid.color": GRID_COLOR,
+            "grid.linewidth": 0.6,
+            "grid.alpha": 0.75,
+            "figure.titlesize": FS_SUPTITLE,
+            "figure.titleweight": "bold",
+            "figure.dpi": 120,
+            "savefig.dpi": FIGURE_DPI,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.25,
+            # Keep SVG text editable (not converted to paths).
+            "svg.fonttype": "none",
+            "pdf.fonttype": 42,
+        }
+    )
+    _STYLE_CONFIGURED = True
+
+
+def _style_axes(ax: plt.Axes, *, grid: bool = True) -> None:
+    ax.minorticks_off()
+    ax.tick_params(axis="both", which="major", labelsize=FS_TICK, width=1.2, length=4.5, pad=6)
+    for spine in ("bottom", "left"):
+        ax.spines[spine].set_linewidth(AXIS_LINE_WIDTH)
+        ax.spines[spine].set_color(PALETTE["dark_gray"])
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    if grid:
+        ax.grid(True, which="major", color=GRID_COLOR, linewidth=0.6, alpha=0.75, zorder=0)
+        ax.set_axisbelow(True)
+    else:
+        ax.grid(False)
+
+
+def _add_panel_label(ax: plt.Axes, letter: str) -> None:
+    """Place a bold panel letter clearly left of the title (no overlap)."""
+    ax.annotate(
+        letter,
+        xy=(0.0, 1.0),
+        xycoords="axes fraction",
+        xytext=(-32, 10),
+        textcoords="offset points",
+        fontsize=FS_PANEL_LABEL,
+        fontweight="bold",
+        fontfamily="sans-serif",
+        va="bottom",
+        ha="left",
+        color=PALETTE["dark_gray"],
+        clip_on=False,
+        annotation_clip=False,
+        zorder=20,
+    )
+
+
+def _set_panel_title(ax: plt.Axes, title: str) -> None:
+    # Left-aligned title with extra pad so it clears the panel letter.
+    ax.set_title(title, fontsize=FS_PANEL_TITLE, fontweight="bold", pad=12, loc="left")
+
+
+def _legend_inside(
+    ax: plt.Axes,
+    handles: Sequence[object] | None = None,
+    labels: Sequence[str] | None = None,
+    *,
+    loc: str = "upper right",
+    ncol: int = 1,
+) -> None:
+    kwargs = {
+        "fontsize": FS_LEGEND - 1,
+        "frameon": True,
+        "fancybox": False,
+        "edgecolor": PALETTE["light_gray"],
+        "framealpha": 0.92,
+        "loc": loc,
+        "borderaxespad": 0.6,
+        "handlelength": 1.8,
+        "ncol": ncol,
+        "columnspacing": 1.0,
+        "labelspacing": 0.4,
+    }
+    if handles is not None and labels is not None:
+        ax.legend(handles, labels, **kwargs)
+    else:
+        ax.legend(**kwargs)
+
+
+def _legend_outside(
+    ax: plt.Axes,
+    handles: Sequence[object] | None = None,
+    labels: Sequence[str] | None = None,
+    *,
+    ncol: int = 1,
+) -> None:
+    # Prefer inside legends for multipanel figures to avoid collisions.
+    _legend_inside(ax, handles, labels, loc="best", ncol=ncol)
+
+
+def _ref_hline(ax: plt.Axes, y: float = 0.0) -> None:
+    ax.axhline(y, color=REF_LINE_COLOR, lw=1.0, ls="--", zorder=1)
+
+
+def _ref_vline(ax: plt.Axes, x: float = 0.0) -> None:
+    ax.axvline(x, color=REF_LINE_COLOR, lw=1.0, ls="--", zorder=1)
+
+
+def _spec_display(control_id: str) -> str:
+    """Map technical specification IDs to short publication labels."""
+    key = _as_str(control_id).casefold()
+    mapping = {
+        "primary_d240_absolute_zlpi": "Primary 240 s",
+        "duration_d180_zlpi": "ZLPI 180 s",
+        "duration_d120_mwpi": "MWPI 120 s",
+        "duration_d60_swpi": "SWPI 60 s",
+        "broadband_residualized": "Broadband",
+        "relative_power": "Relative",
+        "absolute_log10": "Absolute",
+    }
+    if key in mapping:
+        return mapping[key]
+    text = _as_str(control_id).replace("_", " ").strip()
+    if not text:
+        return "Spec"
+    # Keep unmapped IDs short so they do not collide with panel C.
+    short = text[:1].upper() + text[1:]
+    return short if len(short) <= 14 else short[:13] + "…"
+
+
+def _finish_layout(fig: plt.Figure) -> None:
+    """Leave room for panel letters and axis labels without collisions."""
+    fig.subplots_adjust(left=0.14, right=0.97, top=0.88, bottom=0.10, wspace=0.36, hspace=0.42)
 
 
 @dataclass(frozen=True)
@@ -90,6 +331,157 @@ def _as_int(value: object, default: int = 0) -> int:
         return int(float(value))  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _band_color(band: str) -> str:
+    return BAND_COLORS.get(_as_str(band).casefold(), PALETTE["blue"])
+
+
+def _band_marker(band: str) -> str:
+    return BAND_MARKERS.get(_as_str(band).casefold(), "o")
+
+
+def _band_linestyle(band: str) -> str | tuple:
+    return BAND_LINESTYLES.get(_as_str(band).casefold(), "-")
+
+
+def _band_display(band: str) -> str:
+    text = _as_str(band).replace("_", " ").strip().casefold()
+    if not text:
+        return "Band"
+    return text[:1].upper() + text[1:]
+
+
+def _dataset_display(dataset_id: str, *, n_pairs: int | None = None) -> str:
+    key = _as_str(dataset_id)
+    label = DATASET_DISPLAY.get(key.casefold())
+    if label is None:
+        label = key.upper() if key == key.casefold() else key
+    if n_pairs is not None and n_pairs >= 0:
+        return f"{label} (n = {n_pairs} pairs)"
+    return label
+
+
+def _endpoint_display(endpoint_name: str) -> str:
+    key = _as_str(endpoint_name, ENDPOINT_ZLPI)
+    return ENDPOINT_DISPLAY.get(key, key.upper() if key else "ZLPI")
+
+
+def _band_not_analyzed_message(band: str) -> str:
+    return f"{_band_display(band)} band not analyzed"
+
+
+def _mark_empty_panel(
+    ax: plt.Axes,
+    message: str,
+    *,
+    xlabel: str,
+    ylabel: str,
+    xlim: tuple[float, float] = (0.0, 1.0),
+    ylim: tuple[float, float] = (0.0, 1.0),
+) -> None:
+    """Overlay a notice while retaining labeled x/y axes with numeric scales."""
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_xlabel(xlabel, fontsize=FS_AXIS)
+    ax.set_ylabel(ylabel, fontsize=FS_AXIS)
+    _style_axes(ax, grid=True)
+    ax.text(
+        0.5,
+        0.5,
+        message,
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        fontsize=FS_EMPTY,
+        wrap=True,
+        zorder=5,
+        color=PALETTE["dark_gray"],
+    )
+
+
+def _n_datasets_from_rows(rows: Sequence[Mapping[str, object]]) -> int:
+    counts = [
+        _as_int(r.get("n_datasets"))
+        for r in rows
+        if _as_int(r.get("n_datasets")) > 0
+    ]
+    if counts:
+        return max(counts)
+    datasets = {
+        _as_str(r.get("dataset_id")).casefold()
+        for r in rows
+        if _as_str(r.get("dataset_id"))
+    }
+    return len(datasets)
+
+
+def _meta_or_single_title(*, n_datasets: int, endpoint_label: str = "ZLPI") -> str:
+    del endpoint_label  # reserved for future panel subtitles
+    if n_datasets >= 2:
+        return "Random-effects meta-analysis"
+    return "Single-dataset effect estimate"
+
+
+def _band_sort_key(band: str) -> tuple[int, str]:
+    key = _as_str(band).casefold()
+    try:
+        return (BAND_ORDER.index(key), key)
+    except ValueError:
+        return (len(BAND_ORDER), key)
+
+
+def _cleanup_svg(path: Path) -> None:
+    """Light SVG tidy: drop empty groups while preserving editable text."""
+    try:
+        import xml.etree.ElementTree as ET
+
+        tree = ET.parse(path)
+        root = tree.getroot()
+        ns = ""
+        if root.tag.startswith("{"):
+            ns = root.tag.split("}")[0] + "}"
+
+        def _strip_empty(element: ET.Element) -> None:
+            for child in list(element):
+                _strip_empty(child)
+                if child.tag == f"{ns}g" and len(child) == 0 and not (child.text or "").strip():
+                    element.remove(child)
+
+        _strip_empty(root)
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+    except Exception:
+        return
+
+
+def save_figure_trio(fig: plt.Figure, output_dir: Path, stem: str) -> tuple[Path, Path, Path]:
+    _configure_publication_style()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf = output_dir / f"{stem}.pdf"
+    svg = output_dir / f"{stem}.svg"
+    png = output_dir / f"{stem}.png"
+    fig.savefig(pdf, bbox_inches="tight", pad_inches=0.45)
+    fig.savefig(svg, bbox_inches="tight", pad_inches=0.45)
+    _cleanup_svg(svg)
+    fig.savefig(png, dpi=FIGURE_DPI, bbox_inches="tight", pad_inches=0.45)
+    plt.close(fig)
+    return pdf, svg, png
+
+
+def _shade_flanks(ax: plt.Axes, duration_s: int) -> None:
+    contract = contract_for_duration(duration_s)
+    inner, outer = contract.flank_inner_s, contract.flank_outer_s
+    ax.axvspan(-outer, -inner, color=PALETTE["flank"], alpha=0.8, zorder=0, linewidth=0)
+    ax.axvspan(inner, outer, color=PALETTE["flank"], alpha=0.8, zorder=0, linewidth=0)
+    _ref_vline(ax, 0.0)
+
+
+def _set_lag_axes(ax: plt.Axes, duration_s: int) -> None:
+    contract = contract_for_duration(duration_s)
+    ax.set_xlim(contract.lag_min_s, contract.lag_max_s)
+    ax.set_xlabel(LAG_XLABEL, fontsize=FS_AXIS)
+    ax.set_ylabel(Z_YLABEL, fontsize=FS_AXIS)
+    _style_axes(ax)
 
 
 def read_csv_rows(path: str | Path | None) -> list[dict[str, str]]:
@@ -157,18 +549,6 @@ def write_source_csv(
     return path
 
 
-def save_figure_trio(fig: plt.Figure, output_dir: Path, stem: str) -> tuple[Path, Path, Path]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    pdf = output_dir / f"{stem}.pdf"
-    svg = output_dir / f"{stem}.svg"
-    png = output_dir / f"{stem}.png"
-    fig.savefig(pdf, bbox_inches="tight")
-    fig.savefig(svg, bbox_inches="tight")
-    fig.savefig(png, dpi=FIGURE_DPI, bbox_inches="tight")
-    plt.close(fig)
-    return pdf, svg, png
-
-
 def mean_ci_by_lag(
     curve_rows: Sequence[Mapping[str, object]],
     *,
@@ -234,35 +614,31 @@ def mean_ci_by_lag(
     return rows
 
 
-def _shade_flanks(ax: plt.Axes, duration_s: int) -> None:
-    contract = contract_for_duration(duration_s)
-    inner, outer = contract.flank_inner_s, contract.flank_outer_s
-    ax.axvspan(-outer, -inner, color="#dddddd", alpha=0.5, zorder=0)
-    ax.axvspan(inner, outer, color="#dddddd", alpha=0.5, zorder=0)
-    ax.axvline(0.0, color="black", lw=0.8, ls="--")
-
-
-def _set_lag_axes(ax: plt.Axes, duration_s: int) -> None:
-    contract = contract_for_duration(duration_s)
-    ax.set_xlim(contract.lag_min_s, contract.lag_max_s)
-    ax.set_xlabel(LAG_XLABEL)
-    ax.set_ylabel(Z_YLABEL)
-
-
 def render_figure1(
     inputs: Mapping[str, Path | None],
     output_dir: Path,
 ) -> FigureArtifacts:
     """Figure 1: lag-resolved zero-lag structure (D240 ZLPI Fisher-z)."""
+    _configure_publication_style()
     curves = read_csv_rows(inputs.get("curves_d240"))
     peak_rows = read_csv_rows(inputs.get("peak_params"))
     source_dir = output_dir / "source_data"
     panel_sources: list[FigurePanelSource] = []
     source_paths: list[Path] = []
 
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True, sharey=True)
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(12.5, 10),
+        sharex=True,
+        sharey=True,
+        constrained_layout=False,
+    )
     axes_flat = list(axes.ravel())
-    for ax, band in zip(axes_flat, BAND_ORDER, strict=True):
+    panel_letters = ("A", "B", "C", "D")
+    shared_handles: list[object] = []
+    shared_labels: list[str] = []
+    for ax, band, letter in zip(axes_flat, BAND_ORDER, panel_letters, strict=True):
         series = mean_ci_by_lag(curves, band=band, condition_role="low_demand")
         fields = (
             "lag_s",
@@ -278,16 +654,31 @@ def render_figure1(
         csv_path = source_dir / f"figure1_panel_{band}_mean_ci.csv"
         write_source_csv(csv_path, series, fields)
         source_paths.append(csv_path)
-        _shade_flanks(ax, EXPECTED_PRIMARY_DURATION_S)
+        color = _band_color(band)
         if series:
+            _shade_flanks(ax, EXPECTED_PRIMARY_DURATION_S)
             lags = np.asarray([r["lag_s"] for r in series], dtype=float)
             mean = np.asarray([r["mean_z"] for r in series], dtype=float)
             lo = np.asarray([r["ci_low"] for r in series], dtype=float)
             hi = np.asarray([r["ci_high"] for r in series], dtype=float)
             n = int(series[0]["n"]) if series else 0
-            ax.fill_between(lags, lo, hi, color="#4C78A8", alpha=0.25, linewidth=0)
-            ax.plot(lags, mean, color="#4C78A8", lw=1.5, label=f"mean z (n={n})")
-            # Optional subject-level peak overlay for this band.
+            ax.fill_between(
+                lags,
+                lo,
+                hi,
+                color=color,
+                alpha=CI_ALPHA,
+                linewidth=0,
+                label=CI_95_LABEL,
+            )
+            ax.plot(
+                lags,
+                mean,
+                color=color,
+                lw=LINE_WIDTH,
+                ls=_band_linestyle(band),
+                label=f"Mean Fisher z (n = {n})",
+            )
             mus = [
                 _as_float(r.get("peak_center_mu_s"))
                 for r in peak_rows
@@ -301,17 +692,37 @@ def render_figure1(
                 ax.axvspan(
                     -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
                     EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
-                    color="#F58518",
-                    alpha=0.08,
+                    facecolor=PALETTE["orange"],
+                    alpha=0.12,
                     zorder=0,
+                    linewidth=0,
                 )
-                ax.axvline(float(np.median(mus)), color="#F58518", ls=":", lw=1.2, label="median μ")
-            ax.set_title(f"{band} · {ENDPOINT_ZLPI} D{EXPECTED_PRIMARY_DURATION_S} · n={n}")
+                ax.axvline(
+                    float(np.median(mus)),
+                    color=PALETTE["orange"],
+                    ls=":",
+                    lw=LINE_WIDTH,
+                    label=MEDIAN_PEAK_CENTER_LABEL,
+                )
+            _set_lag_axes(ax, EXPECTED_PRIMARY_DURATION_S)
+            _set_panel_title(ax, f"{_band_display(band)} (n = {n})")
+            _add_panel_label(ax, letter)
+            if letter == "A":
+                shared_handles, shared_labels = ax.get_legend_handles_labels()
         else:
-            ax.set_title(f"{band} · input unavailable")
-            ax.text(0.5, 0.5, "No frozen curve rows", ha="center", va="center", transform=ax.transAxes)
-        _set_lag_axes(ax, EXPECTED_PRIMARY_DURATION_S)
-        ax.legend(loc="upper right", fontsize=7, frameon=False)
+            _set_panel_title(ax, _band_display(band))
+            _add_panel_label(ax, letter)
+            _mark_empty_panel(
+                ax,
+                _band_not_analyzed_message(band),
+                xlabel=LAG_XLABEL,
+                ylabel=Z_YLABEL,
+                xlim=(
+                    float(contract_for_duration(EXPECTED_PRIMARY_DURATION_S).lag_min_s),
+                    float(contract_for_duration(EXPECTED_PRIMARY_DURATION_S).lag_max_s),
+                ),
+                ylim=(-0.2, 0.2),
+            )
         panel_sources.append(
             FigurePanelSource(
                 figure_id="figure1",
@@ -330,15 +741,25 @@ def render_figure1(
                     f"band={band}",
                     f"representation={PRIMARY_REPRESENTATION}",
                 ],
-                notes="Flank shading uses ZLPI 20–60 s windows; orange band marks ±2 s μ equivalence region when peaks exist.",
+                notes=(
+                    "Flank shading uses ZLPI 20–60 s windows; orange band marks ±2 s μ "
+                    f"equivalence region when peaks exist. Shaded curve region is {CI_95_LABEL}."
+                ),
             )
         )
 
-    fig.suptitle(
-        f"Figure 1 — Lag-resolved zero-lag structure ({ENDPOINT_ZLPI}, D{EXPECTED_PRIMARY_DURATION_S})",
-        fontsize=12,
-    )
-    fig.tight_layout()
+    if shared_handles:
+        fig.legend(
+            shared_handles,
+            shared_labels,
+            loc="lower center",
+            ncol=min(3, len(shared_labels)),
+            fontsize=FS_LEGEND - 1,
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.01),
+        )
+    fig.suptitle(FIGURE1_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.98)
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.90, bottom=0.14, wspace=0.22, hspace=0.32)
     pdf, svg, png = save_figure_trio(fig, output_dir, FIGURE1_STEM)
     return FigureArtifacts(
         figure_id="figure1",
@@ -427,8 +848,9 @@ def render_figure2(
     panel_sources: list[FigurePanelSource] = []
     source_paths: list[Path] = []
 
-    fig = plt.figure(figsize=(12, 9))
-    gs = fig.add_gridspec(2, 2, hspace=0.35, wspace=0.3)
+    _configure_publication_style()
+    fig = plt.figure(figsize=(13.5, 10.5), constrained_layout=False)
+    gs = fig.add_gridspec(2, 2, hspace=0.40, wspace=0.38)
 
     # Panel A: paired deltas by dataset (theta ZLPI D240).
     ax_a = fig.add_subplot(gs[0, 0])
@@ -442,6 +864,8 @@ def render_figure2(
         }
     )
     paired_source: list[dict[str, object]] = []
+    plotted_any = False
+    dataset_tick_labels: list[str] = []
     for idx, dataset_id in enumerate(datasets):
         points = _paired_points_for_dataset(
             subjects, paired, dataset_id=dataset_id, band="theta"
@@ -449,30 +873,67 @@ def render_figure2(
         paired_source.extend(points)
         ys = np.asarray([_as_float(p["delta_endpoint_index"]) for p in points], dtype=float)
         ys = ys[np.isfinite(ys)]
+        base = _dataset_display(dataset_id)
+        dataset_tick_labels.append(f"{base}\n(n = {int(ys.size)} pairs)")
         if ys.size == 0:
             continue
+        plotted_any = True
         seed = int(hashlib.sha256(dataset_id.encode("utf-8")).hexdigest()[:8], 16)
         x = np.full(ys.shape, idx, dtype=float) + 0.05 * np.random.default_rng(
             seed
         ).normal(size=ys.size)
-        ax_a.scatter(x, ys, s=18, alpha=0.7, color="#4C78A8")
+        ax_a.scatter(
+            x,
+            ys,
+            s=SCATTER_SIZE,
+            alpha=0.75,
+            color=_band_color("theta"),
+            marker=_band_marker("theta"),
+            edgecolors=PALETTE["dark_gray"],
+            linewidths=0.6,
+            label=None,
+            zorder=2,
+        )
         ax_a.errorbar(
             idx,
             float(np.mean(ys)),
             yerr=1.959963984540054 * float(np.std(ys, ddof=1) / math.sqrt(ys.size))
             if ys.size >= 2
             else 0.0,
-            fmt="o",
-            color="#E45756",
-            capsize=3,
-            label=None,
+            fmt="s",
+            color=PALETTE["vermillion"],
+            markersize=MARKER_SIZE,
+            capsize=4,
+            elinewidth=LINE_WIDTH,
+            markeredgecolor=PALETTE["dark_gray"],
+            markeredgewidth=0.6,
+            zorder=3,
         )
-        ax_a.text(idx, ax_a.get_ylim()[1] if False else 0, "", fontsize=7)
-    ax_a.axhline(0.0, color="black", lw=0.8, ls="--")
-    ax_a.set_xticks(range(len(datasets)))
-    ax_a.set_xticklabels(datasets, rotation=30, ha="right")
-    ax_a.set_ylabel(f"Δ {ENDPOINT_ZLPI} (task − low-demand)")
-    ax_a.set_title(f"A · Paired D240 {ENDPOINT_ZLPI} (theta)")
+    if plotted_any:
+        _ref_hline(ax_a, 0.0)
+        ax_a.set_xticks(range(len(datasets)))
+        ax_a.set_xticklabels(dataset_tick_labels, rotation=0, ha="center")
+        ax_a.set_xlabel("Dataset", fontsize=FS_AXIS, labelpad=8)
+        ax_a.set_ylabel(
+            f"Δ {_endpoint_display(ENDPOINT_ZLPI)} (Fisher z)\n"
+            f"task − low-demand",
+            fontsize=FS_AXIS,
+            labelpad=10,
+        )
+        _style_axes(ax_a)
+        # CI is stated on the axis title family; no redundant legend.
+    else:
+        _mark_empty_panel(
+            ax_a,
+            MSG_NOT_APPLICABLE,
+            xlabel="Dataset",
+            ylabel=(
+                f"Δ {_endpoint_display(ENDPOINT_ZLPI)} "
+                f"(task − low-demand; {ZLPI_METRIC})"
+            ),
+        )
+    _set_panel_title(ax_a, f"Paired 240 s {_endpoint_display(ENDPOINT_ZLPI)} (theta)")
+    _add_panel_label(ax_a, "A")
     paired_csv = source_dir / "figure2_panel_a_paired_deltas.csv"
     write_source_csv(
         paired_csv,
@@ -514,13 +975,15 @@ def render_figure2(
         and str(r.get("is_primary_analysis", "true")).lower() in {"true", "1", "yes", ""}
     ]
     forest_source = []
-    for i, band in enumerate(BAND_ORDER):
+    for band in BAND_ORDER:
         row = next((r for r in meta_rows if _as_str(r.get("band")).casefold() == band), None)
         if row is None:
             continue
         effect = _as_float(row.get("pooled_effect"))
         lo = _as_float(row.get("ci_low"))
         hi = _as_float(row.get("ci_high"))
+        if not math.isfinite(effect):
+            continue
         forest_source.append(
             {
                 "band": band,
@@ -534,12 +997,58 @@ def render_figure2(
                 "tau2": _as_float(row.get("tau2")),
             }
         )
-        ax_b.errorbar(effect, i, xerr=[[effect - lo], [hi - effect]], fmt="o", color="#4C78A8", capsize=3)
-    ax_b.axvline(0.0, color="black", lw=0.8, ls="--")
-    ax_b.set_yticks(range(len(forest_source)))
-    ax_b.set_yticklabels([r["band"] for r in forest_source])
-    ax_b.set_xlabel(f"Pooled Δ {ENDPOINT_ZLPI} (95% CI)")
-    ax_b.set_title("B · Random-effects meta (primary ZLPI)")
+    n_meta_datasets = _n_datasets_from_rows(forest_source) or _n_datasets_from_rows(meta_rows)
+    for i, row in enumerate(forest_source):
+        effect = float(row["pooled_effect"])
+        lo = float(row["ci_low"])
+        hi = float(row["ci_high"])
+        band = str(row["band"])
+        xerr = None
+        if math.isfinite(lo) and math.isfinite(hi):
+            xerr = [[effect - lo], [hi - effect]]
+        ax_b.errorbar(
+            effect,
+            i,
+            xerr=xerr,
+            fmt=_band_marker(band),
+            color=_band_color(band),
+            markersize=MARKER_SIZE,
+            capsize=4,
+            elinewidth=LINE_WIDTH,
+            linestyle=_band_linestyle(band),
+            markeredgecolor=PALETTE["dark_gray"],
+            markeredgewidth=0.6,
+        )
+    if forest_source:
+        _ref_vline(ax_b, 0.0)
+        ax_b.set_yticks(range(len(forest_source)))
+        ax_b.set_yticklabels([_band_display(str(r["band"])) for r in forest_source])
+        ax_b.set_ylabel(EEG_BAND_YLABEL, fontsize=FS_AXIS, labelpad=10)
+        ax_b.set_xlabel(
+            f"Pooled Δ {_endpoint_display(ENDPOINT_ZLPI)} "
+            f"({ZLPI_METRIC}; {CI_95_LABEL})",
+            fontsize=FS_AXIS,
+            labelpad=8,
+        )
+        _style_axes(ax_b)
+    else:
+        _mark_empty_panel(
+            ax_b,
+            MSG_NOT_INCLUDED,
+            xlabel=(
+                f"Pooled Δ {_endpoint_display(ENDPOINT_ZLPI)} "
+                f"({ZLPI_METRIC}; {CI_95_LABEL})"
+            ),
+            ylabel=EEG_BAND_YLABEL,
+        )
+    _set_panel_title(
+        ax_b,
+        _meta_or_single_title(
+            n_datasets=n_meta_datasets,
+            endpoint_label=_endpoint_display(ENDPOINT_ZLPI),
+        ),
+    )
+    _add_panel_label(ax_b, "B")
     forest_csv = source_dir / "figure2_panel_b_meta_forest.csv"
     write_source_csv(
         forest_csv,
@@ -561,12 +1070,17 @@ def render_figure2(
         FigurePanelSource(
             figure_id="figure2",
             panel_id="meta_forest",
-            title="Meta-analysis forest by band",
+            title=(
+                "Random-effects meta-analysis"
+                if n_meta_datasets >= 2
+                else "Single-dataset effect estimate"
+            ),
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=240,
             input_tables=[str(inputs.get("meta_analysis") or "")],
             source_data_csv=str(forest_csv),
             analysis_keys=["endpoint=zlpi", "duration=240", "is_primary_analysis=true"],
+            notes=f"n_datasets={n_meta_datasets}; error bars are {CI_95_LABEL}.",
         )
     )
 
@@ -603,7 +1117,8 @@ def render_figure2(
                     "can_rescue_primary": False,
                 }
             )
-    for i, band in enumerate(BAND_ORDER):
+    plotted_bands = [band for band in BAND_ORDER if by_band.get(band)]
+    for i, band in enumerate(plotted_bands):
         vals = np.asarray(by_band.get(band, []), dtype=float)
         if vals.size == 0:
             continue
@@ -613,15 +1128,39 @@ def render_figure2(
             xerr=1.959963984540054 * float(np.std(vals, ddof=1) / math.sqrt(vals.size))
             if vals.size >= 2
             else 0.0,
-            fmt="s",
-            color="#54A24B",
-            capsize=3,
+            fmt=_band_marker(band),
+            color=_band_color(band),
+            markersize=MARKER_SIZE,
+            capsize=4,
+            elinewidth=LINE_WIDTH,
+            linestyle=_band_linestyle(band),
+            markeredgecolor=PALETTE["dark_gray"],
+            markeredgewidth=0.6,
         )
-    ax_c.axvline(0.0, color="black", lw=0.8, ls="--")
-    ax_c.set_yticks(range(len(BAND_ORDER)))
-    ax_c.set_yticklabels(list(BAND_ORDER))
-    ax_c.set_xlabel(f"D180 {ENDPOINT_ZLPI} effects (sensitivity only)")
-    ax_c.set_title("C · D180 ZLPI sensitivity (cannot rescue primary)")
+    if plotted_bands:
+        _ref_vline(ax_c, 0.0)
+        ax_c.set_yticks(range(len(plotted_bands)))
+        ax_c.set_yticklabels([_band_display(b) for b in plotted_bands])
+        ax_c.set_ylabel(EEG_BAND_YLABEL, fontsize=FS_AXIS, labelpad=10)
+        ax_c.set_xlabel(
+            f"D180 {_endpoint_display(ENDPOINT_ZLPI)} effects "
+            f"({ZLPI_METRIC}; {CI_95_LABEL}; sensitivity only)",
+            fontsize=FS_AXIS,
+            labelpad=8,
+        )
+        _style_axes(ax_c)
+    else:
+        _mark_empty_panel(
+            ax_c,
+            MSG_NOT_INCLUDED,
+            xlabel=(
+                f"D180 {_endpoint_display(ENDPOINT_ZLPI)} effects "
+                f"({ZLPI_METRIC}; {CI_95_LABEL}; sensitivity only)"
+            ),
+            ylabel=EEG_BAND_YLABEL,
+        )
+    _set_panel_title(ax_c, f"180 s {_endpoint_display(ENDPOINT_ZLPI)} sensitivity")
+    _add_panel_label(ax_c, "C")
     d180_csv = source_dir / "figure2_panel_c_d180_sensitivity.csv"
     write_source_csv(
         d180_csv,
@@ -651,19 +1190,28 @@ def render_figure2(
         )
     )
 
-    # Panel D: peak-center TOST / ±2 s equivalence.
+    # Panel D: peak-center TOST / ±2 s equivalence (primary D240 ZLPI slice).
     ax_d = fig.add_subplot(gs[1, 1])
-    eq_source = []
-    for i, row in enumerate(equivalence):
+    eq_candidates = []
+    for row in equivalence:
         if _as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
+            continue
+        if _as_int(row.get("duration_s"), 240) != 240:
+            continue
+        if (
+            _as_str(row.get("power_representation"), PRIMARY_REPRESENTATION).casefold()
+            != PRIMARY_REPRESENTATION
+        ):
             continue
         mean_mu = _as_float(row.get("mean_mu"))
         lo = _as_float(row.get("ci_low"))
         hi = _as_float(row.get("ci_high"))
-        eq_source.append(
+        if not math.isfinite(mean_mu):
+            continue
+        eq_candidates.append(
             {
                 "dataset_id": _as_str(row.get("dataset_id")),
-                "band": _as_str(row.get("band")),
+                "band": _as_str(row.get("band")).casefold(),
                 "endpoint_name": ENDPOINT_ZLPI,
                 "mean_mu": mean_mu,
                 "ci_low": lo,
@@ -673,20 +1221,114 @@ def render_figure2(
                 "equivalent": _as_str(row.get("equivalent")),
             }
         )
-        ax_d.errorbar(mean_mu, i, xerr=[[mean_mu - lo], [hi - mean_mu]], fmt="o", color="#F58518", capsize=3)
-    ax_d.axvspan(
-        -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
-        EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
-        color="#F58518",
-        alpha=0.15,
+    eq_source = sorted(
+        eq_candidates,
+        key=lambda r: (_as_str(r["dataset_id"]).casefold(), _band_sort_key(str(r["band"]))),
     )
-    ax_d.axvline(0.0, color="black", lw=0.8, ls="--")
-    ax_d.set_yticks(range(len(eq_source)))
-    ax_d.set_yticklabels(
-        [f"{r['dataset_id']}:{r['band']}" for r in eq_source] or ["no data"]
-    )
-    ax_d.set_xlabel("Peak center μ (s)")
-    ax_d.set_title("D · Low-demand μ equivalence (±2 s)")
+    n_eq_datasets = len({_as_str(r["dataset_id"]).casefold() for r in eq_source})
+    # For a single-dataset figure, reserve a row for every confirmatory band.
+    if n_eq_datasets <= 1 and eq_source:
+        by_band = {str(r["band"]).casefold(): r for r in eq_source}
+        dataset_id = _as_str(eq_source[0]["dataset_id"])
+        expanded = []
+        for band in BAND_ORDER:
+            if band in by_band:
+                expanded.append(by_band[band])
+            else:
+                expanded.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "band": band,
+                        "endpoint_name": ENDPOINT_ZLPI,
+                        "mean_mu": float("nan"),
+                        "ci_low": float("nan"),
+                        "ci_high": float("nan"),
+                        "bound_low": -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
+                        "bound_high": EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
+                        "equivalent": "",
+                    }
+                )
+        eq_source = expanded
+    for i, row in enumerate(eq_source):
+        mean_mu = float(row["mean_mu"])
+        lo = float(row["ci_low"])
+        hi = float(row["ci_high"])
+        band = str(row["band"])
+        if not math.isfinite(mean_mu):
+            ax_d.text(
+                0.02,
+                i,
+                "Not included",
+                va="center",
+                ha="left",
+                fontsize=FS_TICK - 1,
+                color=PALETTE["dark_gray"],
+                transform=ax_d.get_yaxis_transform(),
+            )
+            continue
+        xerr = None
+        if math.isfinite(lo) and math.isfinite(hi):
+            xerr = [[mean_mu - lo], [hi - mean_mu]]
+        ax_d.errorbar(
+            mean_mu,
+            i,
+            xerr=xerr,
+            fmt=_band_marker(band),
+            color=_band_color(band),
+            markersize=MARKER_SIZE,
+            capsize=4,
+            elinewidth=LINE_WIDTH,
+            linestyle=_band_linestyle(band),
+            markeredgecolor=PALETTE["dark_gray"],
+            markeredgewidth=0.6,
+        )
+    if eq_source:
+        ax_d.axvspan(
+            -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
+            EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
+            facecolor=PALETTE["orange"],
+            alpha=0.35,
+            hatch="////",
+            edgecolor=PALETTE["vermillion"],
+            linewidth=0.8,
+            label=EQUIVALENCE_REGION_LABEL,
+            zorder=0,
+        )
+        ax_d.axvline(-EXPECTED_PEAK_CENTER_EQUIVALENCE_S, color=PALETTE["vermillion"], lw=1.2, ls=":", zorder=1)
+        ax_d.axvline(EXPECTED_PEAK_CENTER_EQUIVALENCE_S, color=PALETTE["vermillion"], lw=1.2, ls=":", zorder=1)
+        _ref_vline(ax_d, 0.0)
+        ax_d.set_yticks(range(len(eq_source)))
+        if n_eq_datasets <= 1:
+            y_labels = [_band_display(str(r["band"])) for r in eq_source]
+        else:
+            y_labels = [
+                f"{r['dataset_id']} · {_band_display(str(r['band']))}" for r in eq_source
+            ]
+        ax_d.set_yticklabels(y_labels, fontsize=FS_TICK)
+        ax_d.set_ylabel(
+            EEG_BAND_YLABEL if n_eq_datasets <= 1 else "Dataset · EEG frequency band",
+            fontsize=FS_AXIS,
+            labelpad=10,
+        )
+        ax_d.set_xlabel(f"Peak center μ (s; {CI_95_LABEL})", fontsize=FS_AXIS, labelpad=8)
+        _style_axes(ax_d)
+        handles, labels = ax_d.get_legend_handles_labels()
+        eq_items = [
+            (h, lab)
+            for h, lab in zip(handles, labels, strict=False)
+            if lab == EQUIVALENCE_REGION_LABEL
+        ]
+        if eq_items:
+            _legend_inside(ax_d, [eq_items[0][0]], [eq_items[0][1]], loc="upper right")
+    else:
+        _mark_empty_panel(
+            ax_d,
+            MSG_NOT_INCLUDED,
+            xlabel=f"Peak center μ (s; {CI_95_LABEL})",
+            ylabel=EEG_BAND_YLABEL,
+        )
+    _set_panel_title(ax_d, "Peak-center equivalence (±2 s)")
+    _add_panel_label(ax_d, "D")
     eq_csv = source_dir / "figure2_panel_d_mu_equivalence.csv"
     write_source_csv(
         eq_csv,
@@ -716,11 +1358,18 @@ def render_figure2(
             analysis_keys=[
                 "endpoint=zlpi",
                 f"equivalence_bounds=±{EXPECTED_PEAK_CENTER_EQUIVALENCE_S}s",
+                "duration=240",
+                f"representation={PRIMARY_REPRESENTATION}",
             ],
+            notes=(
+                "Primary D240 absolute_log10 ZLPI slice, sorted by dataset then band. "
+                f"Error bars are {CI_95_LABEL}."
+            ),
         )
     )
 
-    fig.suptitle("Figure 2 — State attenuation and replication", fontsize=12)
+    fig.suptitle(FIGURE2_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.98)
+    fig.subplots_adjust(left=0.12, right=0.97, top=0.88, bottom=0.10, wspace=0.45, hspace=0.42)
     pdf, svg, png = save_figure_trio(fig, output_dir, FIGURE2_STEM)
     return FigureArtifacts(
         figure_id="figure2",
@@ -748,8 +1397,9 @@ def render_figure3(
     panel_sources: list[FigurePanelSource] = []
     source_paths: list[Path] = []
 
-    fig = plt.figure(figsize=(12, 9))
-    gs = fig.add_gridspec(2, 2, hspace=0.35, wspace=0.3)
+    _configure_publication_style()
+    fig = plt.figure(figsize=(13.5, 10.5), constrained_layout=False)
+    gs = fig.add_gridspec(2, 2, hspace=0.40, wspace=0.38)
 
     # Panel A: observed vs null surrogate markers.
     ax_a = fig.add_subplot(gs[0, 0])
@@ -776,17 +1426,40 @@ def render_figure3(
             [r["observed_endpoint_index"] for r in null_source], dtype=float
         )
         null_mean = np.asarray([r["null_mean"] for r in null_source], dtype=float)
-        ax_a.scatter(null_mean, observed, s=16, alpha=0.7, color="#4C78A8")
+        ax_a.scatter(
+            null_mean,
+            observed,
+            s=SCATTER_SIZE,
+            alpha=0.75,
+            color=_band_color("theta"),
+            marker="o",
+            edgecolors=PALETTE["dark_gray"],
+            linewidths=0.6,
+            zorder=2,
+        )
         lims = [
             np.nanmin([null_mean.min(), observed.min()]),
             np.nanmax([null_mean.max(), observed.max()]),
         ]
-        ax_a.plot(lims, lims, color="black", ls="--", lw=0.8)
+        ax_a.plot(lims, lims, color=REF_LINE_COLOR, ls="--", lw=1.0, zorder=1)
     else:
-        ax_a.text(0.5, 0.5, "No null table", ha="center", va="center", transform=ax_a.transAxes)
-    ax_a.set_xlabel("Null mean endpoint")
-    ax_a.set_ylabel(f"Observed {ENDPOINT_ZLPI}")
-    ax_a.set_title("A · Observed vs surrogate nulls (ZLPI)")
+        _mark_empty_panel(
+            ax_a,
+            MSG_NOT_INCLUDED,
+            xlabel=f"Null mean endpoint ({ZLPI_METRIC})",
+            ylabel=f"Observed {_endpoint_display(ENDPOINT_ZLPI)} ({ZLPI_METRIC})",
+            xlim=(-0.5, 0.5),
+            ylim=(-0.5, 0.5),
+        )
+    ax_a.set_xlabel(f"Null mean endpoint ({ZLPI_METRIC})", fontsize=FS_AXIS, labelpad=8)
+    ax_a.set_ylabel(
+        f"Observed {_endpoint_display(ENDPOINT_ZLPI)} ({ZLPI_METRIC})",
+        fontsize=FS_AXIS,
+        labelpad=10,
+    )
+    _style_axes(ax_a)
+    _set_panel_title(ax_a, f"Observed vs surrogate nulls ({_endpoint_display(ENDPOINT_ZLPI)})")
+    _add_panel_label(ax_a, "A")
     null_csv = source_dir / "figure3_panel_a_nulls.csv"
     write_source_csv(
         null_csv,
@@ -821,10 +1494,11 @@ def render_figure3(
     ax_b = fig.add_subplot(gs[0, 1])
     duration_source = []
     endpoint_styles = {
-        ENDPOINT_ZLPI: ("o", "#4C78A8"),
-        ENDPOINT_MID_WINDOW_PROXIMAL_INDEX: ("s", "#F58518"),
-        ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX: ("D", "#54A24B"),
+        ENDPOINT_ZLPI: ("o", "-", PALETTE["blue"]),
+        ENDPOINT_MID_WINDOW_PROXIMAL_INDEX: ("s", "--", PALETTE["orange"]),
+        ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX: ("s", "-.", PALETTE["green"]),
     }
+    plotted_duration = False
     for row in duration:
         endpoint = _as_str(row.get("endpoint_name"))
         duration_s = _as_int(row.get("duration_s"))
@@ -844,30 +1518,60 @@ def render_figure3(
                 "can_rescue_primary": False,
             }
         )
-        marker, color = endpoint_styles.get(endpoint, ("x", "#999999"))
+        marker, linestyle, color = endpoint_styles.get(endpoint, ("x", ":", "#999999"))
+        lo = _as_float(row.get("ci_low"))
+        hi = _as_float(row.get("ci_high"))
+        yerr = [[effect - lo], [hi - effect]] if math.isfinite(lo) and math.isfinite(hi) else None
         ax_b.errorbar(
             duration_s,
             effect,
-            yerr=[
-                [effect - _as_float(row.get("ci_low"))],
-                [_as_float(row.get("ci_high")) - effect],
-            ]
-            if math.isfinite(_as_float(row.get("ci_low")))
-            else None,
+            yerr=yerr,
             fmt=marker,
             color=color,
-            capsize=2,
-            alpha=0.8,
+            linestyle=linestyle,
+            markersize=MARKER_SIZE,
+            capsize=4,
+            elinewidth=LINE_WIDTH,
+            markeredgecolor=PALETTE["dark_gray"],
+            markeredgewidth=0.6,
+            alpha=0.9,
         )
-    ax_b.axhline(0.0, color="black", lw=0.8, ls="--")
-    ax_b.set_xticks([60, 120, 180, 240])
-    ax_b.set_xlabel("Duration (s)")
-    ax_b.set_ylabel("Effect estimate")
-    ax_b.set_title("B · Duration sensitivity (ZLPI/MWPI/SWPI separate)")
-    # Legend proxies
-    for endpoint, (marker, color) in endpoint_styles.items():
-        ax_b.plot([], [], marker=marker, color=color, ls="none", label=endpoint)
-    ax_b.legend(fontsize=7, frameon=False, loc="best")
+        plotted_duration = True
+    if plotted_duration:
+        _ref_hline(ax_b, 0.0)
+        ax_b.set_xticks([60, 120, 180, 240])
+        ax_b.set_xlabel("Duration (s)", fontsize=FS_AXIS)
+        ax_b.set_ylabel(
+            f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
+            fontsize=FS_AXIS,
+        )
+        _style_axes(ax_b)
+        legend_handles = []
+        legend_labels = []
+        for endpoint, (marker, linestyle, color) in endpoint_styles.items():
+            (handle,) = ax_b.plot(
+                [],
+                [],
+                marker=marker,
+                color=color,
+                ls=linestyle,
+                markersize=MARKER_SIZE,
+                markeredgecolor=PALETTE["dark_gray"],
+                markeredgewidth=0.6,
+                lw=LINE_WIDTH,
+            )
+            legend_handles.append(handle)
+            legend_labels.append(_endpoint_display(endpoint))
+        _legend_inside(ax_b, legend_handles, legend_labels, loc="upper right")
+    else:
+        _mark_empty_panel(
+            ax_b,
+            MSG_NOT_INCLUDED,
+            xlabel="Duration (s)",
+            ylabel=f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
+        )
+    _set_panel_title(ax_b, "Duration sensitivity")
+    _add_panel_label(ax_b, "B")
     duration_csv = source_dir / "figure3_panel_b_duration.csv"
     write_source_csv(
         duration_csv,
@@ -917,13 +1621,31 @@ def render_figure3(
         )
     if modality_source:
         vals = np.asarray([r["delta_ecg_minus_ppg"] for r in modality_source], dtype=float)
-        ax_c.hist(vals[np.isfinite(vals)], bins=15, color="#B279A2", alpha=0.85)
-        ax_c.axvline(0.0, color="black", lw=0.8, ls="--")
-        ax_c.set_title(f"C · Matched ECG−PPG (n={np.isfinite(vals).sum()})")
+        ax_c.hist(
+            vals[np.isfinite(vals)],
+            bins=15,
+            color=PALETTE["purple"],
+            alpha=0.85,
+            edgecolor=PALETTE["dark_gray"],
+            linewidth=0.6,
+        )
+        _ref_vline(ax_c, 0.0)
+        ax_c.set_xlabel(f"ECG − PPG endpoint difference ({ZLPI_METRIC})", fontsize=FS_AXIS)
+        ax_c.set_ylabel("Count", fontsize=FS_AXIS)
+        _style_axes(ax_c)
+        _set_panel_title(ax_c, f"Matched ECG−PPG (n = {int(np.isfinite(vals).sum())})")
+        _add_panel_label(ax_c, "C")
     else:
-        ax_c.text(0.5, 0.5, "No matched modality pairs", ha="center", va="center", transform=ax_c.transAxes)
-        ax_c.set_title("C · Matched ECG−PPG")
-    ax_c.set_xlabel("ECG − PPG endpoint")
+        _mark_empty_panel(
+            ax_c,
+            MSG_NOT_APPLICABLE,
+            xlabel=f"ECG − PPG endpoint difference ({ZLPI_METRIC})",
+            ylabel="Count",
+            xlim=(-1.0, 1.0),
+            ylim=(0.0, 1.0),
+        )
+        _set_panel_title(ax_c, "Matched ECG−PPG")
+        _add_panel_label(ax_c, "C")
     modality_csv = source_dir / "figure3_panel_c_modality.csv"
     write_source_csv(
         modality_csv,
@@ -978,8 +1700,31 @@ def render_figure3(
         effect = _as_float(row["effect_estimate"])
         if not math.isfinite(effect):
             continue
-        ax_d.errorbar(effect, len(y_labels), fmt="o", color="#4C78A8", capsize=2)
-        y_labels.append(str(row["control_id"])[:28])
+        lo = _as_float(row["ci_low"])
+        hi = _as_float(row["ci_high"])
+        xerr = None
+        if math.isfinite(lo) and math.isfinite(hi):
+            xerr = [[effect - lo], [hi - effect]]
+        control_key = _as_str(row["control_id"]).casefold()
+        if "swpi" in control_key:
+            marker, color = "s", PALETTE["green"]
+        elif "mwpi" in control_key:
+            marker, color = "s", PALETTE["orange"]
+        else:
+            marker, color = "o", PALETTE["blue"]
+        ax_d.errorbar(
+            effect,
+            len(y_labels),
+            xerr=xerr,
+            fmt=marker,
+            color=color,
+            markersize=MARKER_SIZE,
+            capsize=4,
+            elinewidth=LINE_WIDTH,
+            markeredgecolor=PALETTE["dark_gray"],
+            markeredgewidth=0.6,
+        )
+        y_labels.append(_spec_display(str(row["control_id"])))
     if loo:
         loo_source = []
         for row in loo:
@@ -1007,11 +1752,26 @@ def render_figure3(
             ),
         )
         source_paths.append(loo_csv)
-    ax_d.axvline(0.0, color="black", lw=0.8, ls="--")
-    ax_d.set_yticks(range(len(y_labels)))
-    ax_d.set_yticklabels(y_labels or ["no data"])
-    ax_d.set_xlabel("Effect estimate")
-    ax_d.set_title("D · Specification matrix / sensitivity")
+    if y_labels:
+        _ref_vline(ax_d, 0.0)
+        ax_d.set_yticks(range(len(y_labels)))
+        ax_d.set_yticklabels(y_labels, fontsize=FS_TICK - 1)
+        ax_d.set_ylabel("Spec.", fontsize=FS_AXIS, labelpad=6)
+        ax_d.set_xlabel(
+            f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
+            fontsize=FS_AXIS,
+            labelpad=8,
+        )
+        _style_axes(ax_d)
+    else:
+        _mark_empty_panel(
+            ax_d,
+            MSG_NOT_INCLUDED,
+            xlabel=f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
+            ylabel="Spec.",
+        )
+    _set_panel_title(ax_d, "Specification matrix")
+    _add_panel_label(ax_d, "D")
     spec_csv = source_dir / "figure3_panel_d_specification.csv"
     write_source_csv(
         spec_csv,
@@ -1047,7 +1807,8 @@ def render_figure3(
         )
     )
 
-    fig.suptitle("Figure 3 — Temporal and artifact specificity", fontsize=12)
+    fig.suptitle(FIGURE3_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.98)
+    fig.subplots_adjust(left=0.12, right=0.97, top=0.88, bottom=0.10, wspace=0.50, hspace=0.42)
     pdf, svg, png = save_figure_trio(fig, output_dir, FIGURE3_STEM)
     return FigureArtifacts(
         figure_id="figure3",

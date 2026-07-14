@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import math
 import unittest
 from tempfile import TemporaryDirectory
@@ -368,6 +369,13 @@ class TestPrimaryProtection(unittest.TestCase):
         self.assertIn(PRIMARY_CONTROL_ID, control_ids)
         self.assertIn(CONTROL_D120, control_ids)
         self.assertIn(CONTROL_CARDIAC_FIELD, control_ids)
+        primary = next(
+            r for r in result.specification_rows if r["control_id"] == PRIMARY_CONTROL_ID
+        )
+        self.assertEqual(primary["analysis_priority"], 1)
+        self.assertEqual(primary["execution_order"], 1)
+        priorities = [int(r["analysis_priority"]) for r in result.specification_rows]
+        self.assertEqual(priorities, sorted(priorities))
 
 
 class TestHelpersAndOutputs(unittest.TestCase):
@@ -389,6 +397,14 @@ class TestHelpersAndOutputs(unittest.TestCase):
             self.assertEqual({p.name for p in paths.values()}, expected)
             for path in paths.values():
                 self.assertTrue(path.is_file())
+            with paths["artifact_control_results"].open(encoding="utf-8", newline="") as handle:
+                artifact = list(csv.DictReader(handle))
+            self.assertEqual(len(artifact), 1)
+            self.assertEqual(artifact[0]["table_status"], "skipped_not_requested")
+            with paths["modality_comparison"].open(encoding="utf-8", newline="") as handle:
+                modality = list(csv.DictReader(handle))
+            self.assertEqual(len(modality), 1)
+            self.assertEqual(modality[0]["table_status"], "skipped_not_applicable")
 
 
 if __name__ == "__main__":

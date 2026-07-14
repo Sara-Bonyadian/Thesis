@@ -76,6 +76,11 @@ STATUS_INSUFFICIENT = "insufficient_data"
 STATUS_PRIMARY = "primary_reference"
 STATUS_SENSITIVITY_ONLY = "sensitivity_only"
 
+TABLE_STATUS_COMPLETED = "completed"
+TABLE_STATUS_SKIPPED_NOT_REQUESTED = "skipped_not_requested"
+TABLE_STATUS_SKIPPED_NOT_APPLICABLE = "skipped_not_applicable"
+TABLE_STATUS_SKIPPED_UNAVAILABLE = "skipped_unavailable"
+
 # QRS interpolation default half-width (seconds) around each beat on raw-ish EEG grids.
 DEFAULT_QRS_HALF_WIDTH_S = 0.05
 
@@ -111,6 +116,7 @@ ARTIFACT_FIELDS = (
     "delta_vs_primary",
     "artifact_injected",
     "control_applied",
+    "table_status",
     "status",
     "notes",
 )
@@ -129,6 +135,7 @@ MODALITY_FIELDS = (
     "ppg_endpoint_index",
     "delta_ecg_minus_ppg",
     "matched",
+    "table_status",
     "status",
     "notes",
 )
@@ -154,6 +161,8 @@ DURATION_FIELDS = (
 
 SPEC_MATRIX_FIELDS = (
     "control_id",
+    "analysis_priority",
+    "execution_order",
     "analysis_role",
     "is_primary_analysis",
     "can_rescue_primary",
@@ -1580,18 +1589,25 @@ def run_artifact_controls(
 def build_specification_matrix(
     sensitivity_rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """One matrix row per control with pooled effect / CI / n / status."""
+    """One matrix row per control with pooled effect / CI / n / status.
+
+    ``analysis_priority`` / ``execution_order`` document the confirmatory
+    hierarchy (1 = immutable primary analysis).
+    """
     by_control: dict[str, list[Mapping[str, object]]] = {}
     for row in sensitivity_rows:
         by_control.setdefault(_as_str(row.get("control_id")), []).append(row)
 
     matrix: list[dict[str, object]] = []
     for control_id in ALL_CONTROL_IDS:
+        priority = ALL_CONTROL_IDS.index(control_id) + 1
         rows = by_control.get(control_id, [])
         if not rows:
             matrix.append(
                 {
                     "control_id": control_id,
+                    "analysis_priority": priority,
+                    "execution_order": priority,
                     "analysis_role": "unspecified",
                     "is_primary_analysis": control_id == PRIMARY_CONTROL_ID,
                     "can_rescue_primary": False,
@@ -1625,6 +1641,8 @@ def build_specification_matrix(
             matrix.append(
                 {
                     "control_id": control_id,
+                    "analysis_priority": priority,
+                    "execution_order": priority,
                     "analysis_role": first.get("analysis_role", ""),
                     "is_primary_analysis": bool(first.get("is_primary_analysis")),
                     "can_rescue_primary": False,
@@ -1647,6 +1665,8 @@ def build_specification_matrix(
             matrix.append(
                 {
                     "control_id": control_id,
+                    "analysis_priority": priority,
+                    "execution_order": priority,
                     "analysis_role": row.get("analysis_role", ""),
                     "is_primary_analysis": bool(row.get("is_primary_analysis")),
                     "can_rescue_primary": False,
@@ -1672,6 +1692,8 @@ def build_specification_matrix(
             matrix.append(
                 {
                     "control_id": control_id,
+                    "analysis_priority": priority,
+                    "execution_order": priority,
                     "analysis_role": first.get("analysis_role", ""),
                     "is_primary_analysis": control_id == PRIMARY_CONTROL_ID,
                     "can_rescue_primary": False,
@@ -1730,9 +1752,66 @@ def write_artifact_control_outputs(
         "specification_matrix": output_path / SPECIFICATION_MATRIX_FILENAME,
         "sensitivity_qc": output_path / SENSITIVITY_QC_FILENAME,
     }
+
+    artifact_rows = [
+        {**dict(row), "table_status": TABLE_STATUS_COMPLETED}
+        for row in result.artifact_rows
+    ]
+    if not artifact_rows:
+        artifact_rows = [
+            {
+                "control_id": CONTROL_CARDIAC_FIELD,
+                "observation_id": "",
+                "dataset_id": "",
+                "band": "",
+                "duration_s": "",
+                "endpoint_name": ENDPOINT_ZLPI,
+                "primary_endpoint_index": float("nan"),
+                "controlled_endpoint_index": float("nan"),
+                "delta_vs_primary": float("nan"),
+                "artifact_injected": False,
+                "control_applied": False,
+                "table_status": TABLE_STATUS_SKIPPED_NOT_REQUESTED,
+                "status": STATUS_UNAVAILABLE,
+                "notes": (
+                    "Artifact-control table empty: series_controls were not "
+                    "requested for this run (not a failure)."
+                ),
+            }
+        ]
+
+    modality_rows = [
+        {**dict(row), "table_status": TABLE_STATUS_COMPLETED}
+        for row in result.modality_rows
+    ]
+    if not modality_rows:
+        modality_rows = [
+            {
+                "dataset_id": "",
+                "participant_id": "",
+                "session_id": "",
+                "condition": "",
+                "observation_id": "",
+                "duration_s": "",
+                "endpoint_name": ENDPOINT_ZLPI,
+                "band": "",
+                "power_representation": PRIMARY_POWER_REPRESENTATION,
+                "ecg_endpoint_index": float("nan"),
+                "ppg_endpoint_index": float("nan"),
+                "delta_ecg_minus_ppg": float("nan"),
+                "matched": False,
+                "table_status": TABLE_STATUS_SKIPPED_NOT_APPLICABLE,
+                "status": STATUS_UNAVAILABLE,
+                "notes": (
+                    "Modality comparison empty: no ECG/PPG modality labels "
+                    "available for matched comparison (analysis not applicable)."
+                ),
+            }
+        ]
+
     _write_csv(paths["sensitivity_results"], result.sensitivity_rows, SENSITIVITY_FIELDS)
-    _write_csv(paths["artifact_control_results"], result.artifact_rows, ARTIFACT_FIELDS)
-    _write_csv(paths["modality_comparison"], result.modality_rows, MODALITY_FIELDS)
+    _write_csv(paths["artifact_control_results"], artifact_rows, ARTIFACT_FIELDS)
+    _write_csv(paths["modality_comparison"], modality_rows, MODALITY_FIELDS)
     _write_csv(paths["duration_sensitivity"], result.duration_rows, DURATION_FIELDS)
     _write_csv(paths["specification_matrix"], result.specification_rows, SPEC_MATRIX_FIELDS)
     _write_csv(paths["sensitivity_qc"], result.qc_rows, QC_FIELDS)

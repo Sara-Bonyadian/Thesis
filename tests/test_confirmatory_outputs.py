@@ -53,7 +53,7 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
 def _seed_frozen_outputs(root: Path) -> None:
     lags = list(range(-60, 61))
     curve_rows = []
-    for band_i, band in enumerate(("delta", "theta", "alpha", "beta")):
+    for band_i, band in enumerate(("theta", "alpha", "beta", "low_gamma")):
         for obs in range(3):
             for lag in lags:
                 # Smooth zero-centered bump in Fisher-r space.
@@ -160,7 +160,7 @@ def _seed_frozen_outputs(root: Path) -> None:
             "p_value": 0.001,
             "notes": "",
         }
-        for band in ("delta", "theta", "alpha", "beta")
+        for band in ("theta", "alpha", "beta", "low_gamma")
     ]
     _write_csv(root / "meta_analysis_results.csv", meta)
 
@@ -411,6 +411,37 @@ class TestFigures(unittest.TestCase):
             for row in duration_rows:
                 self.assertEqual(str(row["can_rescue_primary"]).lower(), "false")
             self.assertEqual(FIGURE_DPI, 300)
+
+            eq_csv = out / "source_data" / "figure2_panel_d_mu_equivalence.csv"
+            with eq_csv.open(encoding="utf-8", newline="") as handle:
+                eq_rows = list(csv.DictReader(handle))
+            self.assertTrue(eq_rows)
+            bands = [row["band"] for row in eq_rows]
+            self.assertEqual(bands, sorted(bands, key=lambda b: ("theta", "alpha", "beta", "low_gamma").index(b) if b in ("theta", "alpha", "beta", "low_gamma") else 99))
+
+            meta_panel = next(p for p in payload["panels"] if p["panel_id"] == "meta_forest")
+            self.assertEqual(meta_panel["title"].casefold(), "random-effects meta-analysis")
+
+            from ppg_eeg.confirmatory.figures import (
+                FIGURE1_TITLE,
+                FIGURE2_TITLE,
+                MSG_NOT_APPLICABLE,
+                _band_not_analyzed_message,
+                _endpoint_display,
+                _meta_or_single_title,
+            )
+
+            self.assertEqual(_endpoint_display(ENDPOINT_ZLPI), "ZLPI")
+            self.assertEqual(_endpoint_display(ENDPOINT_MID_WINDOW_PROXIMAL_INDEX), "MWPI")
+            self.assertEqual(_endpoint_display(ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX), "SWPI")
+            self.assertIn("not analyzed", _band_not_analyzed_message("delta").casefold())
+            self.assertEqual(_meta_or_single_title(n_datasets=1), "Single-dataset effect estimate")
+            self.assertEqual(
+                _meta_or_single_title(n_datasets=2), "Random-effects meta-analysis"
+            )
+            self.assertEqual(MSG_NOT_APPLICABLE, "Not applicable for this dataset")
+            self.assertEqual(FIGURE1_TITLE, "Lag-resolved EEG–cardiac coupling")
+            self.assertEqual(FIGURE2_TITLE, "State-dependent attenuation of coupling")
 
 
 class TestReport(unittest.TestCase):

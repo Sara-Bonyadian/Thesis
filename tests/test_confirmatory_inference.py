@@ -398,6 +398,7 @@ class TestMixedModelFallback(unittest.TestCase):
         self.assertEqual(qc["model_backend"], "ols_cluster_participant")
         self.assertEqual(qc["status"], "fallback_ols")
         self.assertTrue(coef_rows)
+        self.assertEqual(coef_rows[0]["model_used"], "fixed_effects_fallback")
         # Second call identical → deterministic fallback path.
         with patch(
             "ppg_eeg.confirmatory.inference.smf.mixedlm",
