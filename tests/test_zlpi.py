@@ -230,6 +230,23 @@ class TestZlpiEndpoints(unittest.TestCase):
         self.assertEqual(metrics["exclusion_reason"], "insufficient_common_support")
         self.assertEqual(qc["min_common_support_required"], 60)
 
+    def test_condition_recovered_from_hiit_observation_id(self) -> None:
+        contract = contract_for_duration(240)
+        lag_to_r = {lag: 0.1 for lag in expected_lag_grid(contract)}
+        lag_to_r[0] = 0.4
+        rows = _curve_from_lag_map(
+            lag_to_r,
+            duration_s=240,
+            condition="",
+            dataset_id="hiit",
+            observation_id="hiit-01-ph-pre-rest",
+        )
+        metrics, qc = evaluate_endpoint_curve(rows, duration_s=240)
+        self.assertEqual(metrics["condition"], "ph_pre_rest")
+        self.assertEqual(qc["condition"], "ph_pre_rest")
+        self.assertEqual(metrics["endpoint_name"], ENDPOINT_ZLPI)
+        self.assertEqual(metrics["endpoint_alias"], "ZLPI")
+
     def test_clipping_propagates_into_endpoint(self) -> None:
         contract = contract_for_duration(240)
         lag_to_r = {lag: 0.0 for lag in expected_lag_grid(contract)}

@@ -1,4 +1,11 @@
-"""Fisher-z confirmatory endpoints (ZLPI, MWPI, SWPI) and local prominence."""
+"""Fisher-z confirmatory endpoints (ZLPI, MWPI, SWPI) and local prominence.
+
+Table identity
+--------------
+Each metrics/QC row carries both ``endpoint_name`` (canonical ID used for
+joins/filters) and ``endpoint_alias`` (short display acronym). See
+``DurationAnalysisContract`` for the distinction.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +17,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
-from .correlation import CURVES_TEMPLATE, IDENTITY_FIELDS
+from .correlation import CURVES_TEMPLATE, IDENTITY_FIELDS, identity_from_row
 from .duration_contracts import (
     DurationAnalysisContract,
     EXPECTED_DURATIONS_S,
@@ -146,7 +153,7 @@ def _mean_z(lag_to_r: Mapping[int, float], lags: Sequence[int]) -> float:
 
 
 def _identity_from_row(row: Mapping[str, object]) -> dict[str, str]:
-    return {field: str(row.get(field, "")).strip() for field in IDENTITY_FIELDS}
+    return identity_from_row(row)
 
 
 def _group_curve_rows(

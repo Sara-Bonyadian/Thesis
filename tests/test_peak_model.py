@@ -9,6 +9,8 @@ import numpy as np
 
 from ppg_eeg.confirmatory.endpoints import fisher_z
 from ppg_eeg.confirmatory.peak_model import (
+    EXCLUSION_FIT_NOT_ATTEMPTED,
+    EXCLUSION_NO_IDENTIFIABLE_PEAK,
     FWHM_FACTOR,
     MIN_IDENTIFIABLE_A,
     MU_BOUND_S,
@@ -120,7 +122,8 @@ class TestPeakModelFits(unittest.TestCase):
         self.assertFalse(fit["has_identifiable_peak"])
         self.assertFalse(fit["report_timing_shift"])
         self.assertTrue(math.isnan(float(fit["peak_center_mu_s"])))
-        self.assertEqual(fit["exclusion_reason"], "no_identifiable_positive_peak")
+        self.assertEqual(fit["exclusion_reason"], EXCLUSION_NO_IDENTIFIABLE_PEAK)
+        self.assertTrue(math.isfinite(float(fit["peak_lag_fitted_s"])))
 
     def test_noisy_curve_still_recovers_approximate_center(self) -> None:
         rng = np.random.default_rng(123)
@@ -135,8 +138,9 @@ class TestPeakModelFits(unittest.TestCase):
     def test_failed_fit_insufficient_points(self) -> None:
         fit = fit_gaussian_peak([0.0, 1.0], [0.1, 0.2], weights=[10.0, 10.0])
         self.assertFalse(fit["converged"])
-        self.assertEqual(fit["exclusion_reason"], "insufficient_finite_lags")
+        self.assertEqual(fit["exclusion_reason"], EXCLUSION_FIT_NOT_ATTEMPTED)
         self.assertFalse(fit["report_timing_shift"])
+        self.assertTrue(math.isnan(float(fit["peak_lag_fitted_s"])))
 
     def test_mu_boundary_case(self) -> None:
         lags = _lags(240)
@@ -175,8 +179,16 @@ class TestPeakModelFits(unittest.TestCase):
         self.assertTrue(params["converged"])
         self.assertTrue(params["has_identifiable_peak"])
         self.assertAlmostEqual(float(params["peak_center_mu_s"]), 2.0, delta=1.0)
+        self.assertEqual(params["endpoint_alias"], "ZLPI")
         self.assertIn("se_peak_height_A", params)
         self.assertIn("weighted_rss", params)
+        self.assertIn("peak_r", params)
+        self.assertIn("peak_lag_observed_s", params)
+        self.assertAlmostEqual(
+            float(params["peak_lag_fitted_s"]), float(params["peak_center_mu_s"]), places=10
+        )
+        self.assertTrue(math.isfinite(float(params["peak_r"])))
+        self.assertTrue(math.isfinite(float(params["peak_lag_observed_s"])))
 
         with TemporaryDirectory() as tmp:
             paths = write_peak_fit_outputs(result, tmp)
@@ -184,6 +196,28 @@ class TestPeakModelFits(unittest.TestCase):
             self.assertEqual(paths["qc"].name, QC_FILENAME)
             self.assertTrue(paths["params"].is_file())
             self.assertTrue(paths["qc"].is_file())
+
+    def test_condition_recovered_from_hiit_observation_id(self) -> None:
+        lags = _lags(240)
+        r = _r_from_z_peak(lags, baseline_C=0.0, peak_height_A=0.3, mu=0.0, sigma=8.0)
+        rows = _curve_rows(lags, r, duration_s=240, n_overlap=120)
+        for row in rows:
+            row["condition"] = ""
+            row["dataset_id"] = "hiit"
+            row["observation_id"] = "hiit-01-ps-pre-tetris"
+        result = compute_peak_fits_from_curves(rows, duration_s=240)
+        self.assertEqual(result.params_rows[0]["condition"], "ps_pre_tetris")
+        self.assertEqual(result.qc_rows[0]["condition"], "ps_pre_tetris")
+
+    def test_observed_peak_matches_known_lag(self) -> None:
+        lags = _lags(240)
+        r = np.zeros(lags.shape)
+        r[lags == 5.0] = 0.6
+        r[lags == -10.0] = -0.4
+        rows = _curve_rows(lags, r, duration_s=240, n_overlap=120)
+        params = compute_peak_fits_from_curves(rows, duration_s=240).params_rows[0]
+        self.assertAlmostEqual(float(params["peak_r"]), 0.6, places=10)
+        self.assertEqual(float(params["peak_lag_observed_s"]), 5.0)
 
     def test_fisher_z_path_matches_direct_z_fit_qualitatively(self) -> None:
         lags = _lags(240)

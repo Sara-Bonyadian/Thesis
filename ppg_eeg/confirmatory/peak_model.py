@@ -13,6 +13,16 @@ Constraints (confirmatory protocol)
 
 Fitting uses weighted nonlinear least squares with lag ``n_overlap`` as weights.
 This module performs **subject-level** fits only; group hierarchical inference is M10+.
+
+Exclusion reasons (``exclusion_reason``)
+----------------------------------------
+- ``gaussian_fit_not_attempted``: too few finite weighted lag points to call the optimizer
+- ``fit_failed``: optimizer was invoked but did not converge
+- ``no_identifiable_positive_peak``: fit converged, but amplitude criteria failed
+- empty string: identifiable positive peak (timing shift may be reported)
+
+``endpoint_name`` is the canonical duration-contract ID (e.g. ``zlpi``);
+``endpoint_alias`` is the short display acronym (``ZLPI`` / ``MWPI`` / ``SWPI``).
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ from typing import Mapping, Sequence
 import numpy as np
 from scipy.optimize import curve_fit
 
-from .correlation import CURVES_TEMPLATE, IDENTITY_FIELDS
+from .correlation import CURVES_TEMPLATE, IDENTITY_FIELDS, identity_from_row
 from .duration_contracts import EXPECTED_DURATIONS_S, contract_for_duration
 from .endpoints import fisher_z
 
@@ -42,10 +52,15 @@ MIN_IDENTIFIABLE_A = 1e-3
 MIN_FINITE_POINTS = 4
 DEFAULT_SIGMA0_S = 10.0
 
+EXCLUSION_FIT_NOT_ATTEMPTED = "gaussian_fit_not_attempted"
+EXCLUSION_FIT_FAILED = "fit_failed"
+EXCLUSION_NO_IDENTIFIABLE_PEAK = "no_identifiable_positive_peak"
+
 PARAMS_FIELDS = IDENTITY_FIELDS + (
     "duration_s",
     "duration_role",
     "endpoint_name",
+    "endpoint_alias",
     "is_standard_zlpi",
     "band",
     "power_representation",
@@ -59,6 +74,9 @@ PARAMS_FIELDS = IDENTITY_FIELDS + (
     "peak_center_mu_s",
     "sigma_s",
     "fwhm_s",
+    "peak_r",
+    "peak_lag_observed_s",
+    "peak_lag_fitted_s",
     "se_baseline_C",
     "se_peak_height_A",
     "se_peak_center_mu_s",
@@ -77,6 +95,7 @@ QC_FIELDS = IDENTITY_FIELDS + (
     "duration_s",
     "duration_role",
     "endpoint_name",
+    "endpoint_alias",
     "band",
     "power_representation",
     "pair",
@@ -130,7 +149,30 @@ def fwhm_from_sigma(sigma_s: float) -> float:
 
 
 def _identity_from_row(row: Mapping[str, object]) -> dict[str, str]:
-    return {field: str(row.get(field, "")).strip() for field in IDENTITY_FIELDS}
+    return identity_from_row(row)
+
+
+def _observed_peak_from_r(
+    lags: Sequence[float] | np.ndarray,
+    r_values: Sequence[float] | np.ndarray,
+) -> tuple[float, float]:
+    """Return (peak_r, peak_lag_observed_s) via max-|r| (same rule as C2 QC)."""
+    candidates = [
+        (float(lag), float(r))
+        for lag, r in zip(
+            np.asarray(lags, dtype=float),
+            np.asarray(r_values, dtype=float),
+            strict=True,
+        )
+        if np.isfinite(lag) and np.isfinite(r)
+    ]
+    if not candidates:
+        return float("nan"), float("nan")
+    lag_s, peak_r = min(
+        candidates,
+        key=lambda item: (-abs(item[1]), abs(item[0]), item[0]),
+    )
+    return peak_r, lag_s
 
 
 def _group_curve_rows(
@@ -205,6 +247,7 @@ def fit_gaussian_peak(
         "peak_center_mu_s": float("nan"),
         "sigma_s": float("nan"),
         "fwhm_s": float("nan"),
+        "peak_lag_fitted_s": float("nan"),
         "se_baseline_C": float("nan"),
         "se_peak_height_A": float("nan"),
         "se_peak_center_mu_s": float("nan"),
@@ -226,8 +269,10 @@ def fit_gaussian_peak(
     }
 
     if n_fit < MIN_FINITE_POINTS:
-        empty["exclusion_reason"] = "insufficient_finite_lags"
-        empty["optimizer_message"] = "Need at least 4 finite weighted lag points."
+        empty["exclusion_reason"] = EXCLUSION_FIT_NOT_ATTEMPTED
+        empty["optimizer_message"] = (
+            "Gaussian fit not attempted: need at least 4 finite weighted lag points."
+        )
         return empty
 
     c0, a0, mu0, sigma0 = _initial_guess(lags_f, z_f)
@@ -259,7 +304,7 @@ def fit_gaussian_peak(
         message = "curve_fit converged"
         success = True
     except (RuntimeError, ValueError) as exc:
-        empty["exclusion_reason"] = "fit_failed"
+        empty["exclusion_reason"] = EXCLUSION_FIT_FAILED
         empty["optimizer_message"] = str(exc)
         return empty
 
@@ -304,9 +349,12 @@ def fit_gaussian_peak(
         "report_timing_shift": report_timing,
         "baseline_C": baseline_C,
         "peak_height_A": peak_height_A,
+        # Timing-report μ remains NaN when the peak is not identifiable.
         "peak_center_mu_s": reported_mu,
         "sigma_s": sigma_s,
         "fwhm_s": fwhm_from_sigma(sigma_s),
+        # Always retain the optimizer μ for comparison with the observed peak.
+        "peak_lag_fitted_s": peak_center_mu_s,
         "se_baseline_C": float(se[0]),
         "se_peak_height_A": float(se[1]),
         "se_peak_center_mu_s": reported_se_mu,
@@ -324,7 +372,9 @@ def fit_gaussian_peak(
         "init_peak_height_A": a0,
         "init_peak_center_mu_s": mu0,
         "init_sigma_s": sigma0,
-        "exclusion_reason": "" if has_peak else "no_identifiable_positive_peak",
+        "exclusion_reason": (
+            "" if has_peak else EXCLUSION_NO_IDENTIFIABLE_PEAK
+        ),
     }
 
 
@@ -337,6 +387,42 @@ def evaluate_peak_curve(
     if duration_s not in EXPECTED_DURATIONS_S:
         raise ValueError(f"Unsupported duration_s={duration_s}.")
     contract = contract_for_duration(duration_s)
+    fit_param_keys = (
+        "converged",
+        "has_identifiable_peak",
+        "report_timing_shift",
+        "baseline_C",
+        "peak_height_A",
+        "peak_center_mu_s",
+        "sigma_s",
+        "fwhm_s",
+        "peak_lag_fitted_s",
+        "se_baseline_C",
+        "se_peak_height_A",
+        "se_peak_center_mu_s",
+        "se_sigma_s",
+        "rmse",
+        "weighted_rss",
+        "n_lags_fit",
+        "A_at_lower_bound",
+        "mu_at_bound",
+        "sigma_at_bound",
+        "exclusion_reason",
+    )
+    qc_fit_keys = (
+        "converged",
+        "has_identifiable_peak",
+        "report_timing_shift",
+        "fit_success",
+        "optimizer_message",
+        "n_lags_fit",
+        "init_baseline_C",
+        "init_peak_height_A",
+        "init_peak_center_mu_s",
+        "init_sigma_s",
+        "boundary_hit",
+        "exclusion_reason",
+    )
     if not curve_rows:
         identity = {field: "" for field in IDENTITY_FIELDS}
         fit = fit_gaussian_peak([], [])
@@ -345,65 +431,30 @@ def evaluate_peak_curve(
             "duration_s": duration_s,
             "duration_role": "",
             "endpoint_name": contract.endpoint_name,
+            "endpoint_alias": contract.endpoint_alias,
             "is_standard_zlpi": contract.is_standard_zlpi,
             "band": "",
             "power_representation": "",
             "is_primary_representation": False,
             "pair": "",
+            "peak_r": float("nan"),
+            "peak_lag_observed_s": float("nan"),
             "n_common_support": 0,
-            **{
-                key: fit[key]
-                for key in (
-                    "converged",
-                    "has_identifiable_peak",
-                    "report_timing_shift",
-                    "baseline_C",
-                    "peak_height_A",
-                    "peak_center_mu_s",
-                    "sigma_s",
-                    "fwhm_s",
-                    "se_baseline_C",
-                    "se_peak_height_A",
-                    "se_peak_center_mu_s",
-                    "se_sigma_s",
-                    "rmse",
-                    "weighted_rss",
-                    "n_lags_fit",
-                    "A_at_lower_bound",
-                    "mu_at_bound",
-                    "sigma_at_bound",
-                    "exclusion_reason",
-                )
-            },
+            **{key: fit[key] for key in fit_param_keys},
         }
         qc = {
             **identity,
             "duration_s": duration_s,
             "duration_role": "",
             "endpoint_name": contract.endpoint_name,
+            "endpoint_alias": contract.endpoint_alias,
             "band": "",
             "power_representation": "",
             "pair": "",
             "n_lags_input": 0,
             "n_common_support": 0,
             "overlap_is_constant": False,
-            **{
-                key: fit[key]
-                for key in (
-                    "converged",
-                    "has_identifiable_peak",
-                    "report_timing_shift",
-                    "fit_success",
-                    "optimizer_message",
-                    "n_lags_fit",
-                    "init_baseline_C",
-                    "init_peak_height_A",
-                    "init_peak_center_mu_s",
-                    "init_sigma_s",
-                    "boundary_hit",
-                    "exclusion_reason",
-                )
-            },
+            **{key: fit[key] for key in qc_fit_keys},
         }
         return params, qc
 
@@ -414,6 +465,7 @@ def evaluate_peak_curve(
     r_values = np.asarray([float(row["r"]) for row in ordered], dtype=float)
     overlaps = np.asarray([float(row.get("n_overlap", 0)) for row in ordered], dtype=float)
     z_values = np.asarray([fisher_z(float(r)) for r in r_values], dtype=float)
+    peak_r, peak_lag_observed_s = _observed_peak_from_r(lags, r_values)
 
     finite_overlap = overlaps[np.isfinite(overlaps) & (overlaps > 0)]
     overlap_is_constant = (
@@ -428,65 +480,30 @@ def evaluate_peak_curve(
         "duration_s": int(duration_s),
         "duration_role": str(first.get("duration_role", "")).strip(),
         "endpoint_name": contract.endpoint_name,
+        "endpoint_alias": contract.endpoint_alias,
         "is_standard_zlpi": bool(contract.is_standard_zlpi),
         "band": str(first.get("band", "")).strip().casefold(),
         "power_representation": str(first.get("power_representation", "")).strip(),
         "is_primary_representation": bool(first.get("is_primary_representation", False)),
         "pair": str(first.get("pair", "")).strip(),
+        "peak_r": peak_r,
+        "peak_lag_observed_s": peak_lag_observed_s,
         "n_common_support": n_common_support,
-        **{
-            key: fit[key]
-            for key in (
-                "converged",
-                "has_identifiable_peak",
-                "report_timing_shift",
-                "baseline_C",
-                "peak_height_A",
-                "peak_center_mu_s",
-                "sigma_s",
-                "fwhm_s",
-                "se_baseline_C",
-                "se_peak_height_A",
-                "se_peak_center_mu_s",
-                "se_sigma_s",
-                "rmse",
-                "weighted_rss",
-                "n_lags_fit",
-                "A_at_lower_bound",
-                "mu_at_bound",
-                "sigma_at_bound",
-                "exclusion_reason",
-            )
-        },
+        **{key: fit[key] for key in fit_param_keys},
     }
     qc = {
         **identity,
         "duration_s": int(duration_s),
         "duration_role": str(first.get("duration_role", "")).strip(),
         "endpoint_name": contract.endpoint_name,
+        "endpoint_alias": contract.endpoint_alias,
         "band": str(first.get("band", "")).strip().casefold(),
         "power_representation": str(first.get("power_representation", "")).strip(),
         "pair": str(first.get("pair", "")).strip(),
         "n_lags_input": int(lags.size),
         "n_common_support": n_common_support,
         "overlap_is_constant": overlap_is_constant,
-        **{
-            key: fit[key]
-            for key in (
-                "converged",
-                "has_identifiable_peak",
-                "report_timing_shift",
-                "fit_success",
-                "optimizer_message",
-                "n_lags_fit",
-                "init_baseline_C",
-                "init_peak_height_A",
-                "init_peak_center_mu_s",
-                "init_sigma_s",
-                "boundary_hit",
-                "exclusion_reason",
-            )
-        },
+        **{key: fit[key] for key in qc_fit_keys},
     }
     return params, qc
 
@@ -611,6 +628,9 @@ def run_confirmatory_peak_fits(
 
 __all__ = [
     "DEFAULT_SIGMA0_S",
+    "EXCLUSION_FIT_FAILED",
+    "EXCLUSION_FIT_NOT_ATTEMPTED",
+    "EXCLUSION_NO_IDENTIFIABLE_PEAK",
     "FWHM_FACTOR",
     "MIN_IDENTIFIABLE_A",
     "MU_BOUND_S",

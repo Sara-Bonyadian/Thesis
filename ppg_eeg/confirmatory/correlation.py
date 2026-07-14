@@ -244,11 +244,12 @@ def _condition_from_observation_id(observation_id: str, dataset_id: str) -> str:
     return ""
 
 
-def _identity_from_row(
+def identity_from_row(
     row: Mapping[str, object],
     *,
     condition_by_observation: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
+    """Extract IDENTITY_FIELDS, recovering blank ``condition`` when possible."""
     identity = {field: str(row.get(field, "")).strip() for field in IDENTITY_FIELDS}
     if identity["condition"]:
         identity["condition"] = identity["condition"].casefold()
@@ -265,6 +266,16 @@ def _identity_from_row(
     if recovered:
         identity["condition"] = recovered
     return identity
+
+
+def _identity_from_row(
+    row: Mapping[str, object],
+    *,
+    condition_by_observation: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    return identity_from_row(
+        row, condition_by_observation=condition_by_observation
+    )
 
 
 def _group_aligned_rows(
@@ -688,6 +699,8 @@ __all__ = [
     "DEFAULT_LAG_STEP_S",
     "DEFAULT_MIN_OVERLAP",
     "FS_HZ",
+    "IDENTITY_FIELDS",
+    "identity_from_row",
     "MID_WINDOW_ANALYSIS_ROLE",
     "MID_WINDOW_DURATION_S",
     "MID_WINDOW_N_LAGS",

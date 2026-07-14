@@ -11,7 +11,8 @@ Duration analysis contracts
 
 D240 (primary)
   lag grid           : −60 … +60 s, step 1 s (121 lags)
-  endpoint name      : ``zlpi``
+  endpoint_name      : ``zlpi``
+  endpoint_alias     : ``ZLPI``  (display acronym; not used for joins)
   distant flanks     : |τ| ∈ [20, 60] s
   local shoulders    : |τ| ∈ [5, 15] s
   standard ZLPI?     : yes
@@ -19,7 +20,8 @@ D240 (primary)
 
 D180 (mandatory nested sensitivity)
   lag grid           : −60 … +60 s, step 1 s (121 lags)
-  endpoint name      : ``zlpi``
+  endpoint_name      : ``zlpi``
+  endpoint_alias     : ``ZLPI``
   distant flanks     : |τ| ∈ [20, 60] s
   local shoulders    : |τ| ∈ [5, 15] s
   standard ZLPI?     : yes
@@ -27,7 +29,8 @@ D180 (mandatory nested sensitivity)
 
 D120 (nested sensitivity; not standard ZLPI)
   lag grid           : −30 … +30 s, step 1 s (61 lags)
-  endpoint name      : ``mid_window_proximal_index`` (MWPI)
+  endpoint_name      : ``mid_window_proximal_index``
+  endpoint_alias     : ``MWPI``
   distant flanks     : |τ| ∈ [20, 30] s
   local shoulders    : |τ| ∈ [5, 15] s
   standard ZLPI?     : no
@@ -35,7 +38,8 @@ D120 (nested sensitivity; not standard ZLPI)
 
 D60 (short-window sensitivity; not standard ZLPI)
   lag grid           : −20 … +20 s, step 1 s (41 lags)
-  endpoint name      : ``short_window_proximal_index`` (SWPI)
+  endpoint_name      : ``short_window_proximal_index``
+  endpoint_alias     : ``SWPI``
   distant flanks     : |τ| ∈ [10, 20] s
   local shoulders    : |τ| ∈ [5, 15] s
   standard ZLPI?     : no
@@ -88,7 +92,14 @@ ANALYSIS_ROLE_SHORT_WINDOW_SENSITIVITY = "short_window_sensitivity"
 
 @dataclass(frozen=True)
 class DurationAnalysisContract:
-    """Frozen lag-grid + named-endpoint contract for one confirmatory duration."""
+    """Frozen lag-grid + named-endpoint contract for one confirmatory duration.
+
+    ``endpoint_name`` is the machine-stable identifier used for filtering and
+    joins (``zlpi``, ``mid_window_proximal_index``, ``short_window_proximal_index``).
+
+    ``endpoint_alias`` is the short display acronym only (``ZLPI``, ``MWPI``,
+    ``SWPI``). It is not interchangeable with ``endpoint_name``.
+    """
 
     duration_s: int
     lag_min_s: int
