@@ -268,6 +268,13 @@ class TestConfirmatoryHarmonize(unittest.TestCase):
                 self.assertIn("theta_relative_power", rows[0])
                 self.assertIn("theta_broadband_residualized_log10", rows[0])
                 self.assertIn("theta_absolute_log10_power_z", rows[0])
+                self.assertEqual(rows[0]["condition"], "rest")
+                self.assertEqual(float(rows[0]["selected_duration_s"]), float(duration))
+                self.assertEqual(float(rows[0]["available_duration_s"]), 260.0)
+                self.assertEqual(
+                    rows[0]["center_selection"],
+                    "midpoint_of_longest_common_support",
+                )
 
             manifest_path = out / SEGMENT_MANIFEST_FILENAME
             self.assertTrue(manifest_path.exists())
@@ -275,6 +282,15 @@ class TestConfirmatoryHarmonize(unittest.TestCase):
             self.assertIn("segments", manifest)
             self.assertIn("selected_block", manifest)
             self.assertEqual(manifest["segments"]["240"]["n_samples"], 240)
+            self.assertEqual(manifest["identity"]["condition"], "rest")
+            self.assertEqual(
+                manifest["center_selection"], "midpoint_of_longest_common_support"
+            )
+            self.assertEqual(manifest["available_duration_s"], 260.0)
+            self.assertEqual(
+                manifest["segments"]["240"]["center_selection"],
+                "midpoint_of_longest_common_support",
+            )
 
             qc_path = out / ALIGNMENT_QC_FILENAME
             self.assertTrue(qc_path.exists())
@@ -282,6 +298,12 @@ class TestConfirmatoryHarmonize(unittest.TestCase):
                 qc_rows = list(csv.DictReader(handle))
             self.assertEqual(len(qc_rows), 4)
             self.assertIn("available_support_s", qc_rows[0])
+            self.assertIn("available_duration_s", qc_rows[0])
+            self.assertIn("selected_duration_s", qc_rows[0])
+            self.assertIn("center_selection", qc_rows[0])
+            self.assertEqual(
+                qc_rows[0]["center_selection"], "midpoint_of_longest_common_support"
+            )
             self.assertIn("n_missing_within_segment", qc_rows[0])
             self.assertIn("exclusion_reason", qc_rows[0])
 

@@ -17,6 +17,8 @@ from .multitaper_power import BANDS_HZ, ROBUST_MEDIAN_CHANNEL
 MAX_GAP_S = 5.0
 NESTED_DURATIONS_S = (240, 180, 120)
 SENSITIVITY_DURATION_S = 60
+# Documented placement rule for nested analysis windows.
+CENTER_SELECTION = "midpoint_of_longest_common_support"
 ALIGNED_FEATURES_TEMPLATE = "features_confirmatory_aligned_D{duration_s}.csv"
 SEGMENT_MANIFEST_FILENAME = "segment_manifest.json"
 ALIGNMENT_QC_FILENAME = "alignment_qc_confirmatory.csv"
@@ -393,6 +395,9 @@ def harmonize_observation(
     blocks = contiguous_blocks(common_times, max_gap_s=max_gap_s)
     selected = select_longest_block(blocks)
     center_s, segments = build_duration_segments(selected)
+    available_duration_s = (
+        float(selected.duration_s) if selected is not None else 0.0
+    )
 
     features_by_duration: dict[int, tuple[dict[str, object], ...]] = {}
     qc_rows: list[dict[str, object]] = []
@@ -423,11 +428,12 @@ def harmonize_observation(
                     "segment_start_s": None,
                     "segment_end_s": None,
                     "segment_center_s": center_s,
+                    "center_selection": CENTER_SELECTION,
                     "segment_n_samples": 0,
                     "n_missing_within_segment": 0,
-                    "available_support_s": (
-                        selected.duration_s if selected is not None else 0.0
-                    ),
+                    "available_support_s": available_duration_s,
+                    "available_duration_s": available_duration_s,
+                    "selected_duration_s": float(duration),
                 }
             )
             continue
@@ -456,6 +462,10 @@ def harmonize_observation(
                 **ids,
                 "duration_s": duration,
                 "duration_role": segment.role,
+                "selected_duration_s": float(duration),
+                "available_duration_s": available_duration_s,
+                "center_selection": CENTER_SELECTION,
+                "segment_center_s": float(segment.center_s),
                 "time_s": float(time_value),
                 "hr_bpm": float(hr_seg[index]),
                 "hr_z": float(hr_z[index]),
@@ -498,18 +508,21 @@ def harmonize_observation(
                 "segment_start_s": segment.start_s,
                 "segment_end_s": segment.end_s,
                 "segment_center_s": segment.center_s,
+                "center_selection": CENTER_SELECTION,
                 "segment_n_samples": segment.n_samples,
                 "n_missing_within_segment": missing_within,
-                "available_support_s": (
-                    selected.duration_s if selected is not None else 0.0
-                ),
+                "available_support_s": available_duration_s,
+                "available_duration_s": available_duration_s,
+                "selected_duration_s": float(duration),
             }
         )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "identity": ids,
         "max_gap_s": max_gap_s,
+        "center_selection": CENTER_SELECTION,
+        "available_duration_s": available_duration_s,
         "selected_block": (
             None
             if selected is None
@@ -518,6 +531,7 @@ def harmonize_observation(
                 "end_s": selected.end_s,
                 "n_samples": selected.n_samples,
                 "duration_s": selected.duration_s,
+                "available_duration_s": selected.duration_s,
             }
         ),
         "center_s": center_s,
@@ -534,12 +548,15 @@ def harmonize_observation(
         "segments": {
             str(duration): {
                 "duration_s": segment.duration_s,
+                "selected_duration_s": segment.duration_s,
+                "available_duration_s": available_duration_s,
                 "role": segment.role,
                 "eligible": segment.eligible,
                 "exclusion_reason": segment.exclusion_reason,
                 "start_s": segment.start_s if segment.eligible else None,
                 "end_s": segment.end_s if segment.eligible else None,
                 "center_s": segment.center_s if math.isfinite(segment.center_s) else None,
+                "center_selection": CENTER_SELECTION,
                 "n_samples": segment.n_samples,
             }
             for duration, segment in segments.items()
@@ -635,6 +652,10 @@ def write_harmonize_outputs(
         "observation_id",
         "duration_s",
         "duration_role",
+        "selected_duration_s",
+        "available_duration_s",
+        "center_selection",
+        "segment_center_s",
         "time_s",
         "hr_bpm",
         "hr_z",
@@ -686,9 +707,12 @@ def write_harmonize_outputs(
         "segment_start_s",
         "segment_end_s",
         "segment_center_s",
+        "center_selection",
         "segment_n_samples",
         "n_missing_within_segment",
         "available_support_s",
+        "available_duration_s",
+        "selected_duration_s",
     ]
     _write_csv(qc_path, result.qc_rows, qc_fields)
     written["alignment_qc"] = qc_path
@@ -696,6 +720,7 @@ def write_harmonize_outputs(
 
 
 __all__ = [
+    "CENTER_SELECTION",
     "ALIGNMENT_QC_FILENAME",
     "ALIGNED_FEATURES_TEMPLATE",
     "MAX_GAP_S",

@@ -448,6 +448,11 @@ def run_c1c(ctx: StageContext) -> dict[str, object]:
     out = ctx.stage_dir("C1c")
     out.mkdir(parents=True, exist_ok=True)
 
+    obs_by_safe = {
+        safe_subject_dir_name(obs.observation_id): obs
+        for obs in _load_observations(ctx)
+    }
+
     obs_ids = sorted(
         {
             p.parent.name
@@ -475,14 +480,37 @@ def run_c1c(ctx: StageContext) -> dict[str, object]:
         try:
             hr_time, hr_bpm, hr_valid = _load_instant_hr_series(hr_path)
             eeg_time, absolute, abs_log, eeg_valid = _load_multitaper_maps(eeg_path)
-            # Identity from first HR row
             hr_rows = _read_csv(hr_path)
+            eeg_rows = _read_csv(eeg_path)
+            discovered = obs_by_safe.get(obs_id)
             identity = {
-                "dataset_id": hr_rows[0].get("dataset_id", ctx.dataset.dataset_id),
-                "subject_id": hr_rows[0].get("subject_id", ""),
-                "task": hr_rows[0].get("task", ""),
-                "condition": hr_rows[0].get("condition", ""),
-                "observation_id": hr_rows[0].get("observation_id", obs_id),
+                "dataset_id": (
+                    (discovered.dataset_id if discovered is not None else "")
+                    or hr_rows[0].get("dataset_id", "")
+                    or eeg_rows[0].get("dataset_id", ctx.dataset.dataset_id)
+                ),
+                "subject_id": (
+                    (discovered.subject_id if discovered is not None else "")
+                    or hr_rows[0].get("subject_id", "")
+                    or eeg_rows[0].get("subject_id", "")
+                ),
+                "task": (
+                    (discovered.task_label if discovered is not None else "")
+                    or hr_rows[0].get("task", "")
+                    or eeg_rows[0].get("task", "")
+                ),
+                # Prefer protocol condition labels (e.g. ph_pre_rest) over task-only
+                # HR rows, which currently omit condition.
+                "condition": (
+                    (discovered.condition_label if discovered is not None else "")
+                    or eeg_rows[0].get("condition", "")
+                    or hr_rows[0].get("condition", "")
+                ),
+                "observation_id": (
+                    (discovered.observation_id if discovered is not None else "")
+                    or hr_rows[0].get("observation_id", "")
+                    or eeg_rows[0].get("observation_id", obs_id)
+                ),
             }
             result = harmonize_observation(
                 hr_time_s=hr_time,
