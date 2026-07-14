@@ -154,6 +154,26 @@ class DatasetSelectionConfig:
 
 
 @dataclass(frozen=True)
+class DatasetCardiacConfig:
+    """Peak-detection settings for confirmatory Stage C1b.
+
+    Defaults favour ECG ``auto`` selection. HIIT smoke overrides channel to
+    ``photosensor`` with ``signal_type=ppg`` / ``detector=ppg_peak``.
+    """
+
+    channel: str = "auto"
+    signal_type: str = "auto"
+    detector: str = "auto"
+    peak_min_distance_s: float = 0.4
+    peak_height: float = 0.3
+    ibi_min_ms: float = 400.0
+    ibi_max_ms: float = 1200.0
+    start_time_s: float | None = None
+    end_time_s: float | None = None
+    debug_plot: bool = False
+
+
+@dataclass(frozen=True)
 class ConfirmatoryDatasetConfig:
     schema_version: int
     source_path: Path
@@ -162,6 +182,7 @@ class ConfirmatoryDatasetConfig:
     paths: DatasetPathsConfig
     selection: DatasetSelectionConfig
     output_root: Path
+    cardiac: DatasetCardiacConfig = DatasetCardiacConfig()
 
 
 def _as_mapping(value: Any, *, path: str) -> dict[str, Any]:
@@ -599,9 +620,20 @@ def load_dataset_config(
 ) -> ConfirmatoryDatasetConfig:
     """Load a dataset selector and validate it against the master protocol."""
     config_path, root = _read_yaml(path)
-    top_keys = {"schema_version", "dataset_id", "role", "paths", "selection"}
+    top_keys = {
+        "schema_version",
+        "dataset_id",
+        "role",
+        "paths",
+        "selection",
+        "cardiac",
+    }
     _reject_unknown_keys(root, allowed=top_keys, path="<root>")
-    _require_keys(root, required=top_keys, path="<root>")
+    _require_keys(
+        root,
+        required={"schema_version", "dataset_id", "role", "paths", "selection"},
+        path="<root>",
+    )
 
     schema_version = _as_int(root["schema_version"], path="schema_version")
     if schema_version != master.schema_version:
@@ -671,6 +703,7 @@ def load_dataset_config(
             selection_raw["sessions"], path="selection.sessions"
         ),
     )
+    cardiac = _load_dataset_cardiac(root.get("cardiac"), dataset_id=dataset_id)
 
     return ConfirmatoryDatasetConfig(
         schema_version=schema_version,
@@ -683,4 +716,79 @@ def load_dataset_config(
         ),
         selection=selection,
         output_root=output_root,
+        cardiac=cardiac,
+    )
+
+
+def _load_dataset_cardiac(
+    raw: Any,
+    *,
+    dataset_id: str,
+) -> DatasetCardiacConfig:
+    """Parse optional dataset ``cardiac`` block with modality-aware defaults."""
+    defaults = DatasetCardiacConfig()
+    if dataset_id == "hiit":
+        defaults = DatasetCardiacConfig(
+            channel="photosensor",
+            signal_type="ppg",
+            detector="ppg_peak",
+            ibi_max_ms=1500.0,
+        )
+
+    if raw is None:
+        return defaults
+    cardiac_raw = _as_mapping(raw, path="cardiac")
+    allowed = {
+        "channel",
+        "signal_type",
+        "detector",
+        "peak_min_distance_s",
+        "peak_height",
+        "ibi_min_ms",
+        "ibi_max_ms",
+        "start_time_s",
+        "end_time_s",
+        "debug_plot",
+    }
+    _reject_unknown_keys(cardiac_raw, allowed=allowed, path="cardiac")
+
+    def _opt_float(key: str, fallback: float | None) -> float | None:
+        if key not in cardiac_raw:
+            return fallback
+        value = cardiac_raw[key]
+        if value is None:
+            return None
+        return float(value)
+
+    def _req_float(key: str, fallback: float) -> float:
+        if key not in cardiac_raw or cardiac_raw[key] is None:
+            return fallback
+        return float(cardiac_raw[key])
+
+    channel = str(cardiac_raw.get("channel", defaults.channel)).strip() or defaults.channel
+    signal_type = (
+        str(cardiac_raw.get("signal_type", defaults.signal_type)).strip().casefold()
+        or defaults.signal_type
+    )
+    detector = (
+        str(cardiac_raw.get("detector", defaults.detector)).strip().casefold()
+        or defaults.detector
+    )
+    debug_raw = cardiac_raw.get("debug_plot", defaults.debug_plot)
+    if not isinstance(debug_raw, bool):
+        raise ValueError("cardiac.debug_plot must be a boolean.")
+
+    return DatasetCardiacConfig(
+        channel=channel,
+        signal_type=signal_type,
+        detector=detector,
+        peak_min_distance_s=_req_float(
+            "peak_min_distance_s", defaults.peak_min_distance_s
+        ),
+        peak_height=_req_float("peak_height", defaults.peak_height),
+        ibi_min_ms=_req_float("ibi_min_ms", defaults.ibi_min_ms),
+        ibi_max_ms=_req_float("ibi_max_ms", defaults.ibi_max_ms),
+        start_time_s=_opt_float("start_time_s", defaults.start_time_s),
+        end_time_s=_opt_float("end_time_s", defaults.end_time_s),
+        debug_plot=debug_raw,
     )

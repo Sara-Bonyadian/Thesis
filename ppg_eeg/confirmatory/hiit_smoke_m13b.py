@@ -37,7 +37,6 @@ CONFIG_DIR_DEFAULT = REPO_DEFAULT / "zero-lag-reanalysis-repo"
 HIIT_SMOKE_DIR = CONFIG_DIR_DEFAULT / "smoke" / "hiit"
 CONFIRMATORY_SMOKE = HIIT_SMOKE_DIR / "confirmatory.yaml"
 VERIFICATION_JSON = HIIT_SMOKE_DIR / "verification.json"
-EXPLORATORY_SMOKE = HIIT_SMOKE_DIR / "beats.yaml"
 MASTER_CONFIG = master_config_path(CONFIG_DIR_DEFAULT)
 
 REQUIRED_CONTRASTS = (
@@ -101,8 +100,9 @@ def cmd_preflight() -> int:
         raise SmokeStop("M13b requires PPG as primary cardiac modality.")
     print("preflight_pass=True")
     print(
-        "NEXT: run confirmatory C0 (includes raw-data audit), then exploratory "
-        f"Stage 1b with {EXPLORATORY_SMOKE.name} for detected_peaks before C1b+."
+        "NEXT: run confirmatory C0 then C1b (peak detection is inside C1b):\n"
+        f"  .venv/bin/python -m ppg_eeg.confirmatory --config {CONFIRMATORY_SMOKE} --stage C0\n"
+        f"  .venv/bin/python -m ppg_eeg.confirmatory --config {CONFIRMATORY_SMOKE} --stage C1b"
     )
     return 0
 
@@ -312,28 +312,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_verify_pairing()
         if args.stage == "stage0_hint":
             print(
-                "C0 now includes the observation-level raw-data audit. Run:\n"
+                "C0 includes the observation-level raw-data audit. Run:\n"
                 f"  .venv/bin/python -m ppg_eeg.confirmatory "
-                f"--config {CONFIRMATORY_SMOKE} --stage C0\n"
-                "Expect C0/data_audit.csv plus pairing and eligibility outputs. "
-                "Exploratory temporal_coupling --stage 0 is not a C0 prerequisite."
+                f"--config {CONFIRMATORY_SMOKE} --stage C0"
             )
             return 0
         if args.stage == "stage1b_hint":
             print(
-                "Run exploratory Stage 1b (PPG photosensor peaks) with:\n"
-                f"  .venv/bin/python -m ppg_eeg.temporal_coupling "
-                f"--config {EXPLORATORY_SMOKE} --stage 1b\n"
-                "STOP unless every observation QC row has "
-                "channel_used=photosensor and signal_type=ppg."
+                "C1b detects photosensor PPG peaks and builds instantaneous HR. Run:\n"
+                f"  .venv/bin/python -m ppg_eeg.confirmatory "
+                f"--config {CONFIRMATORY_SMOKE} --stage C1b\n"
+                "STOP unless C1b cardiac_peak_qc shows channel_used=photosensor "
+                "and signal_type=ppg."
             )
             return 0
         if args.stage == "m2_hint":
             print(
-                "M2 (instantaneous HR): for each observation directory under\n"
-                f"  derivatives/smoke_hiit_m13b_temporal_coupling/hiit/\n"
-                "call reconstruct_instant_hr_file(detected_peaks.csv, <obs_out>).\n"
-                "Expected: features_instant_hr.csv, instant_hr_qc.csv\n"
+                "M2 / C1b instantaneous HR is produced by confirmatory C1b under\n"
+                f"  {dataset.output_root}/C1b/<obs>/features_instant_hr.csv\n"
                 "STOP if status!=ok or clean_beat_span_s < 180 for D180 / < 240 for D240 targets."
             )
             return 0

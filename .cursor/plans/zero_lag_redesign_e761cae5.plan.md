@@ -205,7 +205,7 @@ python -m ppg_eeg.confirmatory \
 |-------|------|------------|
 | `C0` | Protocol + raw-data + duration eligibility audit | `protocol_audit.py`, `data_audit.py` |
 | `C1a` | Multitaper EEG power | `multitaper_power.py` |
-| `C1b` | Instantaneous HR | `instant_hr.py` (from saved beats) |
+| `C1b` | Cardiac peaks + instantaneous HR | `peak_detection.py`, `instant_hr.py` |
 | `C1c` | Harmonize / nested durations | `harmonize.py` |
 | `C2` | Signed lag curves | `correlation.py` |
 | `C3` | Endpoints + peaks | `endpoints.py`, `peak_model.py` |
@@ -537,7 +537,7 @@ Split into operational sub-milestones so engineering (preflight/orchestration) c
 
 - Configs (all under one folder):
   - [`smoke/hiit/confirmatory.yaml`](zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml) — participants `01–03`, sessions `ph`/`ps`, PRE/POST rest↔Tetris.
-  - [`smoke/hiit/beats.yaml`](zero-lag-reanalysis-repo/smoke/hiit/beats.yaml) — Stage 0/1b photosensor PPG.
+  - [`smoke/hiit/confirmatory.yaml`](zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml) — selection + photosensor PPG peak settings for C1b.
   - [`smoke/hiit/verification.json`](zero-lag-reanalysis-repo/smoke/hiit/verification.json) — PPG lock + stop rules.
 - Stage driver: [`hiit_smoke_m13b.py`](ppg_eeg/temporal_coupling/confirmatory/hiit_smoke_m13b.py) — one `--stage` at a time; hard-stops on pairing/modality failures.
 - Pairing: PRE-rest↔PRE-Tetris and POST-rest↔POST-Tetris within each PH/PS session; never collapse to task-only.

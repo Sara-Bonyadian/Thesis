@@ -45,6 +45,7 @@ from .harmonize import (
 from .inference import run_confirmatory_inference_from_dir
 from .instant_hr import FEATURES_FILENAME as INSTANT_HR_FEATURES
 from .instant_hr import reconstruct_instant_hr_file
+from .peak_detection import PEAKS_FILENAME, run_confirmatory_peak_detection
 from .multitaper_power import (
     FEATURES_FILENAME as MULTITAPER_FEATURES,
     ROBUST_MEDIAN_CHANNEL,
@@ -103,7 +104,6 @@ STAGE_REQUIRES: dict[str, tuple[str, ...]] = {
     "C7": ("C2", "C5"),
 }
 
-PEAKS_FILENAME = "detected_peaks.csv"
 STAGE_STATUS_FILENAME = "stage_status.json"
 
 
@@ -117,7 +117,6 @@ class StageContext:
     dataset: ConfirmatoryDatasetConfig
     master_path: Path
     dataset_path: Path
-    peaks_root: Path | None = None
     n_surrogates: int = SMOKE_N_SURROGATES
     force: bool = False
     repo_root: Path | None = None
@@ -290,53 +289,34 @@ def run_c1a(ctx: StageContext) -> dict[str, object]:
     return {"n_ok": len(written), "n_error": len(errors), "errors": errors[:20]}
 
 
-def _find_peaks_file(ctx: StageContext, obs: CanonicalObservation) -> Path | None:
-    candidates: list[Path] = []
-    safe = safe_subject_dir_name(obs.observation_id)
-    if ctx.peaks_root is not None:
-        root = ctx.peaks_root
-        candidates.extend(
-            [
-                root / ctx.dataset.dataset_id / safe / PEAKS_FILENAME,
-                root / safe / PEAKS_FILENAME,
-                root / PEAKS_FILENAME,
-            ]
-        )
-        # Broad search under peaks_root/dataset_id
-        dataset_root = root / ctx.dataset.dataset_id
-        if dataset_root.is_dir():
-            candidates.extend(sorted(dataset_root.rglob(PEAKS_FILENAME)))
-    # Already under confirmatory tree (copied / previous run)
-    candidates.append(ctx.stage_dir("C1b") / safe / PEAKS_FILENAME)
-    seen: set[Path] = set()
-    for path in candidates:
-        resolved = path.expanduser().resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if resolved.is_file() and obs.observation_id.replace("/", "_") in str(resolved):
-            return resolved
-        if resolved.is_file() and safe in str(resolved):
-            return resolved
-    # Fallback: any peaks file whose parent dir name matches observation id
-    if ctx.peaks_root is not None:
-        for path in sorted(ctx.peaks_root.rglob(PEAKS_FILENAME)):
-            if safe_subject_dir_name(obs.observation_id) == path.parent.name:
-                return path.resolve()
-    return None
-
-
 def run_c1b(ctx: StageContext) -> dict[str, object]:
+    """Detect peaks, write QC, and reconstruct instantaneous HR under C1b/."""
     observations = _load_observations(ctx)
     out_root = ctx.stage_dir("C1b")
     out_root.mkdir(parents=True, exist_ok=True)
+
+    peaks_paths, peak_qc, detect_errors = run_confirmatory_peak_detection(
+        observations,
+        ctx.dataset,
+        ctx.master,
+        out_root,
+    )
+    if not peaks_paths:
+        raise StageError(
+            "C1b peak detection wrote no detected_peaks.csv. "
+            f"Errors: {detect_errors[:5]}"
+        )
+
     written: list[str] = []
-    missing_peaks: list[str] = []
-    errors: list[str] = []
+    errors: list[str] = list(detect_errors)
+    by_obs = {
+        path.parent.name: path for path in peaks_paths
+    }
     for obs in observations:
-        peaks = _find_peaks_file(ctx, obs)
-        if peaks is None:
-            missing_peaks.append(obs.observation_id)
+        safe = safe_subject_dir_name(obs.observation_id)
+        peaks = by_obs.get(safe) or (out_root / safe / PEAKS_FILENAME)
+        if not Path(peaks).is_file():
+            errors.append(f"{obs.observation_id}: detected_peaks.csv missing after detection")
             continue
         obs_out = _obs_dir(out_root, obs.observation_id)
         try:
@@ -344,17 +324,17 @@ def run_c1b(ctx: StageContext) -> dict[str, object]:
             written.append(obs.observation_id)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{obs.observation_id}: {type(exc).__name__}: {exc}")
-    if missing_peaks and not written:
+
+    if not written:
         raise StageError(
-            "C1b found no detected_peaks.csv. Provide --peaks-root pointing at "
-            "exploratory Stage 1b outputs "
-            f"(looked for {PEAKS_FILENAME}). Missing examples: {missing_peaks[:5]}"
+            "C1b reconstructed no instantaneous-HR features. "
+            f"Errors: {errors[:5]}"
         )
     return {
         "n_ok": len(written),
-        "n_missing_peaks": len(missing_peaks),
+        "n_peaks": len(peaks_paths),
+        "n_peak_qc": len(peak_qc),
         "n_error": len(errors),
-        "missing_peaks": missing_peaks[:20],
         "errors": errors[:20],
     }
 
@@ -717,13 +697,6 @@ def build_stage_parser() -> argparse.ArgumentParser:
         help="Production ops mode (M13a). Mutually exclusive with --stage.",
     )
     parser.add_argument(
-        "--peaks-root",
-        type=str,
-        default=None,
-        help="Root containing exploratory detected_peaks.csv for C1b "
-        "(e.g. derivatives/smoke_hiit_m13b_temporal_coupling).",
-    )
-    parser.add_argument(
         "--n-surrogates",
         type=int,
         default=SMOKE_N_SURROGATES,
@@ -791,11 +764,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             dataset=dataset,
             master_path=master_path,
             dataset_path=dataset_path,
-            peaks_root=(
-                Path(args.peaks_root).expanduser().resolve()
-                if args.peaks_root
-                else None
-            ),
             n_surrogates=int(args.n_surrogates),
             force=bool(args.force),
             repo_root=repo_root,

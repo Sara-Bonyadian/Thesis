@@ -14,9 +14,8 @@ zero-lag-reanalysis-repo/
   smoke/                   # small subsets for smoke / M13
     ds003838.yaml
     ...
-    hiit/                  # HIIT needs an extra beats file (see below)
-      confirmatory.yaml    # who/what to analyze (pairing × PH/PS)
-      beats.yaml           # exploratory Stage 1b peaks (optional; not required for C0)
+    hiit/                  # HIIT package
+      confirmatory.yaml    # full workflow config (selection + cardiac peaks)
       verification.json    # stop rules / PPG lock (not a run config)
   README.md                # this file
 ```
@@ -25,8 +24,7 @@ zero-lag-reanalysis-repo/
 |--------------|-------------|
 | Frozen protocol | `master.yaml` |
 | Full HIIT cohort | `datasets/hiit.yaml` |
-| HIIT smoke (confirmatory) | `smoke/hiit/confirmatory.yaml` |
-| HIIT smoke (get `detected_peaks.csv`) | `smoke/hiit/beats.yaml` (Stage 1b; optional for C0) |
+| HIIT smoke | `smoke/hiit/confirmatory.yaml` |
 | Other dataset smoke | `smoke/<dataset>.yaml` |
 
 ## Separation from exploratory work
@@ -37,30 +35,24 @@ zero-lag-reanalysis-repo/
 | Configs | `exploratory-temporal-coupling/` | **this folder** |
 | Results | `derivatives/run_*`, `derivatives/smoke_*` | `derivatives/confirmatory_temporal_coupling/` |
 
-Raw data stays shared: `./data` (repo root).
+Raw data stays shared: `./data` (repo root). Exploratory Stage 0/1b is **not** required for confirmatory runs.
 
 ## HIIT smoke (C-stage CLI)
 
 Everything for HIIT smoke lives under `smoke/hiit/`.
 
 ```bash
-# C0: raw-data audit + pairing + duration eligibility (no separate Stage 0 needed)
+# C0: raw-data audit + pairing + duration eligibility
 .venv/bin/python -m ppg_eeg.confirmatory \
   --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage C0
 
-# Beat peaks still come from exploratory Stage 1b (until peaks are under confirmatory control)
-.venv/bin/python -m ppg_eeg.temporal_coupling \
-  --config zero-lag-reanalysis-repo/smoke/hiit/beats.yaml --stage 1b
-
-# Instant HR from those peaks
+# C1b: peak detection + cardiac QC + instantaneous HR (under confirmatory C1b/)
 .venv/bin/python -m ppg_eeg.confirmatory \
-  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage C1b \
-  --peaks-root derivatives/smoke_hiit_m13b_temporal_coupling
+  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage C1b
 
-# Full remaining pipeline
+# Remaining stages (or full pipeline after C0)
 .venv/bin/python -m ppg_eeg.confirmatory \
-  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage all \
-  --peaks-root derivatives/smoke_hiit_m13b_temporal_coupling
+  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml --stage all
 ```
 
 Stages: `C0` `C1a` `C1b` `C1c` `C2` `C3` `C4` `C5` `C6` `C7` (or `all`).
@@ -79,5 +71,4 @@ Canonical source: `ppg_eeg/confirmatory/duration_contracts.py`.
 
 ## Status
 
-M1–M12 modules + **C0–C7 stage CLI** (`ppg_eeg/confirmatory/run.py`) are implemented.
-Production ops: `python -m ppg_eeg.confirmatory --mode preflight|smoke|…`.
+See `.cursor/plans/zero_lag_redesign_e761cae5.plan.md`.

@@ -25,12 +25,11 @@ class TestM13bHiitSmokeConfig(unittest.TestCase):
         cls.master = load_master_config(master_config_path(cls.config_dir))
         cls.smoke_path = cls.hiit_smoke / "confirmatory.yaml"
         cls.verification_path = cls.hiit_smoke / "verification.json"
-        cls.beats_path = cls.hiit_smoke / "beats.yaml"
 
     def test_layout_keeps_hiit_smoke_in_one_folder(self) -> None:
         self.assertTrue(self.smoke_path.is_file())
         self.assertTrue(self.verification_path.is_file())
-        self.assertTrue(self.beats_path.is_file())
+        self.assertFalse((self.hiit_smoke / "beats.yaml").exists())
         smoke_paths = iter_smoke_config_paths(self.config_dir)
         self.assertIn(self.smoke_path.resolve(), [p.resolve() for p in smoke_paths])
         dataset_paths = iter_dataset_config_paths(self.config_dir)
@@ -56,6 +55,10 @@ class TestM13bHiitSmokeConfig(unittest.TestCase):
             },
         )
         self.assertEqual(cfg.paths.output_subdir, Path("smoke/hiit_m13b"))
+        self.assertEqual(cfg.cardiac.channel, "photosensor")
+        self.assertEqual(cfg.cardiac.signal_type, "ppg")
+        self.assertEqual(cfg.cardiac.detector, "ppg_peak")
+        self.assertEqual(cfg.cardiac.ibi_max_ms, 1500.0)
 
     def test_smoke_conditions_match_protocol_contrasts(self) -> None:
         cfg = load_dataset_config(self.smoke_path, master=self.master)

@@ -24,3 +24,12 @@ selection:
   sessions:
     - ph
     - ps
+
+cardiac:
+  channel: photosensor
+  signal_type: ppg
+  detector: ppg_peak
+  peak_min_distance_s: 0.4
+  peak_height: 0.3
+  ibi_min_ms: 400.0
+  ibi_max_ms: 1500.0
