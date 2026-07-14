@@ -53,6 +53,7 @@ POWER_REPRESENTATIONS: tuple[tuple[str, str, bool], ...] = (
     ("broadband_residualized", "broadband_residualized_log10_z", False),
 )
 PRIMARY_POWER_REPRESENTATION = "absolute_log10"
+DEFAULT_CARDIAC_VARIABLE = "instantaneous_hr"
 
 CURVES_TEMPLATE = "confirmatory_cross_correlation_curves_D{duration_s}.csv"
 QC_TEMPLATE = "confirmatory_cross_correlation_qc_D{duration_s}.csv"
@@ -77,6 +78,7 @@ CURVE_FIELDS = IDENTITY_FIELDS + (
     "flank_outer_s",
     "shoulders_inner_s",
     "shoulders_outer_s",
+    "cardiac_variable",
     "band",
     "power_representation",
     "is_primary_representation",
@@ -98,6 +100,7 @@ QC_FIELDS = IDENTITY_FIELDS + (
     "flank_outer_s",
     "shoulders_inner_s",
     "shoulders_outer_s",
+    "cardiac_variable",
     "band",
     "power_representation",
     "is_primary_representation",
@@ -115,6 +118,9 @@ QC_FIELDS = IDENTITY_FIELDS + (
     "max_n_overlap",
     "n_overlap_at_zero",
     "r_at_zero",
+    "peak_r",
+    "peak_abs_r",
+    "peak_lag_s",
     "exclusion_reason",
 )
 
@@ -224,19 +230,56 @@ def _as_float_series(values: Sequence[object]) -> np.ndarray:
     return np.asarray([float(value) for value in values], dtype=float)
 
 
-def _identity_from_row(row: Mapping[str, object]) -> dict[str, str]:
-    return {field: str(row.get(field, "")).strip() for field in IDENTITY_FIELDS}
+def _condition_from_observation_id(observation_id: str, dataset_id: str) -> str:
+    """Best-effort condition recovery when aligned tables omit the field."""
+    oid = str(observation_id).strip().casefold()
+    dataset = str(dataset_id).strip().casefold()
+    if not oid:
+        return ""
+    if dataset == "hiit":
+        # hiit-01-ph-post-rest → ph_post_rest
+        parts = oid.split("-")
+        if len(parts) >= 5 and parts[0] == "hiit":
+            return "_".join(parts[2:])
+    return ""
+
+
+def _identity_from_row(
+    row: Mapping[str, object],
+    *,
+    condition_by_observation: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    identity = {field: str(row.get(field, "")).strip() for field in IDENTITY_FIELDS}
+    if identity["condition"]:
+        identity["condition"] = identity["condition"].casefold()
+        return identity
+    observation_id = identity["observation_id"]
+    if condition_by_observation:
+        for key in (observation_id, observation_id.casefold()):
+            if key in condition_by_observation and condition_by_observation[key]:
+                identity["condition"] = str(condition_by_observation[key]).strip().casefold()
+                return identity
+    recovered = _condition_from_observation_id(
+        observation_id, identity["dataset_id"]
+    )
+    if recovered:
+        identity["condition"] = recovered
+    return identity
 
 
 def _group_aligned_rows(
     rows: Sequence[Mapping[str, object]],
+    *,
+    condition_by_observation: Mapping[str, str] | None = None,
 ) -> list[tuple[dict[str, str], str, list[Mapping[str, object]]]]:
     """Group by observation identity; preserve first-seen observation order."""
     grouped: dict[tuple[str, ...], list[Mapping[str, object]]] = {}
     order: list[tuple[str, ...]] = []
     meta: dict[tuple[str, ...], tuple[dict[str, str], str]] = {}
     for row in rows:
-        identity = _identity_from_row(row)
+        identity = _identity_from_row(
+            row, condition_by_observation=condition_by_observation
+        )
         key = tuple(identity[field] for field in IDENTITY_FIELDS)
         if key not in grouped:
             grouped[key] = []
@@ -244,6 +287,27 @@ def _group_aligned_rows(
             meta[key] = (identity, str(row.get("duration_role", "")).strip())
         grouped[key].append(row)
     return [(meta[key][0], meta[key][1], grouped[key]) for key in order]
+
+
+def _peak_summary_from_curve(
+    curve: Sequence[LagCorrelationPoint],
+) -> tuple[float, float, float]:
+    """Return (peak_r, peak_abs_r, peak_lag_s) from max-|r| on the lag curve.
+
+    On |r| ties, prefer the lag closest to zero, then the more negative lag.
+    """
+    candidates = [
+        (float(point.lag_s), float(point.r))
+        for point in curve
+        if np.isfinite(point.r)
+    ]
+    if not candidates:
+        return float("nan"), float("nan"), float("nan")
+    lag_s, peak_r = min(
+        candidates,
+        key=lambda item: (-abs(item[1]), abs(item[0]), item[0]),
+    )
+    return peak_r, abs(peak_r), lag_s
 
 
 def read_aligned_features_csv(path: str | Path) -> list[dict[str, str]]:
@@ -367,6 +431,8 @@ def compute_signed_lag_curves(
     min_overlap: int = DEFAULT_MIN_OVERLAP,
     bands: Sequence[str] = BAND_ORDER,
     representations: Sequence[tuple[str, str, bool]] = POWER_REPRESENTATIONS,
+    cardiac_variable: str = DEFAULT_CARDIAC_VARIABLE,
+    condition_by_observation: Mapping[str, str] | None = None,
 ) -> ConfirmatoryCorrelationResult:
     """Compute signed HR_z × EEG-power_z lag curves for every band/representation.
 
@@ -395,11 +461,15 @@ def compute_signed_lag_curves(
     unknown_bands = [band for band in bands if band not in EXPECTED_BANDS_HZ]
     if unknown_bands:
         raise ValueError(f"Unknown EEG bands: {unknown_bands}.")
+    cardiac_variable_name = str(cardiac_variable).strip() or DEFAULT_CARDIAC_VARIABLE
 
     curve_rows: list[dict[str, object]] = []
     qc_rows: list[dict[str, object]] = []
 
-    for identity, duration_role, obs_rows in _group_aligned_rows(aligned_rows):
+    for identity, duration_role, obs_rows in _group_aligned_rows(
+        aligned_rows,
+        condition_by_observation=condition_by_observation,
+    ):
         ordered = sorted(obs_rows, key=lambda row: float(row["time_s"]))
         if not ordered:
             continue
@@ -455,6 +525,7 @@ def compute_signed_lag_curves(
                     (point for point in curve if float(point.lag_s) == 0.0),
                     None,
                 )
+                peak_r, peak_abs_r, peak_lag_s = _peak_summary_from_curve(curve)
                 for point in curve:
                     curve_rows.append(
                         {
@@ -462,6 +533,7 @@ def compute_signed_lag_curves(
                             "duration_s": int(duration_s),
                             "duration_role": duration_role,
                             **_contract_row_fields(spec),
+                            "cardiac_variable": cardiac_variable_name,
                             "band": band,
                             "power_representation": representation,
                             "is_primary_representation": bool(is_primary),
@@ -478,6 +550,7 @@ def compute_signed_lag_curves(
                         "duration_s": int(duration_s),
                         "duration_role": duration_role,
                         **_contract_row_fields(spec),
+                        "cardiac_variable": cardiac_variable_name,
                         "band": band,
                         "power_representation": representation,
                         "is_primary_representation": bool(is_primary),
@@ -499,6 +572,9 @@ def compute_signed_lag_curves(
                         "r_at_zero": (
                             float(zero_point.r) if zero_point is not None else float("nan")
                         ),
+                        "peak_r": peak_r,
+                        "peak_abs_r": peak_abs_r,
+                        "peak_lag_s": peak_lag_s,
                         "exclusion_reason": exclusion_reason,
                     }
                 )
@@ -518,6 +594,8 @@ def compute_signed_lag_curves_from_csv(
     duration_s: int,
     lag_step_s: int = DEFAULT_LAG_STEP_S,
     min_overlap: int = DEFAULT_MIN_OVERLAP,
+    cardiac_variable: str = DEFAULT_CARDIAC_VARIABLE,
+    condition_by_observation: Mapping[str, str] | None = None,
 ) -> ConfirmatoryCorrelationResult:
     """Load an M4 aligned duration CSV and compute confirmatory lag curves."""
     return compute_signed_lag_curves(
@@ -525,6 +603,8 @@ def compute_signed_lag_curves_from_csv(
         duration_s=duration_s,
         lag_step_s=lag_step_s,
         min_overlap=min_overlap,
+        cardiac_variable=cardiac_variable,
+        condition_by_observation=condition_by_observation,
     )
 
 
@@ -576,6 +656,8 @@ def run_confirmatory_correlations(
     durations: Sequence[int] | None = None,
     lag_step_s: int = DEFAULT_LAG_STEP_S,
     min_overlap: int = DEFAULT_MIN_OVERLAP,
+    cardiac_variable: str = DEFAULT_CARDIAC_VARIABLE,
+    condition_by_observation: Mapping[str, str] | None = None,
 ) -> dict[int, ConfirmatoryCorrelationResult]:
     """Compute and write confirmatory lag curves for available M4 tables."""
     tables = discover_aligned_duration_tables(
@@ -589,6 +671,8 @@ def run_confirmatory_correlations(
             duration_s=duration,
             lag_step_s=lag_step_s,
             min_overlap=min_overlap,
+            cardiac_variable=cardiac_variable,
+            condition_by_observation=condition_by_observation,
         )
         write_correlation_outputs(result, output_dir)
         results[duration] = result
@@ -598,6 +682,7 @@ def run_confirmatory_correlations(
 __all__ = [
     "BAND_ORDER",
     "CURVES_TEMPLATE",
+    "DEFAULT_CARDIAC_VARIABLE",
     "DEFAULT_LAG_MAX_S",
     "DEFAULT_LAG_MIN_S",
     "DEFAULT_LAG_STEP_S",

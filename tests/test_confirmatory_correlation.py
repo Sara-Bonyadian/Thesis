@@ -378,6 +378,28 @@ class TestConfirmatoryCorrelation(unittest.TestCase):
         curve = _curve_map(result)
         self.assertAlmostEqual(curve[0.0][0], -1.0, places=10)
         self.assertNotIn("peak_lag_s", result.curve_rows[0])
+        self.assertIn("peak_lag_s", result.qc_rows[0])
+        self.assertIn("peak_r", result.qc_rows[0])
+        self.assertIn("peak_abs_r", result.qc_rows[0])
+        self.assertEqual(result.curve_rows[0]["cardiac_variable"], "instantaneous_hr")
+        self.assertEqual(result.qc_rows[0]["cardiac_variable"], "instantaneous_hr")
+
+    def test_condition_and_peak_summary_are_written(self) -> None:
+        n = 240
+        hr_z = _zscore(_noise(n, seed=3))
+        # Max at lag +2 by shifting EEG backward relative to HR convention.
+        rows = _aligned_rows_from_z(hr_z, {band: _shift(hr_z, 2) for band in BAND_ORDER})
+        for row in rows:
+            row["condition"] = ""
+            row["observation_id"] = "hiit-01-ph-post-rest"
+            row["dataset_id"] = "hiit"
+        result = compute_signed_lag_curves(rows, duration_s=240)
+        self.assertEqual(result.curve_rows[0]["condition"], "ph_post_rest")
+        self.assertEqual(result.qc_rows[0]["condition"], "ph_post_rest")
+        qc = result.qc_rows[0]
+        self.assertTrue(np.isfinite(float(qc["peak_r"])))
+        self.assertAlmostEqual(float(qc["peak_abs_r"]), abs(float(qc["peak_r"])))
+        self.assertEqual(float(qc["peak_lag_s"]), 2.0)
 
     def test_deterministic_outputs(self) -> None:
         n = 240
@@ -398,7 +420,11 @@ class TestConfirmatoryCorrelation(unittest.TestCase):
             self.assertIn("endpoint_name", curve_csv[0])
             self.assertIn("is_standard_zlpi", curve_csv[0])
             self.assertIn("pool_with_standard_zlpi", curve_csv[0])
+            self.assertIn("cardiac_variable", curve_csv[0])
             self.assertIn("n_common_support", qc_csv[0])
+            self.assertIn("peak_r", qc_csv[0])
+            self.assertIn("peak_abs_r", qc_csv[0])
+            self.assertIn("peak_lag_s", qc_csv[0])
             self.assertEqual(paths["qc"].name, QC_TEMPLATE.format(duration_s=240))
             self.assertEqual(paths["curves"].name, CURVES_TEMPLATE.format(duration_s=240))
 

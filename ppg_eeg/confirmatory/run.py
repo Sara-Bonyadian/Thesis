@@ -550,7 +550,19 @@ def run_c1c(ctx: StageContext) -> dict[str, object]:
 def run_c2(ctx: StageContext) -> dict[str, object]:
     aligned = ctx.stage_dir("C1c")
     out = ctx.stage_dir("C2")
-    results = run_confirmatory_correlations(aligned, out)
+    condition_by_observation: dict[str, str] = {}
+    for obs in _load_observations(ctx):
+        condition = str(obs.condition_label).strip()
+        if not condition:
+            continue
+        condition_by_observation[obs.observation_id] = condition
+        condition_by_observation[obs.observation_id.casefold()] = condition
+        condition_by_observation[safe_subject_dir_name(obs.observation_id)] = condition
+    results = run_confirmatory_correlations(
+        aligned,
+        out,
+        condition_by_observation=condition_by_observation,
+    )
     return {"durations": sorted(results)}
 
 
