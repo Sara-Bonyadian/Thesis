@@ -27,6 +27,8 @@ from .duration_contracts import (
     ENDPOINT_ZLPI,
     EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
     EXPECTED_PRIMARY_DURATION_S,
+    EXPECTED_SHOULDERS_S,
+    ZLPI_FLANKS_S,
     contract_for_duration,
 )
 from .endpoints import fisher_z
@@ -101,15 +103,38 @@ SCATTER_SIZE = 48.0
 GRID_COLOR = PALETTE["light_gray"]
 REF_LINE_COLOR = PALETTE["dark_gray"]
 
-LAG_XLABEL = "Lag (s)"
+LAG_XLABEL = "Lag τ (s)"
+LAG_CONVENTION_NOTE = (
+    "Lag convention: corr(HR(t), EEG(t+τ)); "
+    "negative τ = EEG leads HR; positive τ = HR leads EEG"
+)
 Z_YLABEL = "Fisher z"
-CI_95_LABEL = "95% CI"
+CI_95_LABEL = "Pointwise 95% CI"
+CI_95_METHOD_NOTE = (
+    "Pointwise 95% CI = mean ± 1.96×SE in Fisher-z space (not bootstrap)"
+)
 ZLPI_METRIC = "Fisher z"
 EEG_BAND_YLABEL = "EEG frequency band"
-EQUIVALENCE_REGION_LABEL = "±2 s"
-MEDIAN_PEAK_CENTER_LABEL = "Median peak center (μ)"
+EQUIVALENCE_REGION_LABEL = f"±{EXPECTED_PEAK_CENTER_EQUIVALENCE_S} s"
+MEDIAN_PEAK_CENTER_LABEL = "Median fitted peak μ (≠ group-mean max)"
+MU_CLARIFICATION_NOTE = (
+    "Orange dotted line: median of participant-specific Gaussian-fitted peak centers (μ); "
+    "this is not necessarily the location of the maximum of the group-average Fisher-z curve"
+)
+GROUP_MEAN_LABEL_TEMPLATE = "Group mean Fisher z (n = {n})"
+MU_EQUIVALENCE_LABEL = f"μ equivalence ({EQUIVALENCE_REGION_LABEL})"
 MSG_NOT_INCLUDED = "Not included in the confirmatory analysis."
 MSG_NOT_APPLICABLE = "Not applicable for this dataset"
+LOW_DEMAND_CONDITION_LABELS = {
+    "rest",
+    "passive",
+    "step1",
+    "low_demand",
+    "ph_pre_rest",
+    "ph_post_rest",
+    "ps_pre_rest",
+    "ps_post_rest",
+}
 
 FIGURE1_TITLE = "Lag-resolved EEG–cardiac coupling"
 FIGURE2_TITLE = "State-dependent attenuation of coupling"
@@ -212,7 +237,7 @@ def _add_panel_label(ax: plt.Axes, letter: str) -> None:
 
 def _set_panel_title(ax: plt.Axes, title: str) -> None:
     # Left-aligned title with extra pad so it clears the panel letter.
-    ax.set_title(title, fontsize=FS_PANEL_TITLE, fontweight="bold", pad=12, loc="left")
+    ax.set_title(title, fontsize=FS_PANEL_TITLE, fontweight="normal", pad=12, loc="left")
 
 
 def _legend_inside(
@@ -469,11 +494,55 @@ def save_figure_trio(fig: plt.Figure, output_dir: Path, stem: str) -> tuple[Path
 
 
 def _shade_flanks(ax: plt.Axes, duration_s: int) -> None:
+    """Shade distant flanks and (more lightly) local shoulders."""
     contract = contract_for_duration(duration_s)
     inner, outer = contract.flank_inner_s, contract.flank_outer_s
-    ax.axvspan(-outer, -inner, color=PALETTE["flank"], alpha=0.8, zorder=0, linewidth=0)
-    ax.axvspan(inner, outer, color=PALETTE["flank"], alpha=0.8, zorder=0, linewidth=0)
+    sh_in, sh_out = contract.shoulders_inner_s, contract.shoulders_outer_s
+    # Distant flanks |τ| ∈ [inner, outer]
+    ax.axvspan(-outer, -inner, color=PALETTE["flank"], alpha=0.85, zorder=0, linewidth=0)
+    ax.axvspan(inner, outer, color=PALETTE["flank"], alpha=0.85, zorder=0, linewidth=0)
+    # Local shoulders |τ| ∈ [sh_in, sh_out] — subtle so curves remain readable
+    ax.axvspan(-sh_out, -sh_in, color="#F0F0F0", alpha=0.9, zorder=0, linewidth=0)
+    ax.axvspan(sh_in, sh_out, color="#F0F0F0", alpha=0.9, zorder=0, linewidth=0)
     _ref_vline(ax, 0.0)
+
+
+def _annotate_lag_regions(ax: plt.Axes, duration_s: int, *, enabled: bool) -> None:
+    """Add sparse lag-category labels once; positions match analysis contracts."""
+    if not enabled:
+        return
+    contract = contract_for_duration(duration_s)
+    # Guard: figure annotations must match confirmatory lag-category definitions.
+    if (contract.flank_inner_s, contract.flank_outer_s) != ZLPI_FLANKS_S:
+        raise ValueError(
+            f"Figure flank annotation {contract.flanks_s} does not match ZLPI_FLANKS_S={ZLPI_FLANKS_S}"
+        )
+    if (contract.shoulders_inner_s, contract.shoulders_outer_s) != EXPECTED_SHOULDERS_S:
+        raise ValueError(
+            "Figure shoulder annotation does not match EXPECTED_SHOULDERS_S="
+            f"{EXPECTED_SHOULDERS_S}"
+        )
+    y0, y1 = ax.get_ylim()
+    y_span = y1 - y0
+    # Distant labels stay near the bottom; shoulder labels sit above the curve.
+    y_flank = y0 + 0.04 * y_span
+    y_shoulder = y1 - 0.06 * y_span
+    base_style = {
+        "color": PALETTE["dark_gray"],
+        "ha": "center",
+        "clip_on": True,
+        "alpha": 0.95,
+        "bbox": {"facecolor": "white", "edgecolor": "none", "alpha": 0.7, "pad": 0.12},
+    }
+    flank_style = {**base_style, "fontsize": FS_TICK - 3, "va": "bottom"}
+    # Smaller type for narrow shoulder bands.
+    shoulder_style = {**base_style, "fontsize": FS_TICK - 5, "va": "top"}
+    flank_mid = 0.5 * (contract.flank_inner_s + contract.flank_outer_s)
+    shoulder_mid = 0.5 * (contract.shoulders_inner_s + contract.shoulders_outer_s)
+    ax.text(-flank_mid, y_flank, "distant -", **flank_style)
+    ax.text(-shoulder_mid, y_shoulder, "shoulder -", **shoulder_style)
+    ax.text(shoulder_mid, y_shoulder, "shoulder +", **shoulder_style)
+    ax.text(flank_mid, y_flank, "distant +", **flank_style)
 
 
 def _set_lag_axes(ax: plt.Axes, duration_s: int) -> None:
@@ -482,6 +551,14 @@ def _set_lag_axes(ax: plt.Axes, duration_s: int) -> None:
     ax.set_xlabel(LAG_XLABEL, fontsize=FS_AXIS)
     ax.set_ylabel(Z_YLABEL, fontsize=FS_AXIS)
     _style_axes(ax)
+
+
+def _is_low_demand_condition(row: Mapping[str, object]) -> bool:
+    condition = _as_str(row.get("condition") or row.get("task")).casefold()
+    role = _as_str(row.get("condition_role") or row.get("state")).casefold()
+    if role == "low_demand":
+        return True
+    return condition in LOW_DEMAND_CONDITION_LABELS
 
 
 def read_csv_rows(path: str | Path | None) -> list[dict[str, str]]:
@@ -559,7 +636,7 @@ def mean_ci_by_lag(
 ) -> list[dict[str, object]]:
     """Aggregate Fisher-z curves to mean ± 95% CI per lag (low-demand by default)."""
     buckets: dict[int, list[float]] = {}
-    low_labels = {"rest", "passive", "step1", "low_demand", "ph_pre_rest", "ph_post_rest", "ps_pre_rest", "ps_post_rest"}
+    low_labels = LOW_DEMAND_CONDITION_LABELS
     for row in curve_rows:
         if _as_int(row.get("duration_s"), duration_s) != duration_s:
             continue
@@ -629,7 +706,7 @@ def render_figure1(
     fig, axes = plt.subplots(
         2,
         2,
-        figsize=(12.5, 10),
+        figsize=(13.6, 12.6),
         sharex=True,
         sharey=True,
         constrained_layout=False,
@@ -638,6 +715,7 @@ def render_figure1(
     panel_letters = ("A", "B", "C", "D")
     shared_handles: list[object] = []
     shared_labels: list[str] = []
+    primary_contract = contract_for_duration(EXPECTED_PRIMARY_DURATION_S)
     for ax, band, letter in zip(axes_flat, BAND_ORDER, panel_letters, strict=True):
         series = mean_ci_by_lag(curves, band=band, condition_role="low_demand")
         fields = (
@@ -670,6 +748,7 @@ def render_figure1(
                 alpha=CI_ALPHA,
                 linewidth=0,
                 label=CI_95_LABEL,
+                zorder=2,
             )
             ax.plot(
                 lags,
@@ -677,15 +756,20 @@ def render_figure1(
                 color=color,
                 lw=LINE_WIDTH,
                 ls=_band_linestyle(band),
-                label=f"Mean Fisher z (n = {n})",
+                label=GROUP_MEAN_LABEL_TEMPLATE.format(n=n),
+                zorder=3,
             )
+            # Peak μ overlay: low-demand identifiable peaks only (match curve state).
             mus = [
                 _as_float(r.get("peak_center_mu_s"))
                 for r in peak_rows
                 if _as_str(r.get("band")).casefold() == band
                 and _as_int(r.get("duration_s"), 240) == 240
                 and _as_str(r.get("endpoint_name"), ENDPOINT_ZLPI) == ENDPOINT_ZLPI
+                and _as_str(r.get("power_representation"), PRIMARY_REPRESENTATION).casefold()
+                == PRIMARY_REPRESENTATION
                 and str(r.get("has_identifiable_peak", "")).lower() in {"true", "1", "yes"}
+                and _is_low_demand_condition(r)
             ]
             mus = [m for m in mus if math.isfinite(m)]
             if mus:
@@ -693,9 +777,10 @@ def render_figure1(
                     -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
                     EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
                     facecolor=PALETTE["orange"],
-                    alpha=0.12,
-                    zorder=0,
+                    alpha=0.14,
+                    zorder=1,
                     linewidth=0,
+                    label=MU_EQUIVALENCE_LABEL,
                 )
                 ax.axvline(
                     float(np.median(mus)),
@@ -703,12 +788,28 @@ def render_figure1(
                     ls=":",
                     lw=LINE_WIDTH,
                     label=MEDIAN_PEAK_CENTER_LABEL,
+                    zorder=4,
                 )
             _set_lag_axes(ax, EXPECTED_PRIMARY_DURATION_S)
-            _set_panel_title(ax, f"{_band_display(band)} (n = {n})")
+            _set_panel_title(ax, f"{_band_display(band)} · low-demand (n = {n})")
             _add_panel_label(ax, letter)
             if letter == "A":
                 shared_handles, shared_labels = ax.get_legend_handles_labels()
+                # Keep legend order: mean, CI, median μ, equivalence (if present).
+                preferred = [
+                    GROUP_MEAN_LABEL_TEMPLATE.format(n=n),
+                    CI_95_LABEL,
+                    MEDIAN_PEAK_CENTER_LABEL,
+                    MU_EQUIVALENCE_LABEL,
+                ]
+                ordered = []
+                for lab in preferred:
+                    for h, L in zip(shared_handles, shared_labels, strict=False):
+                        if L == lab:
+                            ordered.append((h, L))
+                            break
+                if ordered:
+                    shared_handles, shared_labels = map(list, zip(*ordered, strict=False))
         else:
             _set_panel_title(ax, _band_display(band))
             _add_panel_label(ax, letter)
@@ -742,24 +843,44 @@ def render_figure1(
                     f"representation={PRIMARY_REPRESENTATION}",
                 ],
                 notes=(
-                    "Flank shading uses ZLPI 20–60 s windows; orange band marks ±2 s μ "
-                    f"equivalence region when peaks exist. Shaded curve region is {CI_95_LABEL}."
+                    f"Low-demand D{EXPECTED_PRIMARY_DURATION_S} absolute_log10 curves; "
+                    f"distant flanks |τ|∈[{primary_contract.flank_inner_s},"
+                    f"{primary_contract.flank_outer_s}] s; "
+                    f"local shoulders |τ|∈[{primary_contract.shoulders_inner_s},"
+                    f"{primary_contract.shoulders_outer_s}] s; "
+                    f"orange band = {EQUIVALENCE_REGION_LABEL} μ equivalence when "
+                    f"low-demand peaks exist. Ribbon is {CI_95_METHOD_NOTE}."
                 ),
             )
         )
 
+    # Annotate lag regions after shared y-limits are established.
+    for ax in axes_flat:
+        _annotate_lag_regions(ax, EXPECTED_PRIMARY_DURATION_S, enabled=True)
+        # sharex=True hides tick numbers on the top row; show them on A–D.
+        ax.tick_params(axis="x", labelbottom=True)
     if shared_handles:
         fig.legend(
             shared_handles,
             shared_labels,
             loc="lower center",
-            ncol=min(3, len(shared_labels)),
-            fontsize=FS_LEGEND - 1,
+            ncol=min(4, len(shared_labels)),
+            fontsize=FS_LEGEND - 2,
             frameon=False,
-            bbox_to_anchor=(0.5, 0.01),
+            bbox_to_anchor=(0.5, 0.025),
         )
-    fig.suptitle(FIGURE1_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.98)
-    fig.subplots_adjust(left=0.10, right=0.98, top=0.90, bottom=0.14, wspace=0.22, hspace=0.32)
+    fig.suptitle(FIGURE1_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.985)
+    fig.text(
+        0.5,
+        0.018,
+        f"{LAG_CONVENTION_NOTE}.  {CI_95_METHOD_NOTE}.",
+        ha="center",
+        va="bottom",
+        fontsize=FS_TICK - 2,
+        color=PALETTE["dark_gray"],
+    )
+    # Bottom room for C/D "Lag τ (s)" above legend; hspace keeps A/B labels off C/D titles.
+    fig.subplots_adjust(left=0.08, right=0.99, top=0.93, bottom=0.20, wspace=0.18, hspace=0.44)
     pdf, svg, png = save_figure_trio(fig, output_dir, FIGURE1_STEM)
     return FigureArtifacts(
         figure_id="figure1",
