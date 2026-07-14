@@ -200,6 +200,8 @@ class TestExactPairing(unittest.TestCase):
         self.assertAlmostEqual(float(row["delta_endpoint_index"]), -0.30, places=12)
         self.assertAlmostEqual(float(row["delta_peak_height_A"]), -0.30, places=12)
         self.assertAlmostEqual(float(row["delta_peak_center_mu_s"]), 2.0, places=12)
+        self.assertTrue(row["contrast_eligible"])
+        self.assertEqual(row["contrast_exclusion_reason"], "")
         self.assertTrue(row["mu_contrast_eligible"])
         self.assertAlmostEqual(float(row["delta_fwhm_s"]), 20.0 - 23.55, places=12)
 
@@ -207,6 +209,9 @@ class TestExactPairing(unittest.TestCase):
             q for q in result.pairing_qc_rows if q["pairing_status"] == "paired"
         ]
         self.assertEqual(len(paired_qc), 1)
+        # Dataset-scoped QC: no protocol-wide placeholder rows for empty datasets.
+        datasets = {q["dataset_id"] for q in result.pairing_qc_rows}
+        self.assertEqual(datasets, {"ds003838"})
 
 
 class TestMissingConditions(unittest.TestCase):
@@ -526,11 +531,91 @@ class TestMuAndEndpointSeparation(unittest.TestCase):
         )
         result = build_group_tables(endpoints, peaks)
         row = result.paired_contrast_rows[0]
+        self.assertTrue(row["contrast_eligible"])
+        self.assertEqual(row["contrast_exclusion_reason"], "")
         self.assertFalse(row["mu_contrast_eligible"])
         self.assertTrue(math.isnan(float(row["delta_peak_center_mu_s"])))
+        self.assertTrue(math.isnan(float(row["delta_fwhm_s"])))
+        self.assertTrue(math.isnan(float(row["effort_fwhm_s"])))
         # Other contrasts still computed.
         self.assertAlmostEqual(float(row["delta_endpoint_index"]), -0.30, places=12)
         self.assertAlmostEqual(float(row["delta_peak_height_A"]), -0.20, places=12)
+
+    def test_nonidentifiable_peak_leaves_shape_fields_blank(self) -> None:
+        endpoints = [
+            _endpoint_row(
+                dataset_id="ds003838",
+                observation_id="ds003838-sub-001-ses-single-task-rest",
+                subject_id="sub-001",
+                condition="rest",
+                endpoint_index=0.4,
+                session_id="single",
+            )
+        ]
+        peaks = [
+            _peak_row(
+                dataset_id="ds003838",
+                observation_id="ds003838-sub-001-ses-single-task-rest",
+                subject_id="sub-001",
+                condition="rest",
+                peak_height_A=0.01,
+                peak_center_mu_s=0.0,
+                fwhm_s=23.55,
+                has_identifiable_peak=False,
+                session_id="single",
+            )
+        ]
+        subject = build_subject_level_metrics(endpoints, peaks)[0]
+        self.assertFalse(subject["has_identifiable_peak"])
+        self.assertTrue(math.isnan(float(subject["peak_center_mu_s"])))
+        self.assertTrue(math.isnan(float(subject["sigma_s"])))
+        self.assertTrue(math.isnan(float(subject["fwhm_s"])))
+        # Optimizer diagnostics may still be present.
+        self.assertTrue(math.isfinite(float(subject["peak_height_A"])))
+
+    def test_contrast_exclusion_when_endpoint_ineligible(self) -> None:
+        endpoints, peaks = _ds003838_pair(
+            "sub-001",
+            rest_index=0.5,
+            memory_index=0.2,
+        )
+        for row in endpoints:
+            if row["condition"] == "memory":
+                row["eligible"] = False
+                row["exclusion_reason"] = "test_reject"
+        result = build_group_tables(endpoints, peaks)
+        row = result.paired_contrast_rows[0]
+        self.assertFalse(row["contrast_eligible"])
+        self.assertEqual(row["contrast_exclusion_reason"], "effort_endpoint_ineligible")
+
+    def test_pairing_qc_restricted_to_dataset_ids(self) -> None:
+        e1, p1 = _ds003838_pair("sub-001", rest_index=0.5, memory_index=0.2)
+        e2 = [
+            _endpoint_row(
+                dataset_id="hiit",
+                observation_id="hiit-01-ph-pre-rest",
+                subject_id="01_ph",
+                condition="ph_pre_rest",
+                endpoint_index=0.4,
+                session_id="ph",
+            )
+        ]
+        p2 = [
+            _peak_row(
+                dataset_id="hiit",
+                observation_id="hiit-01-ph-pre-rest",
+                subject_id="01_ph",
+                condition="ph_pre_rest",
+                peak_height_A=0.3,
+                peak_center_mu_s=0.0,
+                session_id="ph",
+            )
+        ]
+        result = build_group_tables(e1 + e2, p1 + p2, dataset_ids=("ds003838",))
+        datasets = {q["dataset_id"] for q in result.pairing_qc_rows}
+        self.assertEqual(datasets, {"ds003838"})
+        subject_datasets = {r["dataset_id"] for r in result.subject_level_rows}
+        self.assertEqual(subject_datasets, {"ds003838"})
 
     def test_never_pools_zlpi_mwpi_swpi(self) -> None:
         endpoints = [

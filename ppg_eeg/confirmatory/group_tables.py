@@ -1,8 +1,17 @@
-"""Participant-level tables and within-subject paired contrasts (M8).
+"""Participant-level tables and within-subject paired contrasts (M8 / C5).
 
 Combines M6 endpoint metrics with M7 peak-fit parameters, normalizes
 dataset-specific identity keys, and emits task-minus-low-demand contrasts
 only for valid within-subject pairings. ZLPI, MWPI, and SWPI stay separate.
+
+Peak shape / timing fields
+--------------------------
+When ``has_identifiable_peak`` is False, ``peak_center_mu_s``, ``sigma_s``, and
+``fwhm_s`` are intentionally left empty (NaN / blank in CSV). Downstream stages
+must not treat those blanks as missing-data errors; use
+``has_identifiable_peak`` / ``peak_exclusion_reason`` instead. Other fit
+diagnostics (e.g. ``peak_height_A``, ``baseline_C``) may still be present when
+the optimizer converged without an identifiable positive peak.
 """
 
 from __future__ import annotations
@@ -18,7 +27,6 @@ from ..datasets import CanonicalObservation
 from .endpoints import METRICS_TEMPLATE
 from .peak_model import PARAMS_FILENAME
 from .protocol_audit import (
-    PROTOCOL_SPECS,
     ContrastSpec,
     ProtocolSpec,
     _participant_id,
@@ -83,6 +91,7 @@ SUBJECT_LEVEL_FIELDS = (
     "report_timing_shift",
     "baseline_C",
     "peak_height_A",
+    # Intentionally blank when has_identifiable_peak is False (not a data error).
     "peak_center_mu_s",
     "sigma_s",
     "fwhm_s",
@@ -113,6 +122,8 @@ PAIRED_CONTRAST_FIELDS = (
     "delta_peak_height_A",
     "delta_peak_center_mu_s",
     "delta_fwhm_s",
+    "contrast_eligible",
+    "contrast_exclusion_reason",
     "mu_contrast_eligible",
     "low_endpoint_eligible",
     "effort_endpoint_eligible",
@@ -326,6 +337,25 @@ def combine_endpoint_and_peak_rows(
         keys = normalize_keys(endpoint)
         peak = peaks_by_key.get(_join_key(endpoint), {})
         duration_s = _as_int(endpoint.get("duration_s"))
+        has_identifiable_peak = (
+            _as_bool(peak.get("has_identifiable_peak")) if peak else False
+        )
+        # Shape/timing parameters are reportable only for identifiable peaks.
+        peak_center = (
+            _as_float(peak.get("peak_center_mu_s"))
+            if peak and has_identifiable_peak
+            else float("nan")
+        )
+        sigma_s = (
+            _as_float(peak.get("sigma_s"))
+            if peak and has_identifiable_peak
+            else float("nan")
+        )
+        fwhm_s = (
+            _as_float(peak.get("fwhm_s"))
+            if peak and has_identifiable_peak
+            else float("nan")
+        )
         combined.append(
             {
                 **keys,
@@ -355,9 +385,7 @@ def combine_endpoint_and_peak_rows(
                 "z0": _as_float(endpoint.get("z0")),
                 "n_common_support": _as_float(endpoint.get("n_common_support")),
                 "peak_converged": _as_bool(peak.get("converged")) if peak else False,
-                "has_identifiable_peak": (
-                    _as_bool(peak.get("has_identifiable_peak")) if peak else False
-                ),
+                "has_identifiable_peak": has_identifiable_peak,
                 "report_timing_shift": (
                     _as_bool(peak.get("report_timing_shift")) if peak else False
                 ),
@@ -365,11 +393,9 @@ def combine_endpoint_and_peak_rows(
                 "peak_height_A": (
                     _as_float(peak.get("peak_height_A")) if peak else float("nan")
                 ),
-                "peak_center_mu_s": (
-                    _as_float(peak.get("peak_center_mu_s")) if peak else float("nan")
-                ),
-                "sigma_s": _as_float(peak.get("sigma_s")) if peak else float("nan"),
-                "fwhm_s": _as_float(peak.get("fwhm_s")) if peak else float("nan"),
+                "peak_center_mu_s": peak_center,
+                "sigma_s": sigma_s,
+                "fwhm_s": fwhm_s,
                 "peak_exclusion_reason": (
                     _as_str(peak.get("exclusion_reason")) if peak else "missing_peak_fit"
                 ),
@@ -402,6 +428,7 @@ def build_subject_level_metrics(
         peak_source = peak_members or members
 
         first = members[0]
+        has_identifiable_peak = all(bool(m["has_identifiable_peak"]) for m in members)
         subject_rows.append(
             {
                 "dataset_id": first["dataset_id"],
@@ -445,9 +472,7 @@ def build_subject_level_metrics(
                     [float(m["n_common_support"]) for m in endpoint_source]
                 ),
                 "peak_converged": all(bool(m["peak_converged"]) for m in members),
-                "has_identifiable_peak": all(
-                    bool(m["has_identifiable_peak"]) for m in members
-                ),
+                "has_identifiable_peak": has_identifiable_peak,
                 "report_timing_shift": all(
                     bool(m["report_timing_shift"]) for m in members
                 ),
@@ -455,13 +480,22 @@ def build_subject_level_metrics(
                 "peak_height_A": _mean(
                     [float(m["peak_height_A"]) for m in peak_source]
                 ),
-                "peak_center_mu_s": _mean(
-                    [float(m["peak_center_mu_s"]) for m in peak_members]
-                )
-                if peak_members and len(peak_members) == len(members)
-                else float("nan"),
-                "sigma_s": _mean([float(m["sigma_s"]) for m in peak_source]),
-                "fwhm_s": _mean([float(m["fwhm_s"]) for m in peak_source]),
+                # Blank when any run lacks an identifiable peak (not missing data).
+                "peak_center_mu_s": (
+                    _mean([float(m["peak_center_mu_s"]) for m in peak_members])
+                    if has_identifiable_peak and peak_members
+                    else float("nan")
+                ),
+                "sigma_s": (
+                    _mean([float(m["sigma_s"]) for m in peak_members])
+                    if has_identifiable_peak and peak_members
+                    else float("nan")
+                ),
+                "fwhm_s": (
+                    _mean([float(m["fwhm_s"]) for m in peak_members])
+                    if has_identifiable_peak and peak_members
+                    else float("nan")
+                ),
                 "peak_exclusion_reason": _semicolon_join(
                     [
                         _as_str(m.get("peak_exclusion_reason"))
@@ -489,18 +523,50 @@ def _delta(effort: float, low: float) -> float:
     return float(effort - low)
 
 
+def _contrast_eligibility(
+    low: Mapping[str, object],
+    effort: Mapping[str, object],
+) -> tuple[bool, str]:
+    """Return (contrast_eligible, contrast_exclusion_reason) for one pairing."""
+    low_ok = bool(low.get("endpoint_eligible"))
+    effort_ok = bool(effort.get("endpoint_eligible"))
+    if low_ok and effort_ok:
+        return True, ""
+    if not low_ok and not effort_ok:
+        return False, "both_endpoint_ineligible"
+    if not low_ok:
+        return False, "low_endpoint_ineligible"
+    return False, "effort_endpoint_ineligible"
+
+
 def build_paired_contrasts(
     subject_rows: Sequence[Mapping[str, object]],
+    *,
+    dataset_ids: Sequence[str] | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Task-minus-low-demand contrasts for valid within-subject pairings only."""
+    """Task-minus-low-demand contrasts for valid within-subject pairings only.
+
+    ``pairing_qc.csv`` covers only datasets present in ``subject_rows`` (optionally
+    further restricted by ``dataset_ids``). Placeholder ``no_observations`` rows
+    are not emitted for protocol datasets that were not part of this run.
+    """
     by_dataset: dict[str, list[Mapping[str, object]]] = {}
     for row in subject_rows:
         by_dataset.setdefault(_as_str(row.get("dataset_id")).casefold(), []).append(row)
 
+    if dataset_ids is not None:
+        allowed = {_as_str(dataset_id).casefold() for dataset_id in dataset_ids if _as_str(dataset_id)}
+        by_dataset = {
+            dataset_id: rows
+            for dataset_id, rows in by_dataset.items()
+            if dataset_id in allowed
+        }
+
     contrast_rows: list[dict[str, object]] = []
     qc_rows: list[dict[str, object]] = []
 
-    for dataset_id in sorted(set(PROTOCOL_SPECS) | set(by_dataset)):
+    # Only datasets present in this run — never synthesize protocol-wide placeholders.
+    for dataset_id in sorted(by_dataset):
         rows = by_dataset.get(dataset_id, [])
         try:
             spec: ProtocolSpec = protocol_spec(dataset_id)
@@ -731,6 +797,7 @@ def build_paired_contrasts(
                 )
 
             if not low_pair_keys and not effort_pair_keys:
+                # Dataset is in this run, but this contrast's conditions are absent.
                 qc_rows.append(
                     {
                         "dataset_id": dataset_id,
@@ -766,6 +833,11 @@ def build_paired_contrasts(
                 mu_eligible = bool(low["has_identifiable_peak"]) and bool(
                     effort["has_identifiable_peak"]
                 )
+                contrast_eligible, contrast_exclusion_reason = _contrast_eligibility(
+                    low, effort
+                )
+                low_has_peak = bool(low["has_identifiable_peak"])
+                effort_has_peak = bool(effort["has_identifiable_peak"])
                 contrast_rows.append(
                     {
                         "dataset_id": dataset_id,
@@ -812,18 +884,18 @@ def build_paired_contrasts(
                             if mu_eligible
                             else float("nan")
                         ),
-                        "delta_fwhm_s": _delta(
-                            float(effort["fwhm_s"]), float(low["fwhm_s"])
+                        "delta_fwhm_s": (
+                            _delta(float(effort["fwhm_s"]), float(low["fwhm_s"]))
+                            if mu_eligible
+                            else float("nan")
                         ),
+                        "contrast_eligible": contrast_eligible,
+                        "contrast_exclusion_reason": contrast_exclusion_reason,
                         "mu_contrast_eligible": mu_eligible,
                         "low_endpoint_eligible": bool(low["endpoint_eligible"]),
                         "effort_endpoint_eligible": bool(effort["endpoint_eligible"]),
-                        "low_has_identifiable_peak": bool(
-                            low["has_identifiable_peak"]
-                        ),
-                        "effort_has_identifiable_peak": bool(
-                            effort["has_identifiable_peak"]
-                        ),
+                        "low_has_identifiable_peak": low_has_peak,
+                        "effort_has_identifiable_peak": effort_has_peak,
                         "low_endpoint_index": float(low["endpoint_index"]),
                         "effort_endpoint_index": float(effort["endpoint_index"]),
                         "low_local_prominence": float(low["local_prominence"]),
@@ -836,8 +908,12 @@ def build_paired_contrasts(
                         "effort_peak_center_mu_s": float(effort["peak_center_mu_s"])
                         if mu_eligible
                         else float("nan"),
-                        "low_fwhm_s": float(low["fwhm_s"]),
-                        "effort_fwhm_s": float(effort["fwhm_s"]),
+                        "low_fwhm_s": float(low["fwhm_s"])
+                        if low_has_peak
+                        else float("nan"),
+                        "effort_fwhm_s": float(effort["fwhm_s"])
+                        if effort_has_peak
+                        else float("nan"),
                     }
                 )
 
@@ -847,9 +923,20 @@ def build_paired_contrasts(
 def build_group_tables(
     endpoint_rows: Sequence[Mapping[str, object]],
     peak_rows: Sequence[Mapping[str, object]],
+    *,
+    dataset_ids: Sequence[str] | None = None,
 ) -> GroupTableResult:
     subject_rows = build_subject_level_metrics(endpoint_rows, peak_rows)
-    contrast_rows, qc_rows = build_paired_contrasts(subject_rows)
+    if dataset_ids is not None:
+        allowed = {_as_str(dataset_id).casefold() for dataset_id in dataset_ids if _as_str(dataset_id)}
+        subject_rows = [
+            row
+            for row in subject_rows
+            if _as_str(row.get("dataset_id")).casefold() in allowed
+        ]
+    contrast_rows, qc_rows = build_paired_contrasts(
+        subject_rows, dataset_ids=dataset_ids
+    )
     return GroupTableResult(
         subject_level_rows=tuple(subject_rows),
         paired_contrast_rows=tuple(contrast_rows),
@@ -940,11 +1027,14 @@ def run_confirmatory_group_tables(
     output_dir: str | Path,
     *,
     peaks_dir: str | Path | None = None,
+    dataset_ids: Sequence[str] | None = None,
 ) -> GroupTableResult:
     endpoint_rows, peak_rows = load_endpoint_and_peak_rows(
         endpoints_dir, peaks_dir=peaks_dir
     )
-    result = build_group_tables(endpoint_rows, peak_rows)
+    result = build_group_tables(
+        endpoint_rows, peak_rows, dataset_ids=dataset_ids
+    )
     write_group_table_outputs(result, output_dir)
     return result
 

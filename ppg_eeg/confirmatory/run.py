@@ -589,7 +589,12 @@ def run_c4(ctx: StageContext) -> dict[str, object]:
 def run_c5(ctx: StageContext) -> dict[str, object]:
     endpoints = ctx.stage_dir("C3")
     out = ctx.stage_dir("C5")
-    run_confirmatory_group_tables(endpoints, out, peaks_dir=endpoints)
+    run_confirmatory_group_tables(
+        endpoints,
+        out,
+        peaks_dir=endpoints,
+        dataset_ids=(ctx.dataset.dataset_id,),
+    )
     return {"group_tables": str(out)}
 
 
