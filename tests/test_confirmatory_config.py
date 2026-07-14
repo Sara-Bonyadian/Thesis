@@ -176,6 +176,7 @@ class TestConfirmatoryDatasetConfig(unittest.TestCase):
         )
         self.assertEqual(cfg.output_root, master.output_root / "smoke" / "ds003838")
         self.assertNotEqual(cfg.output_root, cfg.paths.raw_root)
+        self.assertEqual(cfg.n_surrogates, 20)
 
     def test_dataset_role_must_match_master(self) -> None:
         master = load_master_config(MASTER_PATH)

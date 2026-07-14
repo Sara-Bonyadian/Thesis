@@ -38,6 +38,7 @@ class TestM13bHiitSmokeConfig(unittest.TestCase):
     def test_smoke_config_loads_with_protocol_task_pairs(self) -> None:
         cfg = load_dataset_config(self.smoke_path, master=self.master)
         self.assertEqual(cfg.dataset_id, "hiit")
+        self.assertEqual(cfg.n_surrogates, 20)
         self.assertEqual(cfg.role, "sensitivity")
         self.assertEqual(cfg.selection.subjects, ("01", "02", "03"))
         self.assertEqual(cfg.selection.sessions, ("ph", "ps"))

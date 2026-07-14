@@ -196,6 +196,7 @@ class ConfirmatoryDatasetConfig:
     output_root: Path
     cardiac: DatasetCardiacConfig = DatasetCardiacConfig()
     eeg: DatasetEegConfig = DatasetEegConfig()
+    n_surrogates: int | None = None
 
 
 def _as_mapping(value: Any, *, path: str) -> dict[str, Any]:
@@ -641,6 +642,7 @@ def load_dataset_config(
         "selection",
         "cardiac",
         "eeg",
+        "n_surrogates",
     }
     _reject_unknown_keys(root, allowed=top_keys, path="<root>")
     _require_keys(
@@ -719,6 +721,11 @@ def load_dataset_config(
     )
     cardiac = _load_dataset_cardiac(root.get("cardiac"), dataset_id=dataset_id)
     eeg = _load_dataset_eeg(root.get("eeg"))
+    n_surrogates: int | None = None
+    if "n_surrogates" in root and root["n_surrogates"] is not None:
+        n_surrogates = _as_int(root["n_surrogates"], path="n_surrogates")
+        if n_surrogates < 1:
+            raise ValueError("n_surrogates must be >= 1.")
 
     return ConfirmatoryDatasetConfig(
         schema_version=schema_version,
@@ -733,6 +740,7 @@ def load_dataset_config(
         output_root=output_root,
         cardiac=cardiac,
         eeg=eeg,
+        n_surrogates=n_surrogates,
     )
 
 

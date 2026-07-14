@@ -51,7 +51,7 @@ from .multitaper_power import (
     ROBUST_MEDIAN_CHANNEL,
     extract_multitaper_file,
 )
-from .nulls import SMOKE_N_SURROGATES, run_confirmatory_nulls
+from .nulls import DEFAULT_N_SURROGATES, SMOKE_N_SURROGATES, run_confirmatory_nulls
 from .peak_model import run_confirmatory_peak_fits
 from .production import discover_config_dir, master_config_path
 from .data_audit import run_confirmatory_data_audit
@@ -117,7 +117,7 @@ class StageContext:
     dataset: ConfirmatoryDatasetConfig
     master_path: Path
     dataset_path: Path
-    n_surrogates: int = SMOKE_N_SURROGATES
+    n_surrogates: int = DEFAULT_N_SURROGATES
     force: bool = False
     repo_root: Path | None = None
     logs: list[dict[str, object]] = field(default_factory=list)
@@ -740,8 +740,12 @@ def build_stage_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--n-surrogates",
         type=int,
-        default=SMOKE_N_SURROGATES,
-        help=f"Null surrogates for C4 (default {SMOKE_N_SURROGATES} smoke).",
+        default=None,
+        help=(
+            "Null surrogates for C4. Defaults to dataset YAML n_surrogates when "
+            f"set, otherwise {DEFAULT_N_SURROGATES} (production). Smoke configs "
+            f"set n_surrogates: {SMOKE_N_SURROGATES}."
+        ),
     )
     parser.add_argument(
         "--force",
@@ -805,7 +809,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             dataset=dataset,
             master_path=master_path,
             dataset_path=dataset_path,
-            n_surrogates=int(args.n_surrogates),
+            n_surrogates=(
+                int(args.n_surrogates)
+                if args.n_surrogates is not None
+                else (
+                    int(dataset.n_surrogates)
+                    if dataset.n_surrogates is not None
+                    else DEFAULT_N_SURROGATES
+                )
+            ),
             force=bool(args.force),
             repo_root=repo_root,
         )

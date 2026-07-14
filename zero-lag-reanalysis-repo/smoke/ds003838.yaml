@@ -2,6 +2,9 @@ schema_version: 1
 dataset_id: ds003838
 role: primary
 
+# Smoke null battery; production default is 1000 (DEFAULT_N_SURROGATES).
+n_surrogates: 20
+
 paths:
   raw_root: ../../data/raw/ds003838
   output_subdir: smoke/ds003838

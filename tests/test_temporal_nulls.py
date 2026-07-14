@@ -14,6 +14,7 @@ from ppg_eeg.confirmatory.duration_contracts import (
 )
 from ppg_eeg.confirmatory.nulls import (
     BLOCK_LENGTH_S,
+    DEFAULT_N_SURROGATES,
     NULL_QC_FILENAME,
     NULL_SUBJECT_RESULTS_FILENAME,
     NULL_SUMMARY_FILENAME,
@@ -23,6 +24,7 @@ from ppg_eeg.confirmatory.nulls import (
     NULL_TYPE_CROSS_SUBJECT_MISMATCH,
     NULL_TYPE_PHASE_RANDOMIZATION,
     SMOKE_N_SURROGATES,
+    SUBJECT_RESULT_FIELDS,
     SeriesUnit,
     amplitude_spectrum,
     analysis_key,
@@ -325,6 +327,9 @@ class TestWriteOutputs(unittest.TestCase):
             n_surrogates=5,
             null_types=(NULL_TYPE_BLOCK_SHUFFLE, NULL_TYPE_AR1_INNOVATIONS),
         )
+        self.assertIn("rng_seed_u64", result.subject_rows[0])
+        self.assertNotIn("seed_u64", result.subject_rows[0])
+        self.assertIn("rng_seed_u64", SUBJECT_RESULT_FIELDS)
         with TemporaryDirectory() as tmp:
             paths = write_null_outputs(result, tmp)
             self.assertEqual(
@@ -334,6 +339,13 @@ class TestWriteOutputs(unittest.TestCase):
             self.assertEqual(paths["null_qc"].name, NULL_QC_FILENAME)
             for path in paths.values():
                 self.assertTrue(path.is_file())
+
+
+class TestSurrogateCountDefaults(unittest.TestCase):
+    def test_smoke_and_production_surrogate_counts(self) -> None:
+        self.assertEqual(SMOKE_N_SURROGATES, 20)
+        self.assertEqual(DEFAULT_N_SURROGATES, 1000)
+        self.assertGreaterEqual(DEFAULT_N_SURROGATES, 500)
 
 
 if __name__ == "__main__":

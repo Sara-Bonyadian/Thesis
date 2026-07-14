@@ -10,8 +10,19 @@ Null types
 - ``ar1_innovations``: AR(1) residual series for HR and EEG
 
 Each duration keeps its M6 endpoint contract (ZLPI / MWPI / SWPI). Null
-distributions are never pooled across endpoint types. Seeds come from
-SHA-256 of ``observation_id``, analysis key, and null type.
+distributions are never pooled across endpoint types.
+
+Surrogate counts
+----------------
+- Production / confirmatory default: ``DEFAULT_N_SURROGATES`` (1000)
+- Smoke tests: ``SMOKE_N_SURROGATES`` (20), typically via dataset YAML
+  ``n_surrogates: 20``
+
+Reproducibility
+---------------
+Each subject×null-type row records ``rng_seed_u64``: the uint64 seed passed
+to ``numpy.random.default_rng`` for that unit. Seeds are derived from SHA-256
+of ``observation_id``, analysis key, and null type (not Python ``hash()``).
 """
 
 from __future__ import annotations
@@ -97,7 +108,7 @@ SUBJECT_RESULT_FIELDS = (
     "null_median",
     "empirical_p",
     "effect_size_surrogate_z",
-    "seed_u64",
+    "rng_seed_u64",
     "analysis_key",
 )
 
@@ -233,7 +244,12 @@ def deterministic_seed(
     analysis_key_value: str,
     null_type: str,
 ) -> int:
-    """SHA-256 → uint64 seed (not Python's process-randomized ``hash()``)."""
+    """Derive the ``rng_seed_u64`` value for one null unit.
+
+    Returns a uint64 suitable for ``numpy.random.default_rng``. The digest is
+    SHA-256 of observation ID, analysis key, and null type — not Python's
+    process-randomized ``hash()``.
+    """
     payload = (
         f"{_as_str(observation_id)}\0{_as_str(analysis_key_value)}\0"
         f"{_as_str(null_type).casefold()}"
@@ -697,7 +713,7 @@ def _null_statistics_for_unit(
         "null_median": _median(null_vals),
         "empirical_p": p_value,
         "effect_size_surrogate_z": effect,
-        "seed_u64": int(seed),
+        "rng_seed_u64": int(seed),
         "analysis_key": key,
     }
     qc_row = {
@@ -801,7 +817,7 @@ def _observation_key(unit: SeriesUnit) -> str:
 def run_null_battery(
     units: Sequence[SeriesUnit],
     *,
-    n_surrogates: int = SMOKE_N_SURROGATES,
+    n_surrogates: int = DEFAULT_N_SURROGATES,
     null_types: Sequence[str] = NULL_TYPES,
 ) -> NullBatteryResult:
     """Run the confirmatory null battery for analysis units."""
@@ -1013,7 +1029,7 @@ def run_confirmatory_nulls(
     aligned_dir: str | Path,
     output_dir: str | Path,
     *,
-    n_surrogates: int = SMOKE_N_SURROGATES,
+    n_surrogates: int = DEFAULT_N_SURROGATES,
     durations: Sequence[int] = EXPECTED_DURATIONS_S,
     null_types: Sequence[str] = NULL_TYPES,
 ) -> NullBatteryResult:
