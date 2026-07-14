@@ -25,6 +25,10 @@ selection:
     - ph
     - ps
 
+eeg:
+  sampling_rate_hz: 500
+  line_frequency_hz: 60
+
 cardiac:
   channel: photosensor
   signal_type: ppg

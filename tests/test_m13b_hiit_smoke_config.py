@@ -59,6 +59,8 @@ class TestM13bHiitSmokeConfig(unittest.TestCase):
         self.assertEqual(cfg.cardiac.signal_type, "ppg")
         self.assertEqual(cfg.cardiac.detector, "ppg_peak")
         self.assertEqual(cfg.cardiac.ibi_max_ms, 1500.0)
+        self.assertEqual(cfg.eeg.sampling_rate_hz, 500.0)
+        self.assertEqual(cfg.eeg.line_frequency_hz, 60.0)
 
     def test_smoke_conditions_match_protocol_contrasts(self) -> None:
         cfg = load_dataset_config(self.smoke_path, master=self.master)

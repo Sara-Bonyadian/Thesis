@@ -154,6 +154,18 @@ class DatasetSelectionConfig:
 
 
 @dataclass(frozen=True)
+class DatasetEegConfig:
+    """Optional dataset EEG metadata for confirmatory Stages C1a+.
+
+    ``line_frequency_hz`` drives C1a notch handling. ``sampling_rate_hz`` is
+    declarative metadata (actual rate still comes from the EEG file).
+    """
+
+    sampling_rate_hz: float | None = None
+    line_frequency_hz: float | None = None
+
+
+@dataclass(frozen=True)
 class DatasetCardiacConfig:
     """Peak-detection settings for confirmatory Stage C1b.
 
@@ -183,6 +195,7 @@ class ConfirmatoryDatasetConfig:
     selection: DatasetSelectionConfig
     output_root: Path
     cardiac: DatasetCardiacConfig = DatasetCardiacConfig()
+    eeg: DatasetEegConfig = DatasetEegConfig()
 
 
 def _as_mapping(value: Any, *, path: str) -> dict[str, Any]:
@@ -627,6 +640,7 @@ def load_dataset_config(
         "paths",
         "selection",
         "cardiac",
+        "eeg",
     }
     _reject_unknown_keys(root, allowed=top_keys, path="<root>")
     _require_keys(
@@ -704,6 +718,7 @@ def load_dataset_config(
         ),
     )
     cardiac = _load_dataset_cardiac(root.get("cardiac"), dataset_id=dataset_id)
+    eeg = _load_dataset_eeg(root.get("eeg"))
 
     return ConfirmatoryDatasetConfig(
         schema_version=schema_version,
@@ -717,6 +732,32 @@ def load_dataset_config(
         selection=selection,
         output_root=output_root,
         cardiac=cardiac,
+        eeg=eeg,
+    )
+
+
+def _load_dataset_eeg(raw: Any) -> DatasetEegConfig:
+    """Parse optional dataset ``eeg`` metadata block."""
+    if raw is None:
+        return DatasetEegConfig()
+    eeg_raw = _as_mapping(raw, path="eeg")
+    _reject_unknown_keys(
+        eeg_raw,
+        allowed={"sampling_rate_hz", "line_frequency_hz"},
+        path="eeg",
+    )
+
+    def _opt_positive(key: str) -> float | None:
+        if key not in eeg_raw or eeg_raw[key] is None:
+            return None
+        value = _as_number(eeg_raw[key], path=f"eeg.{key}")
+        if value <= 0:
+            raise ValueError(f"eeg.{key} must be positive.")
+        return value
+
+    return DatasetEegConfig(
+        sampling_rate_hz=_opt_positive("sampling_rate_hz"),
+        line_frequency_hz=_opt_positive("line_frequency_hz"),
     )
 
 

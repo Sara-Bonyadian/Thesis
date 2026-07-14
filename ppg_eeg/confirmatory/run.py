@@ -280,6 +280,7 @@ def run_c1a(ctx: StageContext) -> dict[str, object]:
                     "condition": obs.condition_label,
                     "observation_id": obs.observation_id,
                 },
+                line_frequency_hz=ctx.dataset.eeg.line_frequency_hz,
             )
             written.append(obs.observation_id)
         except Exception as exc:  # noqa: BLE001 — continue other observations

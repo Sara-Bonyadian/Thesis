@@ -74,6 +74,8 @@
   },
   "eeg": {
     "format": "brainvision",
+    "sampling_rate_hz": 500,
+    "line_frequency_hz": 60,
     "reference": "average",
     "bandpass_hz": [
       1.0,
