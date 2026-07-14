@@ -153,6 +153,9 @@ class TestInstantHRFiles(unittest.TestCase):
             self.assertEqual(len(qc), 1)
             self.assertEqual(qc[0]["status"], "ok")
             self.assertEqual(qc[0]["n_accepted_beats"], "4")
+            self.assertEqual(qc[0]["hr_sampling_rate_hz"], "1.0")
+            self.assertEqual(qc[0]["hr_interpolation_method"], "pchip")
+            self.assertIn("n_interpolated_samples", qc[0])
 
     def test_insufficient_beats_still_writes_header_and_qc(self) -> None:
         with TemporaryDirectory() as tmp:

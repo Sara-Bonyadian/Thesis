@@ -15,6 +15,9 @@ FEATURES_FILENAME = "features_instant_hr.csv"
 QC_FILENAME = "instant_hr_qc.csv"
 OUTPUT_FS_HZ = 1.0
 MAX_BEAT_GAP_S = 5.0
+# Documented reconstruction settings (algorithm unchanged).
+HR_SAMPLING_RATE_HZ = OUTPUT_FS_HZ
+HR_INTERPOLATION_METHOD = "pchip"
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,8 @@ class InstantHRQC:
     n_grid_samples: int
     n_valid_hr_samples: int
     n_interpolated_samples: int
+    hr_sampling_rate_hz: float
+    hr_interpolation_method: str
     n_gap_masked_samples: int
     n_long_gaps: int
     max_beat_gap_s: float | None
@@ -102,6 +107,8 @@ class InstantHRQC:
             "n_grid_samples": self.n_grid_samples,
             "n_valid_hr_samples": self.n_valid_hr_samples,
             "n_interpolated_samples": self.n_interpolated_samples,
+            "hr_sampling_rate_hz": self.hr_sampling_rate_hz,
+            "hr_interpolation_method": self.hr_interpolation_method,
             "n_gap_masked_samples": self.n_gap_masked_samples,
             "n_long_gaps": self.n_long_gaps,
             "max_beat_gap_s": self.max_beat_gap_s,
@@ -220,6 +227,8 @@ def _empty_qc(
         n_grid_samples=0,
         n_valid_hr_samples=0,
         n_interpolated_samples=0,
+        hr_sampling_rate_hz=HR_SAMPLING_RATE_HZ,
+        hr_interpolation_method=HR_INTERPOLATION_METHOD,
         n_gap_masked_samples=0,
         n_long_gaps=int(np.sum(gaps > max_beat_gap_s)),
         max_beat_gap_s=float(np.max(gaps)) if gaps.size else None,
@@ -398,6 +407,8 @@ def reconstruct_instant_hr(
         n_grid_samples=len(features),
         n_valid_hr_samples=int(np.sum(valid_mask)),
         n_interpolated_samples=int(np.sum(interpolated_mask)),
+        hr_sampling_rate_hz=HR_SAMPLING_RATE_HZ,
+        hr_interpolation_method=HR_INTERPOLATION_METHOD,
         n_gap_masked_samples=int(np.sum(gap_mask)),
         n_long_gaps=n_long_gaps,
         max_beat_gap_s=float(np.max(beat_gaps)),
