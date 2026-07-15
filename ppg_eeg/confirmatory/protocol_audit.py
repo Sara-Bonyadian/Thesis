@@ -160,8 +160,8 @@ PROTOCOL_SPECS: dict[str, ProtocolSpec] = {
         contrasts=(ContrastSpec("rest__verbalwm", "rest", "verbalwm"),),
         cardiac_modality="ECG;PPG",
         cardiac_source=(
-            "ECG and PPG embedded in BrainVision EEG; ECG confirmatory primary, "
-            "PPG modality sensitivity"
+            "ECG and PPG embedded in BrainVision EEG; select one primary "
+            "modality for instantaneous HR (ECG preferred when QC passes)"
         ),
         eye_state="unknown",
         posture="unknown",
@@ -206,7 +206,7 @@ PROTOCOL_SPECS: dict[str, ProtocolSpec] = {
         run_pairing_policy="normalize IG run-01 and pair within participant/session",
         unresolved_assumptions=(
             "Confirm posture and IG eye-state description.",
-            "Treat ECGBIT as primary; OXIBIT is modality sensitivity only.",
+            "Treat ECGBIT as primary cardiac source for HR; OXIBIT is inventory-only.",
         ),
     ),
     "ds004582": ProtocolSpec(
@@ -270,8 +270,8 @@ PROTOCOL_SPECS: dict[str, ProtocolSpec] = {
         ),
         cardiac_modality="PPG;ECG",
         cardiac_source=(
-            "embedded PPG primary sensitivity modality; embedded ECG sensor "
-            "sensitivity when channel QC passes"
+            "embedded PPG is primary cardiac source for instantaneous HR; "
+            "inventory co-recorded ECG in C0 when channel QC passes"
         ),
         eye_state="unknown",
         posture="unknown",
@@ -293,8 +293,8 @@ PROTOCOL_SPECS: dict[str, ProtocolSpec] = {
         ),
         cardiac_modality="PPG;ECG",
         cardiac_source=(
-            "embedded PPG primary sensitivity modality; inventory co-recorded "
-            "ECG for modality sensitivity"
+            "embedded PPG is primary cardiac source for instantaneous HR; "
+            "inventory co-recorded ECG in C0 when complete"
         ),
         eye_state="unknown",
         posture="unknown",

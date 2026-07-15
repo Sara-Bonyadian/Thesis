@@ -24,6 +24,8 @@ from ppg_eeg.confirmatory.inference import (
     MIXED_MODEL_RESULTS_FILENAME,
     MULTIPLICITY_RESULTS_FILENAME,
     PEAK_CENTER_EQUIVALENCE_FILENAME,
+    PRIMARY_META_CONTRASTS,
+    PRIMARY_STATE_CONTRASTS,
     bh_fdr,
     estimate_dataset_effects,
     fit_mixed_model,
@@ -487,6 +489,205 @@ class TestEndpointSeparation(unittest.TestCase):
                 for e in result.dataset_effect_rows
             )
         )
+
+
+class TestPrimaryMetaMembership(unittest.TestCase):
+    def test_prespecified_primary_meta_contrasts(self) -> None:
+        self.assertEqual(
+            PRIMARY_META_CONTRASTS,
+            frozenset(
+                {
+                    ("ds003838", "rest__memory"),
+                    ("ds006848", "rest__verbalwm"),
+                    ("ds003690", "passive__gonogo"),
+                    ("ds004587", "rest__ig"),
+                }
+            ),
+        )
+        self.assertIn("passive__simplert", PRIMARY_STATE_CONTRASTS)
+        self.assertIn("passive__gonogo", PRIMARY_STATE_CONTRASTS)
+        self.assertEqual(
+            META_EXCLUDED_DATASETS,
+            frozenset({"ds003816", "ds004582", "hiit", "mindfulness"}),
+        )
+
+    def test_only_prespecified_contrasts_enter_meta(self) -> None:
+        subjects = _synthetic_state_effect_subjects(effect=-0.30, noise=0.03, seed=11)
+        # Add ds003690 simplert (FDR/dataset-level only) plus sensitivity multi-contrasts.
+        extra_subjects = []
+        for row in subjects:
+            if row["dataset_id"] == "ds003690" and row["condition"] == "gonogo":
+                clone = dict(row)
+                clone["condition"] = "simplert"
+                clone["endpoint_index"] = float(row["endpoint_index"]) + 0.01
+                extra_subjects.append(clone)
+        subjects = subjects + extra_subjects
+        paired = _synthetic_paired_from_subjects(subjects)
+
+        for i in range(6):
+            pid = f"hs{i:02d}"
+            for band in ("theta", "alpha"):
+                paired.append(
+                    _paired_row(
+                        dataset_id="hiit",
+                        contrast_id="ph_pre_rest__tetris",
+                        participant_id=pid,
+                        band=band,
+                        delta=-0.25,
+                    )
+                )
+                paired.append(
+                    _paired_row(
+                        dataset_id="hiit",
+                        contrast_id="ps_post_rest__tetris",
+                        participant_id=pid,
+                        band=band,
+                        delta=-0.22,
+                    )
+                )
+                paired.append(
+                    _paired_row(
+                        dataset_id="mindfulness",
+                        contrast_id="step1__step2",
+                        participant_id=pid,
+                        band=band,
+                        delta=-0.18,
+                    )
+                )
+                paired.append(
+                    _paired_row(
+                        dataset_id="mindfulness",
+                        contrast_id="step1__step3",
+                        participant_id=pid,
+                        band=band,
+                        delta=-0.28,
+                    )
+                )
+                paired.append(
+                    _paired_row(
+                        dataset_id="ds004582",
+                        contrast_id="none",
+                        participant_id=pid,
+                        band=band,
+                        delta=-0.15,
+                    )
+                )
+
+        effects = estimate_dataset_effects(paired)
+        enters = [e for e in effects if e["enters_meta"]]
+        self.assertTrue(enters)
+
+        for row in enters:
+            self.assertIn(
+                (row["dataset_id"], row["contrast_id"]),
+                PRIMARY_META_CONTRASTS,
+            )
+            self.assertNotIn(row["dataset_id"], META_EXCLUDED_DATASETS)
+
+        # simplert is estimated for FDR / dataset tables but does not enter meta.
+        simplert = [
+            e
+            for e in effects
+            if e["dataset_id"] == "ds003690"
+            and e["contrast_id"] == "passive__simplert"
+            and e["band"] == "theta"
+            and e["is_primary_analysis"]
+        ]
+        self.assertTrue(simplert)
+        self.assertTrue(all(not e["enters_meta"] for e in simplert))
+
+        gonogo = [
+            e
+            for e in effects
+            if e["dataset_id"] == "ds003690"
+            and e["contrast_id"] == "passive__gonogo"
+            and e["band"] == "theta"
+            and e["is_primary_analysis"]
+        ]
+        self.assertTrue(gonogo)
+        self.assertTrue(all(e["enters_meta"] for e in gonogo))
+
+        self.assertTrue(
+            all(
+                not e["enters_meta"]
+                for e in effects
+                if e["dataset_id"] in {"hiit", "mindfulness", "ds004582", "ds003816"}
+            )
+        )
+
+    def test_each_dataset_contributes_at_most_one_study_effect(self) -> None:
+        subjects = _synthetic_state_effect_subjects(effect=-0.28, noise=0.03, seed=12)
+        extra = []
+        for row in subjects:
+            if row["dataset_id"] == "ds003690" and row["condition"] == "gonogo":
+                clone = dict(row)
+                clone["condition"] = "simplert"
+                clone["endpoint_index"] = float(row["endpoint_index"]) + 0.015
+                extra.append(clone)
+        subjects = subjects + extra
+        paired = _synthetic_paired_from_subjects(subjects)
+        effects = estimate_dataset_effects(paired)
+
+        # Group enters_meta by study cell; each dataset ≤1 row.
+        counts: dict[tuple[str, ...], dict[str, int]] = {}
+        for row in effects:
+            if not row["enters_meta"]:
+                continue
+            key = (
+                str(row["endpoint_name"]),
+                int(row["duration_s"]),
+                str(row["band"]),
+                str(row["power_representation"]),
+            )
+            counts.setdefault(key, {})
+            ds = str(row["dataset_id"])
+            counts[key][ds] = counts[key].get(ds, 0) + 1
+        self.assertTrue(counts)
+        for cell, by_ds in counts.items():
+            for dataset_id, n in by_ds.items():
+                self.assertEqual(
+                    n,
+                    1,
+                    msg=f"dataset {dataset_id} contributed {n} study effects in {cell}",
+                )
+
+        metas = run_meta_analysis(effects)
+        self.assertTrue(metas)
+        for meta in metas:
+            ids = [d for d in str(meta["dataset_ids"]).split(";") if d]
+            self.assertEqual(len(ids), len(set(ids)))
+            self.assertEqual(int(meta["n_datasets"]), len(ids))
+            self.assertLessEqual(len(ids), len(PRIMARY_META_CONTRASTS))
+
+        # Duplicate enters_meta for the same dataset must error (no IVW collapse).
+        dup = dict(next(e for e in effects if e["enters_meta"]))
+        with self.assertRaises(ValueError):
+            run_meta_analysis(list(effects) + [dup])
+
+    def test_simplert_remains_in_primary_fdr_family(self) -> None:
+        subjects = _synthetic_state_effect_subjects(effect=-0.35, noise=0.03, seed=13)
+        extra = []
+        for row in subjects:
+            if row["dataset_id"] == "ds003690" and row["condition"] == "gonogo":
+                clone = dict(row)
+                clone["condition"] = "simplert"
+                clone["endpoint_index"] = float(row["endpoint_index"]) + 0.02
+                extra.append(clone)
+        subjects = subjects + extra
+        paired = _synthetic_paired_from_subjects(subjects)
+        result = run_confirmatory_inference(
+            subjects,
+            paired,
+            fit_endpoints=(ENDPOINT_ZLPI,),
+        )
+        atten = [
+            r
+            for r in result.multiplicity_rows
+            if r["family_id"] == FAMILY_PRIMARY_STATE_ATTENUATION
+        ]
+        contrast_ids = {str(r["contrast_id"]) for r in atten}
+        self.assertIn("passive__simplert", contrast_ids)
+        self.assertIn("passive__gonogo", contrast_ids)
 
 
 class TestWriteOutputs(unittest.TestCase):

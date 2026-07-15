@@ -1,9 +1,18 @@
 """Confirmatory statistical inference (M10).
 
-Primary ZLPI mixed models, paired dataset effects, random-effects
-meta-analysis (with leave-one-dataset-out), peak-center TOST equivalence,
-and BH-FDR across prespecified families. ZLPI, MWPI, and SWPI stay separate;
-D120/D60/MWPI/SWPI never promote or rescue primary ZLPI decisions.
+Primary analyses include: (1) absolute pooled MixedLM of ZLPI ~ state×band
+(not a paired Δ model); (2) paired task−rest dataset effects and random-effects
+meta-analysis (one prespecified contrast per primary dataset; leave-one-dataset-
+out); (3) TOST equivalence of absolute low-demand peak centers μ to 0 (not
+paired Δ); (4) BH-FDR within prespecified families. ZLPI, MWPI, and SWPI stay
+separate; D120/D60/MWPI/SWPI never promote or rescue primary ZLPI decisions.
+
+Primary attenuation meta membership is gated by PRIMARY_META_CONTRASTS: one
+study effect per primary dataset (ds003838/rest__memory, ds006848/rest__verbalwm,
+ds003690/passive__gonogo, ds004587/rest__ig). Additional contrasts
+(e.g. passive__simplert) remain in dataset-level and FDR analyses but do not
+enter primary meta. Sensitivity datasets (hiit, mindfulness, ds004582,
+ds003816) are excluded from primary meta.
 """
 
 from __future__ import annotations
@@ -49,8 +58,11 @@ FDR_ALPHA = 0.05
 FDR_METHOD = "fdr_bh"
 BAND_ORDER = ("delta", "theta", "alpha", "beta")
 
-# Unpaired / single-state datasets excluded from task-attenuation meta-analysis.
-META_EXCLUDED_DATASETS = frozenset({"ds003816", "ds004582"})
+# Datasets excluded from primary attenuation meta (protocol / role reasons).
+# ds004582: unpaired single-state; ds003816: no confirmatory paired contrast /
+# short-window only; hiit / mindfulness: sensitivity role (nested or graded
+# contrasts; not primary confirmatory family).
+META_EXCLUDED_DATASETS = frozenset({"ds003816", "ds004582", "hiit", "mindfulness"})
 
 # Prespecified primary paired datasets and state-attenuation contrasts.
 PRIMARY_PAIRED_DATASETS = (
@@ -59,12 +71,24 @@ PRIMARY_PAIRED_DATASETS = (
     "ds003690",
     "ds004587",
 )
+# Primary FDR family still includes both ds003690 contrasts (tested separately).
 PRIMARY_STATE_CONTRASTS = (
     "rest__memory",
     "rest__verbalwm",
     "passive__simplert",
     "passive__gonogo",
     "rest__ig",
+)
+# Exactly one study effect per primary dataset for cross-dataset RE meta.
+# Chosen by protocol comparability to low-demand vs cognitive effort (a priori);
+# not by observed effect size. passive__simplert stays in FDR / dataset effects only.
+PRIMARY_META_CONTRASTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("ds003838", "rest__memory"),
+        ("ds006848", "rest__verbalwm"),
+        ("ds003690", "passive__gonogo"),
+        ("ds004587", "rest__ig"),
+    }
 )
 
 FAMILY_PRIMARY_LOW_DEMAND_ZLPI = "primary_low_demand_zlpi"
@@ -431,6 +455,27 @@ def _is_primary_analysis(
     )
 
 
+def _enters_primary_meta(
+    *,
+    dataset_id: str,
+    contrast_id: str,
+    is_primary_analysis: bool,
+    n_pairs: int,
+    effect_se: float,
+) -> bool:
+    """Gate primary attenuation meta: one prespecified contrast per primary dataset."""
+    ds = dataset_id.casefold()
+    contrast = contrast_id.casefold()
+    return (
+        bool(is_primary_analysis)
+        and ds not in META_EXCLUDED_DATASETS
+        and (ds, contrast) in PRIMARY_META_CONTRASTS
+        and int(n_pairs) >= 2
+        and math.isfinite(float(effect_se))
+        and float(effect_se) > 0.0
+    )
+
+
 def _prepare_subject_frame(
     subject_rows: Sequence[Mapping[str, object]],
     *,
@@ -509,8 +554,10 @@ def fit_mixed_model(
     duration_s: int = EXPECTED_PRIMARY_DURATION_S,
     power_representation: str = PRIMARY_POWER_REPRESENTATION,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    """Fit participant-level mixed model for one endpoint family.
+    """Fit absolute pooled state MixedLM for one endpoint family.
 
+    Estimand: absolute endpoint levels (e.g. ZLPI) as a function of state and
+    band in a pooled sample — not a paired task−rest within-subject contrast.
     Fixed effects: state, band, state×band, modality, mean_hr.
     Random: participant (+ dataset VC), with deterministic fallbacks.
     """
@@ -724,12 +771,12 @@ def estimate_dataset_effects(
             duration_s=duration_s,
             power_representation=representation,
         )
-        enters_meta = (
-            is_primary
-            and dataset_id not in META_EXCLUDED_DATASETS
-            and n >= 2
-            and math.isfinite(se)
-            and se > 0
+        enters_meta = _enters_primary_meta(
+            dataset_id=dataset_id,
+            contrast_id=contrast_id,
+            is_primary_analysis=is_primary,
+            n_pairs=n,
+            effect_se=se,
         )
         effects.append(
             {
@@ -759,12 +806,15 @@ def estimate_dataset_effects(
 def run_meta_analysis(
     dataset_effects: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """Random-effects meta-analysis per endpoint×band (primary ZLPI cells only for primary flag)."""
+    """Random-effects meta-analysis per endpoint×band.
+
+    Requires ``enters_meta`` rows already gated to one prespecified contrast per
+    dataset (see ``PRIMARY_META_CONTRASTS``). Does not inverse-variance-collapse
+    multiple within-dataset contrasts.
+    """
     buckets: dict[tuple[str, ...], list[Mapping[str, object]]] = {}
     for row in dataset_effects:
         if not _as_bool(row.get("enters_meta")):
-            # Still allow explicitly separated sensitivity metas when requested via
-            # non-primary rows that were marked enters_meta; default path uses primary.
             continue
         key = (
             _as_str(row.get("endpoint_name")).casefold(),
@@ -777,36 +827,21 @@ def run_meta_analysis(
     metas: list[dict[str, object]] = []
     for key in sorted(buckets):
         rows = buckets[key]
-        # Collapse multiple contrasts within a dataset (e.g. ds003690) by inverse-variance
-        # weighted mean so each dataset contributes once to the meta-analysis.
-        by_dataset: dict[str, list[Mapping[str, object]]] = {}
+        by_dataset: dict[str, Mapping[str, object]] = {}
         for row in rows:
-            by_dataset.setdefault(_as_str(row.get("dataset_id")).casefold(), []).append(
-                row
-            )
+            dataset_id = _as_str(row.get("dataset_id")).casefold()
+            if dataset_id in by_dataset:
+                raise ValueError(
+                    "Primary meta expects at most one enters_meta study effect "
+                    f"per dataset; got multiple for {dataset_id!r} in cell {key!r}."
+                )
+            by_dataset[dataset_id] = row
         effects: list[float] = []
         variances: list[float] = []
         labels: list[str] = []
-        for dataset_id, dset_rows in sorted(by_dataset.items()):
-            if len(dset_rows) == 1:
-                effects.append(_as_float(dset_rows[0].get("effect_mean")))
-                variances.append(_as_float(dset_rows[0].get("effect_var")))
-            else:
-                ws = []
-                es = []
-                for r in dset_rows:
-                    v = _as_float(r.get("effect_var"))
-                    if math.isfinite(v) and v > 0:
-                        ws.append(1.0 / v)
-                        es.append(_as_float(r.get("effect_mean")))
-                if not ws:
-                    continue
-                w = np.asarray(ws, dtype=float)
-                e = np.asarray(es, dtype=float)
-                mean = float(np.sum(w * e) / np.sum(w))
-                var = float(1.0 / np.sum(w))
-                effects.append(mean)
-                variances.append(var)
+        for dataset_id, dset_row in sorted(by_dataset.items()):
+            effects.append(_as_float(dset_row.get("effect_mean")))
+            variances.append(_as_float(dset_row.get("effect_var")))
             labels.append(dataset_id)
         endpoint_name, duration_s_s, band, representation = key
         duration_s = int(duration_s_s)
@@ -873,11 +908,15 @@ def leave_one_dataset_out(
     loo_rows: list[dict[str, object]] = []
     for key in sorted(buckets):
         rows = buckets[key]
-        by_dataset: dict[str, list[Mapping[str, object]]] = {}
+        by_dataset: dict[str, Mapping[str, object]] = {}
         for row in rows:
-            by_dataset.setdefault(_as_str(row.get("dataset_id")).casefold(), []).append(
-                row
-            )
+            dataset_id = _as_str(row.get("dataset_id")).casefold()
+            if dataset_id in by_dataset:
+                raise ValueError(
+                    "Primary meta expects at most one enters_meta study effect "
+                    f"per dataset; got multiple for {dataset_id!r} in cell {key!r}."
+                )
+            by_dataset[dataset_id] = row
         dataset_ids = sorted(by_dataset)
         endpoint_name, duration_s_s, band, representation = key
         if len(dataset_ids) < 3:
@@ -912,23 +951,6 @@ def leave_one_dataset_out(
         duration_s = int(duration_s_s)
         full_effect = full_by_key.get(key, float("nan"))
 
-        def _dataset_effect(dset_rows: Sequence[Mapping[str, object]]) -> tuple[float, float]:
-            if len(dset_rows) == 1:
-                return (
-                    _as_float(dset_rows[0].get("effect_mean")),
-                    _as_float(dset_rows[0].get("effect_var")),
-                )
-            ws = []
-            es = []
-            for r in dset_rows:
-                v = _as_float(r.get("effect_var"))
-                if math.isfinite(v) and v > 0:
-                    ws.append(1.0 / v)
-                    es.append(_as_float(r.get("effect_mean")))
-            w = np.asarray(ws, dtype=float)
-            e = np.asarray(es, dtype=float)
-            return float(np.sum(w * e) / np.sum(w)), float(1.0 / np.sum(w))
-
         for omitted in dataset_ids:
             effects = []
             variances = []
@@ -936,9 +958,9 @@ def leave_one_dataset_out(
             for dataset_id in dataset_ids:
                 if dataset_id == omitted:
                     continue
-                eff, var = _dataset_effect(by_dataset[dataset_id])
-                effects.append(eff)
-                variances.append(var)
+                dset_row = by_dataset[dataset_id]
+                effects.append(_as_float(dset_row.get("effect_mean")))
+                variances.append(_as_float(dset_row.get("effect_var")))
                 labels.append(dataset_id)
             meta = random_effects_meta(effects, variances, labels=labels)
             pooled = _as_float(meta["pooled_effect"])
@@ -979,7 +1001,11 @@ def tost_peak_center_equivalence(
     *,
     bound: float = EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
 ) -> list[dict[str, object]]:
-    """TOST equivalence of low-demand peak centers to 0 within ±bound seconds."""
+    """TOST equivalence of absolute low-demand peak centers μ to 0 within ±bound.
+
+    Estimand: whether identifiable low-demand peak centers concentrate near lag 0.
+    This is not a paired task−rest analysis; effort-only rows are unused.
+    """
     buckets: dict[tuple[str, ...], list[float]] = {}
     for raw in subject_rows:
         role = _as_str(raw.get("state") or raw.get("condition_role"))
@@ -1504,6 +1530,9 @@ __all__ = [
     "META_ANALYSIS_RESULTS_FILENAME",
     "META_EXCLUDED_DATASETS",
     "MIXED_MODEL_RESULTS_FILENAME",
+    "PRIMARY_META_CONTRASTS",
+    "PRIMARY_PAIRED_DATASETS",
+    "PRIMARY_STATE_CONTRASTS",
     "MULTIPLICITY_RESULTS_FILENAME",
     "PEAK_CENTER_EQUIVALENCE_FILENAME",
     "InferenceResult",

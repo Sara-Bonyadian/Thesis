@@ -4,6 +4,20 @@ Prespecified controls around the immutable primary analysis
 (D240 absolute-power ZLPI). Sensitivity results never replace or rescue
 primary findings. ZLPI, MWPI, and SWPI stay separate. Missing control
 signals are recorded as unavailable — never imputed as zero.
+
+Default confirmatory robustness (Methods):
+  - C4 temporal surrogate nulls (separate module ``nulls.py``)
+  - This module's **core** path: broadband residualization + duration
+    (D180/D120/D60)
+
+Optional dataset-conditional artifact controls
+(``enable_optional_artifact_controls`` / CLI ``--optional-artifact-controls``;
+off by default): cardiac-field (CFA/QRS), motion/EOG/EMG/respiration,
+mean HR, beat count/density, eye state — run only when requested and when
+required signals are available.
+
+Each dataset uses a single primary cardiac modality (ECG or PPG) from
+protocol/config selection for instantaneous HR derivation.
 """
 
 from __future__ import annotations
@@ -28,7 +42,6 @@ from .nulls import compute_endpoint_index_from_series
 
 SENSITIVITY_RESULTS_FILENAME = "sensitivity_results.csv"
 ARTIFACT_CONTROL_RESULTS_FILENAME = "artifact_control_results.csv"
-MODALITY_COMPARISON_FILENAME = "modality_comparison.csv"
 DURATION_SENSITIVITY_FILENAME = "duration_sensitivity.csv"
 SPECIFICATION_MATRIX_FILENAME = "specification_matrix.csv"
 SENSITIVITY_QC_FILENAME = "sensitivity_qc.csv"
@@ -46,26 +59,30 @@ CONTROL_MEAN_HR = "covariate_mean_hr"
 CONTROL_BEAT_COUNT = "covariate_beat_count"
 CONTROL_BEAT_DENSITY = "covariate_beat_density"
 CONTROL_EYE_STATE = "stratify_eye_state"
-CONTROL_ECG_VS_PPG = "modality_ecg_vs_ppg"
 CONTROL_D180 = "duration_d180_zlpi"
 CONTROL_D120 = "duration_d120_mwpi"
 CONTROL_D60 = "duration_d60_swpi"
 
-SENSITIVITY_CONTROL_IDS: tuple[str, ...] = (
+CORE_SENSITIVITY_CONTROL_IDS: tuple[str, ...] = (
+    CONTROL_BROADBAND,
+    CONTROL_D180,
+    CONTROL_D120,
+    CONTROL_D60,
+)
+OPTIONAL_ARTIFACT_CONTROL_IDS: tuple[str, ...] = (
     CONTROL_CARDIAC_FIELD,
     CONTROL_MOTION,
     CONTROL_EOG,
     CONTROL_EMG,
     CONTROL_RESPIRATION,
-    CONTROL_BROADBAND,
     CONTROL_MEAN_HR,
     CONTROL_BEAT_COUNT,
     CONTROL_BEAT_DENSITY,
     CONTROL_EYE_STATE,
-    CONTROL_ECG_VS_PPG,
-    CONTROL_D180,
-    CONTROL_D120,
-    CONTROL_D60,
+)
+
+SENSITIVITY_CONTROL_IDS: tuple[str, ...] = (
+    CORE_SENSITIVITY_CONTROL_IDS + OPTIONAL_ARTIFACT_CONTROL_IDS
 )
 
 ALL_CONTROL_IDS: tuple[str, ...] = (PRIMARY_CONTROL_ID,) + SENSITIVITY_CONTROL_IDS
@@ -116,25 +133,6 @@ ARTIFACT_FIELDS = (
     "delta_vs_primary",
     "artifact_injected",
     "control_applied",
-    "table_status",
-    "status",
-    "notes",
-)
-
-MODALITY_FIELDS = (
-    "dataset_id",
-    "participant_id",
-    "session_id",
-    "condition",
-    "observation_id",
-    "duration_s",
-    "endpoint_name",
-    "band",
-    "power_representation",
-    "ecg_endpoint_index",
-    "ppg_endpoint_index",
-    "delta_ecg_minus_ppg",
-    "matched",
     "table_status",
     "status",
     "notes",
@@ -192,7 +190,6 @@ QC_FIELDS = (
 class ArtifactControlResult:
     sensitivity_rows: tuple[dict[str, object], ...]
     artifact_rows: tuple[dict[str, object], ...]
-    modality_rows: tuple[dict[str, object], ...]
     duration_rows: tuple[dict[str, object], ...]
     specification_rows: tuple[dict[str, object], ...]
     qc_rows: tuple[dict[str, object], ...]
@@ -406,18 +403,10 @@ def control_availability(
         CONTROL_BEAT_COUNT: ("beat_count", "n_beats"),
         CONTROL_BEAT_DENSITY: ("beat_density", "beat_count", "n_beats"),
         CONTROL_EYE_STATE: ("eye_state",),
-        CONTROL_ECG_VS_PPG: ("ecg_available", "ppg_available"),
     }
     keys = key_map.get(control_id, ())
     if not keys:
         return False, f"Unknown control_id={control_id!r}."
-
-    if control_id == CONTROL_ECG_VS_PPG:
-        ecg = _as_bool(inventory.get("ecg_available"))
-        ppg = _as_bool(inventory.get("ppg_available"))
-        if ecg is True and ppg is True:
-            return True, "Both ECG and PPG available for matched comparison."
-        return False, "Matched ECG/PPG requires both modalities."
 
     if control_id == CONTROL_CARDIAC_FIELD:
         beats = inventory.get("beat_times_s")
@@ -898,109 +887,22 @@ def covariate_adjusted_effect(
     return adjusted.tolist(), f"Adjusted for {covariate}; n_missing_covariate={missing}."
 
 
-def compare_matched_modalities(
-    subject_rows: Sequence[Mapping[str, object]],
-) -> list[dict[str, object]]:
-    """ECG vs PPG endpoint comparison only for matched observation keys."""
-    by_key: dict[tuple[str, ...], dict[str, Mapping[str, object]]] = {}
-    for row in subject_rows:
-        modality = _as_str(row.get("modality") or row.get("sensor_modality")).casefold()
-        if modality not in {"ecg", "ppg"}:
-            continue
-        if not is_primary_cell(
-            endpoint_name=_as_str(row.get("endpoint_name"), ENDPOINT_ZLPI),
-            duration_s=_as_int(row.get("duration_s"), EXPECTED_PRIMARY_DURATION_S),
-            power_representation=_as_str(
-                row.get("power_representation"), PRIMARY_POWER_REPRESENTATION
-            ),
-        ):
-            # Allow matched modality at primary grain only for this table.
-            continue
-        key = (
-            _as_str(row.get("dataset_id")).casefold(),
-            _as_str(row.get("participant_id") or row.get("subject_id")).casefold(),
-            _as_str(row.get("session_id"), "single").casefold(),
-            _as_str(row.get("condition")).casefold(),
-            str(_as_int(row.get("duration_s"))),
-            _as_str(row.get("endpoint_name")).casefold(),
-            _as_str(row.get("band")).casefold(),
-            _as_str(row.get("power_representation")).casefold(),
-        )
-        by_key.setdefault(key, {})[modality] = row
-
-    rows: list[dict[str, object]] = []
-    for key, mods in sorted(by_key.items()):
-        dataset_id, participant_id, session_id, condition, duration_s, endpoint_name, band, representation = key
-        has_ecg = "ecg" in mods
-        has_ppg = "ppg" in mods
-        if has_ecg and has_ppg:
-            ecg_val = _as_float(mods["ecg"].get("endpoint_index"))
-            ppg_val = _as_float(mods["ppg"].get("endpoint_index"))
-            rows.append(
-                {
-                    "dataset_id": dataset_id,
-                    "participant_id": participant_id,
-                    "session_id": session_id,
-                    "condition": condition,
-                    "observation_id": _as_str(
-                        mods["ecg"].get("observation_ids")
-                        or mods["ecg"].get("observation_id")
-                    ),
-                    "duration_s": int(duration_s),
-                    "endpoint_name": endpoint_name,
-                    "band": band,
-                    "power_representation": representation,
-                    "ecg_endpoint_index": ecg_val,
-                    "ppg_endpoint_index": ppg_val,
-                    "delta_ecg_minus_ppg": (
-                        float(ecg_val - ppg_val)
-                        if math.isfinite(ecg_val) and math.isfinite(ppg_val)
-                        else float("nan")
-                    ),
-                    "matched": True,
-                    "status": STATUS_OK,
-                    "notes": "Matched ECG/PPG observation pair.",
-                }
-            )
-        else:
-            present = "ecg" if has_ecg else "ppg"
-            rows.append(
-                {
-                    "dataset_id": dataset_id,
-                    "participant_id": participant_id,
-                    "session_id": session_id,
-                    "condition": condition,
-                    "observation_id": _as_str(
-                        mods[present].get("observation_ids")
-                        or mods[present].get("observation_id")
-                    ),
-                    "duration_s": int(duration_s),
-                    "endpoint_name": endpoint_name,
-                    "band": band,
-                    "power_representation": representation,
-                    "ecg_endpoint_index": (
-                        _as_float(mods["ecg"].get("endpoint_index")) if has_ecg else float("nan")
-                    ),
-                    "ppg_endpoint_index": (
-                        _as_float(mods["ppg"].get("endpoint_index")) if has_ppg else float("nan")
-                    ),
-                    "delta_ecg_minus_ppg": float("nan"),
-                    "matched": False,
-                    "status": STATUS_UNAVAILABLE,
-                    "notes": "Unmatched modality; excluded from ECG−PPG comparison.",
-                }
-            )
-    return rows
-
-
 def run_artifact_controls(
     subject_rows: Sequence[Mapping[str, object]],
     paired_rows: Sequence[Mapping[str, object]],
     *,
     control_inventory: Mapping[str, Mapping[str, object]] | None = None,
     series_controls: Sequence[Mapping[str, object]] | None = None,
+    enable_optional_artifact_controls: bool = False,
 ) -> ArtifactControlResult:
-    """Run the full M11 sensitivity / artifact-control battery.
+    """Run core (and optionally extended) M11 sensitivity / artifact controls.
+
+    Always runs: primary reference, broadband residualization, duration
+    sensitivities, and the primary-protection guardrail.
+
+    When ``enable_optional_artifact_controls`` is False (default), CFA/QRS,
+    nuisance residualization, respiration, and inventory-gated covariates are
+    omitted entirely (no ``control_unavailable`` noise in sensitivity/QC).
 
     Parameters
     ----------
@@ -1008,9 +910,13 @@ def run_artifact_controls(
         M8 tables (possibly already multi-duration / multi-representation).
     control_inventory
         Optional mapping observation_id → availability flags / beat times.
+        Used only when optional artifact controls are enabled.
     series_controls
         Optional per-observation series payloads for cardiac-field tests:
         ``hr_z``, ``eeg_z``, ``times_s``, ``beat_times_s``, metadata.
+        Used only when optional artifact controls are enabled.
+    enable_optional_artifact_controls
+        If True, run CFA + nuisance/respiration + covariate sections.
     """
     inventory = {
         _as_str(key): dict(value)
@@ -1019,6 +925,11 @@ def run_artifact_controls(
     sensitivity_rows: list[dict[str, object]] = []
     artifact_rows: list[dict[str, object]] = []
     qc_rows: list[dict[str, object]] = []
+    active_control_ids: tuple[str, ...] = (
+        PRIMARY_CONTROL_ID,
+    ) + CORE_SENSITIVITY_CONTROL_IDS
+    if enable_optional_artifact_controls:
+        active_control_ids = active_control_ids + OPTIONAL_ARTIFACT_CONTROL_IDS
 
     # ---- Primary reference (immutable) ----
     primary_paired = _filter_paired_rows(
@@ -1175,161 +1086,36 @@ def run_artifact_controls(
                 }
             )
 
-    # ---- Inventory-gated nuisance / covariate controls ----
-    def _any_available(control_id: str) -> tuple[bool, str]:
-        if not inventory:
-            return control_availability(None, control_id)
-        notes = []
-        for obs_id, payload in inventory.items():
-            ok, note = control_availability(payload, control_id)
-            if ok:
-                return True, note
-            notes.append(f"{obs_id}:{note}")
-        return False, notes[0] if notes else "Unavailable."
+    if enable_optional_artifact_controls:
+        # ---- Inventory-gated nuisance / covariate controls ----
+        def _any_available(control_id: str) -> tuple[bool, str]:
+            if not inventory:
+                return control_availability(None, control_id)
+            notes = []
+            for obs_id, payload in inventory.items():
+                ok, note = control_availability(payload, control_id)
+                if ok:
+                    return True, note
+                notes.append(f"{obs_id}:{note}")
+            return False, notes[0] if notes else "Unavailable."
 
-    for control_id, analysis_role, covariate in (
-        (CONTROL_MOTION, "nuisance_residualization", None),
-        (CONTROL_EOG, "nuisance_residualization", None),
-        (CONTROL_EMG, "nuisance_residualization", None),
-        (CONTROL_RESPIRATION, "nuisance_residualization", None),
-        (CONTROL_MEAN_HR, "covariate_adjustment", "mean_hr"),
-        (CONTROL_BEAT_COUNT, "covariate_adjustment", "beat_count"),
-        (CONTROL_BEAT_DENSITY, "covariate_adjustment", "beat_density"),
-        (CONTROL_EYE_STATE, "stratification", None),
-    ):
-        available, avail_note = _any_available(control_id)
-        if not available:
-            sensitivity_rows.append(
-                _unavailable_row(
-                    control_id=control_id,
-                    analysis_role=analysis_role,
-                    notes=avail_note,
-                )
-            )
-            qc_rows.append(
-                {
-                    "control_id": control_id,
-                    "component": analysis_role,
-                    "status": STATUS_UNAVAILABLE,
-                    "n_available": 0,
-                    "n_unavailable": 1,
-                    "n_effects": 0,
-                    "notes": avail_note,
-                }
-            )
-            continue
-
-        if covariate is not None:
-            # Prefer explicit subject column; for beat_density, derive when possible.
-            subject_for_cov = list(subject_rows)
-            if covariate == "beat_density":
-                enriched = []
-                for row in subject_rows:
-                    item = dict(row)
-                    if not math.isfinite(_as_float(item.get("beat_density"))):
-                        density = beat_density(
-                            _as_float(item.get("beat_count") or item.get("n_beats")),
-                            _as_float(
-                                item.get("usable_span_s")
-                                or item.get("duration_s")
-                                or EXPECTED_PRIMARY_DURATION_S
-                            ),
-                        )
-                        item["beat_density"] = density
-                    enriched.append(item)
-                subject_for_cov = enriched
-            if covariate == "mean_hr":
-                enriched = []
-                for row in subject_rows:
-                    item = dict(row)
-                    if not math.isfinite(_as_float(item.get("mean_hr"))):
-                        item["mean_hr"] = _as_float(item.get("mean_hr_bpm"))
-                    enriched.append(item)
-                subject_for_cov = enriched
-
-            adjusted, note = covariate_adjusted_effect(
-                primary_paired, subject_for_cov, covariate=covariate
-            )
-            if not adjusted:
+        for control_id, analysis_role, covariate in (
+            (CONTROL_MOTION, "nuisance_residualization", None),
+            (CONTROL_EOG, "nuisance_residualization", None),
+            (CONTROL_EMG, "nuisance_residualization", None),
+            (CONTROL_RESPIRATION, "nuisance_residualization", None),
+            (CONTROL_MEAN_HR, "covariate_adjustment", "mean_hr"),
+            (CONTROL_BEAT_COUNT, "covariate_adjustment", "beat_count"),
+            (CONTROL_BEAT_DENSITY, "covariate_adjustment", "beat_density"),
+            (CONTROL_EYE_STATE, "stratification", None),
+        ):
+            available, avail_note = _any_available(control_id)
+            if not available:
                 sensitivity_rows.append(
                     _unavailable_row(
                         control_id=control_id,
                         analysis_role=analysis_role,
-                        notes=note,
-                    )
-                )
-                status = STATUS_UNAVAILABLE
-                n_effects = 0
-            else:
-                summary = summarize_effect(adjusted)
-                sensitivity_rows.append(
-                    {
-                        "control_id": control_id,
-                        "analysis_role": analysis_role,
-                        "is_primary_analysis": False,
-                        "can_rescue_primary": False,
-                        "endpoint_name": ENDPOINT_ZLPI,
-                        "duration_s": EXPECTED_PRIMARY_DURATION_S,
-                        "power_representation": PRIMARY_POWER_REPRESENTATION,
-                        "band": "pooled",
-                        "dataset_id": "pooled",
-                        "contrast_id": "pooled",
-                        "effect_estimate": summary["effect_estimate"],
-                        "ci_low": summary["ci_low"],
-                        "ci_high": summary["ci_high"],
-                        "n": summary["n"],
-                        "p_value": summary["p_value"],
-                        "status": STATUS_SENSITIVITY_ONLY,
-                        "notes": note,
-                    }
-                )
-                status = STATUS_OK
-                n_effects = 1
-            qc_rows.append(
-                {
-                    "control_id": control_id,
-                    "component": analysis_role,
-                    "status": status,
-                    "n_available": 1 if status == STATUS_OK else 0,
-                    "n_unavailable": 0 if status == STATUS_OK else 1,
-                    "n_effects": n_effects,
-                    "notes": note if covariate else avail_note,
-                }
-            )
-            continue
-
-        if control_id == CONTROL_EYE_STATE:
-            # Stratify primary paired rows by eye_state on subject rows.
-            eye_lookup = {}
-            for row in subject_rows:
-                eye = _as_str(row.get("eye_state")).casefold()
-                if eye in {"", "unknown"}:
-                    continue
-                key = (
-                    _as_str(row.get("dataset_id")).casefold(),
-                    _as_str(row.get("participant_id")).casefold(),
-                    _as_str(row.get("session_id"), "single").casefold(),
-                )
-                eye_lookup[key] = eye
-            by_eye: dict[str, list[float]] = {}
-            for row in primary_paired:
-                key = (
-                    _as_str(row.get("dataset_id")).casefold(),
-                    _as_str(row.get("participant_id")).casefold(),
-                    _as_str(row.get("session_id"), "single").casefold(),
-                )
-                eye = eye_lookup.get(key)
-                if eye is None:
-                    continue
-                delta = _as_float(row.get("delta_endpoint_index"))
-                if math.isfinite(delta):
-                    by_eye.setdefault(eye, []).append(delta)
-            if not by_eye:
-                sensitivity_rows.append(
-                    _unavailable_row(
-                        control_id=control_id,
-                        analysis_role=analysis_role,
-                        notes="Eye state present in inventory but not joinable to pairs.",
+                        notes=avail_note,
                     )
                 )
                 qc_rows.append(
@@ -1340,12 +1126,54 @@ def run_artifact_controls(
                         "n_available": 0,
                         "n_unavailable": 1,
                         "n_effects": 0,
-                        "notes": "Eye-state stratification unmatched.",
+                        "notes": avail_note,
                     }
                 )
-            else:
-                for eye, values in sorted(by_eye.items()):
-                    summary = summarize_effect(values)
+                continue
+
+            if covariate is not None:
+                # Prefer explicit subject column; for beat_density, derive when possible.
+                subject_for_cov = list(subject_rows)
+                if covariate == "beat_density":
+                    enriched = []
+                    for row in subject_rows:
+                        item = dict(row)
+                        if not math.isfinite(_as_float(item.get("beat_density"))):
+                            density = beat_density(
+                                _as_float(item.get("beat_count") or item.get("n_beats")),
+                                _as_float(
+                                    item.get("usable_span_s")
+                                    or item.get("duration_s")
+                                    or EXPECTED_PRIMARY_DURATION_S
+                                ),
+                            )
+                            item["beat_density"] = density
+                        enriched.append(item)
+                    subject_for_cov = enriched
+                if covariate == "mean_hr":
+                    enriched = []
+                    for row in subject_rows:
+                        item = dict(row)
+                        if not math.isfinite(_as_float(item.get("mean_hr"))):
+                            item["mean_hr"] = _as_float(item.get("mean_hr_bpm"))
+                        enriched.append(item)
+                    subject_for_cov = enriched
+
+                adjusted, note = covariate_adjusted_effect(
+                    primary_paired, subject_for_cov, covariate=covariate
+                )
+                if not adjusted:
+                    sensitivity_rows.append(
+                        _unavailable_row(
+                            control_id=control_id,
+                            analysis_role=analysis_role,
+                            notes=note,
+                        )
+                    )
+                    status = STATUS_UNAVAILABLE
+                    n_effects = 0
+                else:
+                    summary = summarize_effect(adjusted)
                     sensitivity_rows.append(
                         {
                             "control_id": control_id,
@@ -1357,316 +1185,345 @@ def run_artifact_controls(
                             "power_representation": PRIMARY_POWER_REPRESENTATION,
                             "band": "pooled",
                             "dataset_id": "pooled",
-                            "contrast_id": f"eye_state::{eye}",
+                            "contrast_id": "pooled",
                             "effect_estimate": summary["effect_estimate"],
                             "ci_low": summary["ci_low"],
                             "ci_high": summary["ci_high"],
                             "n": summary["n"],
                             "p_value": summary["p_value"],
                             "status": STATUS_SENSITIVITY_ONLY,
-                            "notes": f"Stratified by eye_state={eye}.",
+                            "notes": note,
                         }
                     )
+                    status = STATUS_OK
+                    n_effects = 1
                 qc_rows.append(
                     {
                         "control_id": control_id,
                         "component": analysis_role,
-                        "status": STATUS_OK,
-                        "n_available": len(by_eye),
-                        "n_unavailable": 0,
-                        "n_effects": len(by_eye),
-                        "notes": avail_note,
+                        "status": status,
+                        "n_available": 1 if status == STATUS_OK else 0,
+                        "n_unavailable": 0 if status == STATUS_OK else 1,
+                        "n_effects": n_effects,
+                        "notes": note if covariate else avail_note,
                     }
                 )
-            continue
+                continue
 
-        if control_id in {
-            CONTROL_MOTION,
-            CONTROL_EOG,
-            CONTROL_EMG,
-            CONTROL_RESPIRATION,
-        }:
-            # Presence of rows tagged with residualized_against_<nuisance> or
-            # endpoint_index_nuisance_<name>. Otherwise mark available-but-no-effects
-            # unless synthetic series-level residualization rows were supplied via
-            # subject column endpoint_index after residualization naming.
-            tag = control_id.replace("nuisance_", "")
-            tagged = [
-                r
-                for r in paired_rows
-                if _as_str(r.get("nuisance_control")).casefold() == tag
-                or _as_str(r.get("control_id")).casefold() == control_id
-            ]
-            if tagged:
-                sensitivity_rows.extend(
-                    _effects_by_band_dataset(
-                        tagged,
-                        control_id=control_id,
-                        analysis_role=analysis_role,
-                        is_primary=False,
-                        endpoint_name=ENDPOINT_ZLPI,
-                        duration_s=EXPECTED_PRIMARY_DURATION_S,
-                        power_representation=PRIMARY_POWER_REPRESENTATION,
-                        status=STATUS_SENSITIVITY_ONLY,
-                        notes=f"Nuisance residualization on {tag}.",
+            if control_id == CONTROL_EYE_STATE:
+                # Stratify primary paired rows by eye_state on subject rows.
+                eye_lookup = {}
+                for row in subject_rows:
+                    eye = _as_str(row.get("eye_state")).casefold()
+                    if eye in {"", "unknown"}:
+                        continue
+                    key = (
+                        _as_str(row.get("dataset_id")).casefold(),
+                        _as_str(row.get("participant_id")).casefold(),
+                        _as_str(row.get("session_id"), "single").casefold(),
                     )
+                    eye_lookup[key] = eye
+                by_eye: dict[str, list[float]] = {}
+                for row in primary_paired:
+                    key = (
+                        _as_str(row.get("dataset_id")).casefold(),
+                        _as_str(row.get("participant_id")).casefold(),
+                        _as_str(row.get("session_id"), "single").casefold(),
+                    )
+                    eye = eye_lookup.get(key)
+                    if eye is None:
+                        continue
+                    delta = _as_float(row.get("delta_endpoint_index"))
+                    if math.isfinite(delta):
+                        by_eye.setdefault(eye, []).append(delta)
+                if not by_eye:
+                    sensitivity_rows.append(
+                        _unavailable_row(
+                            control_id=control_id,
+                            analysis_role=analysis_role,
+                            notes="Eye state present in inventory but not joinable to pairs.",
+                        )
+                    )
+                    qc_rows.append(
+                        {
+                            "control_id": control_id,
+                            "component": analysis_role,
+                            "status": STATUS_UNAVAILABLE,
+                            "n_available": 0,
+                            "n_unavailable": 1,
+                            "n_effects": 0,
+                            "notes": "Eye-state stratification unmatched.",
+                        }
+                    )
+                else:
+                    for eye, values in sorted(by_eye.items()):
+                        summary = summarize_effect(values)
+                        sensitivity_rows.append(
+                            {
+                                "control_id": control_id,
+                                "analysis_role": analysis_role,
+                                "is_primary_analysis": False,
+                                "can_rescue_primary": False,
+                                "endpoint_name": ENDPOINT_ZLPI,
+                                "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                                "power_representation": PRIMARY_POWER_REPRESENTATION,
+                                "band": "pooled",
+                                "dataset_id": "pooled",
+                                "contrast_id": f"eye_state::{eye}",
+                                "effect_estimate": summary["effect_estimate"],
+                                "ci_low": summary["ci_low"],
+                                "ci_high": summary["ci_high"],
+                                "n": summary["n"],
+                                "p_value": summary["p_value"],
+                                "status": STATUS_SENSITIVITY_ONLY,
+                                "notes": f"Stratified by eye_state={eye}.",
+                            }
+                        )
+                    qc_rows.append(
+                        {
+                            "control_id": control_id,
+                            "component": analysis_role,
+                            "status": STATUS_OK,
+                            "n_available": len(by_eye),
+                            "n_unavailable": 0,
+                            "n_effects": len(by_eye),
+                            "notes": avail_note,
+                        }
+                    )
+                continue
+
+            if control_id in {
+                CONTROL_MOTION,
+                CONTROL_EOG,
+                CONTROL_EMG,
+                CONTROL_RESPIRATION,
+            }:
+                # Presence of rows tagged with residualized_against_<nuisance> or
+                # endpoint_index_nuisance_<name>. Otherwise mark available-but-no-effects
+                # unless synthetic series-level residualization rows were supplied via
+                # subject column endpoint_index after residualization naming.
+                tag = control_id.replace("nuisance_", "")
+                tagged = [
+                    r
+                    for r in paired_rows
+                    if _as_str(r.get("nuisance_control")).casefold() == tag
+                    or _as_str(r.get("control_id")).casefold() == control_id
+                ]
+                if tagged:
+                    sensitivity_rows.extend(
+                        _effects_by_band_dataset(
+                            tagged,
+                            control_id=control_id,
+                            analysis_role=analysis_role,
+                            is_primary=False,
+                            endpoint_name=ENDPOINT_ZLPI,
+                            duration_s=EXPECTED_PRIMARY_DURATION_S,
+                            power_representation=PRIMARY_POWER_REPRESENTATION,
+                            status=STATUS_SENSITIVITY_ONLY,
+                            notes=f"Nuisance residualization on {tag}.",
+                        )
+                    )
+                    qc_rows.append(
+                        {
+                            "control_id": control_id,
+                            "component": analysis_role,
+                            "status": STATUS_OK,
+                            "n_available": len(tagged),
+                            "n_unavailable": 0,
+                            "n_effects": sum(
+                                1 for r in sensitivity_rows if r["control_id"] == control_id
+                            ),
+                            "notes": avail_note,
+                        }
+                    )
+                else:
+                    # Signals are available in inventory but effect table not supplied —
+                    # record availability without fabricating effects.
+                    sensitivity_rows.append(
+                        {
+                            "control_id": control_id,
+                            "analysis_role": analysis_role,
+                            "is_primary_analysis": False,
+                            "can_rescue_primary": False,
+                            "endpoint_name": ENDPOINT_ZLPI,
+                            "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                            "power_representation": PRIMARY_POWER_REPRESENTATION,
+                            "band": "",
+                            "dataset_id": "",
+                            "contrast_id": "",
+                            "effect_estimate": float("nan"),
+                            "ci_low": float("nan"),
+                            "ci_high": float("nan"),
+                            "n": 0,
+                            "p_value": float("nan"),
+                            "status": STATUS_SENSITIVITY_ONLY,
+                            "notes": (
+                                f"{tag} available in inventory; residualized paired "
+                                "contrasts not supplied in this table."
+                            ),
+                        }
+                    )
+                    qc_rows.append(
+                        {
+                            "control_id": control_id,
+                            "component": analysis_role,
+                            "status": STATUS_OK,
+                            "n_available": 1,
+                            "n_unavailable": 0,
+                            "n_effects": 0,
+                            "notes": avail_note,
+                        }
+                    )
+                continue
+
+        # Cardiac-field handled in dedicated section below.
+
+        # ---- Cardiac-field series controls ----
+        n_artifact_ok = 0
+        n_artifact_missing = 0
+        if not series_controls:
+            sensitivity_rows.append(
+                _unavailable_row(
+                    control_id=CONTROL_CARDIAC_FIELD,
+                    analysis_role="artifact_control",
+                    notes="No series_controls with beat_times_s supplied.",
                 )
-                qc_rows.append(
+            )
+            qc_rows.append(
+                {
+                    "control_id": CONTROL_CARDIAC_FIELD,
+                    "component": "artifact_control",
+                    "status": STATUS_UNAVAILABLE,
+                    "n_available": 0,
+                    "n_unavailable": 1,
+                    "n_effects": 0,
+                    "notes": "Beat-locked EEG series not provided.",
+                }
+            )
+
+        for payload in series_controls or ():
+            obs_id = _as_str(payload.get("observation_id"), "unknown")
+            dataset_id = _as_str(payload.get("dataset_id"))
+            band = _as_str(payload.get("band"), "theta")
+            duration_s = _as_int(payload.get("duration_s"), EXPECTED_PRIMARY_DURATION_S)
+            beats = payload.get("beat_times_s")
+            if beats is None:
+                artifact_rows.append(
                     {
-                        "control_id": control_id,
-                        "component": analysis_role,
-                        "status": STATUS_OK,
-                        "n_available": len(tagged),
-                        "n_unavailable": 0,
-                        "n_effects": sum(
-                            1 for r in sensitivity_rows if r["control_id"] == control_id
-                        ),
-                        "notes": avail_note,
+                        "control_id": CONTROL_CARDIAC_FIELD,
+                        "observation_id": obs_id,
+                        "dataset_id": dataset_id,
+                        "band": band,
+                        "duration_s": duration_s,
+                        "endpoint_name": ENDPOINT_ZLPI,
+                        "primary_endpoint_index": float("nan"),
+                        "controlled_endpoint_index": float("nan"),
+                        "delta_vs_primary": float("nan"),
+                        "artifact_injected": _as_bool(payload.get("artifact_injected")) is True,
+                        "control_applied": False,
+                        "status": STATUS_UNAVAILABLE,
+                        "notes": "beat_times_s unavailable; not treated as zero.",
                     }
                 )
-            else:
-                # Signals are available in inventory but effect table not supplied —
-                # record availability without fabricating effects.
+                n_artifact_missing += 1
+                continue
+            try:
+                result = apply_cardiac_field_control(
+                    np.asarray(payload["hr_z"], dtype=float),
+                    np.asarray(payload["eeg_z"], dtype=float),
+                    np.asarray(payload["times_s"], dtype=float),
+                    np.asarray(beats, dtype=float),
+                    duration_s=duration_s,
+                    half_width_s=_as_float(
+                        payload.get("half_width_s", DEFAULT_QRS_HALF_WIDTH_S)
+                    )
+                    or DEFAULT_QRS_HALF_WIDTH_S,
+                )
+                artifact_rows.append(
+                    {
+                        "control_id": CONTROL_CARDIAC_FIELD,
+                        "observation_id": obs_id,
+                        "dataset_id": dataset_id,
+                        "band": band,
+                        "duration_s": duration_s,
+                        "endpoint_name": result["endpoint_name"],
+                        "primary_endpoint_index": result["primary_endpoint_index"],
+                        "controlled_endpoint_index": result["controlled_endpoint_index"],
+                        "delta_vs_primary": result["delta_vs_primary"],
+                        "artifact_injected": _as_bool(payload.get("artifact_injected")) is True,
+                        "control_applied": True,
+                        "status": STATUS_OK,
+                        "notes": "QRS interpolation applied; HR unchanged.",
+                    }
+                )
+                n_artifact_ok += 1
+            except ValueError as exc:
+                artifact_rows.append(
+                    {
+                        "control_id": CONTROL_CARDIAC_FIELD,
+                        "observation_id": obs_id,
+                        "dataset_id": dataset_id,
+                        "band": band,
+                        "duration_s": duration_s,
+                        "endpoint_name": ENDPOINT_ZLPI,
+                        "primary_endpoint_index": float("nan"),
+                        "controlled_endpoint_index": float("nan"),
+                        "delta_vs_primary": float("nan"),
+                        "artifact_injected": _as_bool(payload.get("artifact_injected")) is True,
+                        "control_applied": False,
+                        "status": STATUS_UNAVAILABLE,
+                        "notes": str(exc),
+                    }
+                )
+                n_artifact_missing += 1
+
+        if series_controls:
+            if n_artifact_ok:
+                deltas = [
+                    _as_float(r["delta_vs_primary"])
+                    for r in artifact_rows
+                    if r["status"] == STATUS_OK
+                ]
+                summary = summarize_effect(deltas)
                 sensitivity_rows.append(
                     {
-                        "control_id": control_id,
-                        "analysis_role": analysis_role,
+                        "control_id": CONTROL_CARDIAC_FIELD,
+                        "analysis_role": "artifact_control",
                         "is_primary_analysis": False,
                         "can_rescue_primary": False,
                         "endpoint_name": ENDPOINT_ZLPI,
                         "duration_s": EXPECTED_PRIMARY_DURATION_S,
                         "power_representation": PRIMARY_POWER_REPRESENTATION,
-                        "band": "",
-                        "dataset_id": "",
-                        "contrast_id": "",
-                        "effect_estimate": float("nan"),
-                        "ci_low": float("nan"),
-                        "ci_high": float("nan"),
-                        "n": 0,
-                        "p_value": float("nan"),
+                        "band": "pooled",
+                        "dataset_id": "pooled",
+                        "contrast_id": "qrs_delta_vs_primary",
+                        "effect_estimate": summary["effect_estimate"],
+                        "ci_low": summary["ci_low"],
+                        "ci_high": summary["ci_high"],
+                        "n": summary["n"],
+                        "p_value": summary["p_value"],
                         "status": STATUS_SENSITIVITY_ONLY,
-                        "notes": (
-                            f"{tag} available in inventory; residualized paired "
-                            "contrasts not supplied in this table."
-                        ),
+                        "notes": "Mean QRS-controlled minus primary endpoint index.",
                     }
                 )
-                qc_rows.append(
-                    {
-                        "control_id": control_id,
-                        "component": analysis_role,
-                        "status": STATUS_OK,
-                        "n_available": 1,
-                        "n_unavailable": 0,
-                        "n_effects": 0,
-                        "notes": avail_note,
-                    }
-                )
-            continue
-
-    # Cardiac-field / modality are handled in dedicated sections below.
-
-    # ---- Cardiac-field series controls ----
-    n_artifact_ok = 0
-    n_artifact_missing = 0
-    if not series_controls:
-        sensitivity_rows.append(
-            _unavailable_row(
-                control_id=CONTROL_CARDIAC_FIELD,
-                analysis_role="artifact_control",
-                notes="No series_controls with beat_times_s supplied.",
-            )
-        )
-        qc_rows.append(
-            {
-                "control_id": CONTROL_CARDIAC_FIELD,
-                "component": "artifact_control",
-                "status": STATUS_UNAVAILABLE,
-                "n_available": 0,
-                "n_unavailable": 1,
-                "n_effects": 0,
-                "notes": "Beat-locked EEG series not provided.",
-            }
-        )
-
-    for payload in series_controls or ():
-        obs_id = _as_str(payload.get("observation_id"), "unknown")
-        dataset_id = _as_str(payload.get("dataset_id"))
-        band = _as_str(payload.get("band"), "theta")
-        duration_s = _as_int(payload.get("duration_s"), EXPECTED_PRIMARY_DURATION_S)
-        beats = payload.get("beat_times_s")
-        if beats is None:
-            artifact_rows.append(
+            qc_rows.append(
                 {
                     "control_id": CONTROL_CARDIAC_FIELD,
-                    "observation_id": obs_id,
-                    "dataset_id": dataset_id,
-                    "band": band,
-                    "duration_s": duration_s,
-                    "endpoint_name": ENDPOINT_ZLPI,
-                    "primary_endpoint_index": float("nan"),
-                    "controlled_endpoint_index": float("nan"),
-                    "delta_vs_primary": float("nan"),
-                    "artifact_injected": _as_bool(payload.get("artifact_injected")) is True,
-                    "control_applied": False,
-                    "status": STATUS_UNAVAILABLE,
-                    "notes": "beat_times_s unavailable; not treated as zero.",
+                    "component": "artifact_control",
+                    "status": STATUS_OK if n_artifact_ok else STATUS_UNAVAILABLE,
+                    "n_available": n_artifact_ok,
+                    "n_unavailable": n_artifact_missing,
+                    "n_effects": n_artifact_ok,
+                    "notes": "Cardiac-field QRS interpolation on supplied series.",
                 }
             )
-            n_artifact_missing += 1
-            continue
-        try:
-            result = apply_cardiac_field_control(
-                np.asarray(payload["hr_z"], dtype=float),
-                np.asarray(payload["eeg_z"], dtype=float),
-                np.asarray(payload["times_s"], dtype=float),
-                np.asarray(beats, dtype=float),
-                duration_s=duration_s,
-                half_width_s=_as_float(
-                    payload.get("half_width_s", DEFAULT_QRS_HALF_WIDTH_S)
-                )
-                or DEFAULT_QRS_HALF_WIDTH_S,
-            )
-            artifact_rows.append(
-                {
-                    "control_id": CONTROL_CARDIAC_FIELD,
-                    "observation_id": obs_id,
-                    "dataset_id": dataset_id,
-                    "band": band,
-                    "duration_s": duration_s,
-                    "endpoint_name": result["endpoint_name"],
-                    "primary_endpoint_index": result["primary_endpoint_index"],
-                    "controlled_endpoint_index": result["controlled_endpoint_index"],
-                    "delta_vs_primary": result["delta_vs_primary"],
-                    "artifact_injected": _as_bool(payload.get("artifact_injected")) is True,
-                    "control_applied": True,
-                    "status": STATUS_OK,
-                    "notes": "QRS interpolation applied; HR unchanged.",
-                }
-            )
-            n_artifact_ok += 1
-        except ValueError as exc:
-            artifact_rows.append(
-                {
-                    "control_id": CONTROL_CARDIAC_FIELD,
-                    "observation_id": obs_id,
-                    "dataset_id": dataset_id,
-                    "band": band,
-                    "duration_s": duration_s,
-                    "endpoint_name": ENDPOINT_ZLPI,
-                    "primary_endpoint_index": float("nan"),
-                    "controlled_endpoint_index": float("nan"),
-                    "delta_vs_primary": float("nan"),
-                    "artifact_injected": _as_bool(payload.get("artifact_injected")) is True,
-                    "control_applied": False,
-                    "status": STATUS_UNAVAILABLE,
-                    "notes": str(exc),
-                }
-            )
-            n_artifact_missing += 1
 
-    if series_controls:
-        if n_artifact_ok:
-            deltas = [
-                _as_float(r["delta_vs_primary"])
-                for r in artifact_rows
-                if r["status"] == STATUS_OK
-            ]
-            summary = summarize_effect(deltas)
-            sensitivity_rows.append(
-                {
-                    "control_id": CONTROL_CARDIAC_FIELD,
-                    "analysis_role": "artifact_control",
-                    "is_primary_analysis": False,
-                    "can_rescue_primary": False,
-                    "endpoint_name": ENDPOINT_ZLPI,
-                    "duration_s": EXPECTED_PRIMARY_DURATION_S,
-                    "power_representation": PRIMARY_POWER_REPRESENTATION,
-                    "band": "pooled",
-                    "dataset_id": "pooled",
-                    "contrast_id": "qrs_delta_vs_primary",
-                    "effect_estimate": summary["effect_estimate"],
-                    "ci_low": summary["ci_low"],
-                    "ci_high": summary["ci_high"],
-                    "n": summary["n"],
-                    "p_value": summary["p_value"],
-                    "status": STATUS_SENSITIVITY_ONLY,
-                    "notes": "Mean QRS-controlled minus primary endpoint index.",
-                }
-            )
-        qc_rows.append(
-            {
-                "control_id": CONTROL_CARDIAC_FIELD,
-                "component": "artifact_control",
-                "status": STATUS_OK if n_artifact_ok else STATUS_UNAVAILABLE,
-                "n_available": n_artifact_ok,
-                "n_unavailable": n_artifact_missing,
-                "n_effects": n_artifact_ok,
-                "notes": "Cardiac-field QRS interpolation on supplied series.",
-            }
-        )
 
-    # ---- Modality comparison ----
-    modality_rows = compare_matched_modalities(subject_rows)
-    matched = [r for r in modality_rows if r["matched"]]
-    if matched:
-        summary = summarize_effect(
-            [_as_float(r["delta_ecg_minus_ppg"]) for r in matched]
-        )
-        sensitivity_rows.append(
-            {
-                "control_id": CONTROL_ECG_VS_PPG,
-                "analysis_role": "modality_comparison",
-                "is_primary_analysis": False,
-                "can_rescue_primary": False,
-                "endpoint_name": ENDPOINT_ZLPI,
-                "duration_s": EXPECTED_PRIMARY_DURATION_S,
-                "power_representation": PRIMARY_POWER_REPRESENTATION,
-                "band": "pooled",
-                "dataset_id": "pooled",
-                "contrast_id": "ecg_minus_ppg",
-                "effect_estimate": summary["effect_estimate"],
-                "ci_low": summary["ci_low"],
-                "ci_high": summary["ci_high"],
-                "n": summary["n"],
-                "p_value": summary["p_value"],
-                "status": STATUS_SENSITIVITY_ONLY,
-                "notes": "Matched ECG−PPG only.",
-            }
-        )
-        qc_rows.append(
-            {
-                "control_id": CONTROL_ECG_VS_PPG,
-                "component": "modality_comparison",
-                "status": STATUS_OK,
-                "n_available": len(matched),
-                "n_unavailable": len(modality_rows) - len(matched),
-                "n_effects": 1,
-                "notes": "Unmatched modalities excluded.",
-            }
-        )
-    elif not any(r["control_id"] == CONTROL_ECG_VS_PPG for r in sensitivity_rows):
-        sensitivity_rows.append(
-            _unavailable_row(
-                control_id=CONTROL_ECG_VS_PPG,
-                analysis_role="modality_comparison",
-                notes="No matched ECG/PPG observations.",
-            )
-        )
-        qc_rows.append(
-            {
-                "control_id": CONTROL_ECG_VS_PPG,
-                "component": "modality_comparison",
-                "status": STATUS_UNAVAILABLE,
-                "n_available": 0,
-                "n_unavailable": len(modality_rows),
-                "n_effects": 0,
-                "notes": "No matched ECG/PPG pairs.",
-            }
-        )
-
-    # ---- Specification matrix (one summary row per control_id) ----
-    specification_rows = build_specification_matrix(sensitivity_rows)
+    # ---- Specification matrix (active controls only) ----
+    specification_rows = build_specification_matrix(
+        sensitivity_rows,
+        control_ids=active_control_ids,
+    )
 
     # Guardrail QC: sensitivities must never be marked primary / rescue.
     n_violations = sum(
@@ -1697,7 +1554,6 @@ def run_artifact_controls(
     return ArtifactControlResult(
         sensitivity_rows=tuple(sensitivity_rows),
         artifact_rows=tuple(artifact_rows),
-        modality_rows=tuple(modality_rows),
         duration_rows=tuple(duration_rows),
         specification_rows=tuple(specification_rows),
         qc_rows=tuple(qc_rows),
@@ -1706,19 +1562,24 @@ def run_artifact_controls(
 
 def build_specification_matrix(
     sensitivity_rows: Sequence[Mapping[str, object]],
+    *,
+    control_ids: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
     """One matrix row per control with pooled effect / CI / n / status.
 
     ``analysis_priority`` / ``execution_order`` document the confirmatory
-    hierarchy (1 = immutable primary analysis).
+    hierarchy (1 = immutable primary analysis). When ``control_ids`` is set,
+    only those controls are included (default path omits optional artifact
+    controls that were not requested).
     """
     by_control: dict[str, list[Mapping[str, object]]] = {}
     for row in sensitivity_rows:
         by_control.setdefault(_as_str(row.get("control_id")), []).append(row)
 
+    ordered_ids = tuple(control_ids) if control_ids is not None else ALL_CONTROL_IDS
     matrix: list[dict[str, object]] = []
-    for control_id in ALL_CONTROL_IDS:
-        priority = ALL_CONTROL_IDS.index(control_id) + 1
+    for idx, control_id in enumerate(ordered_ids):
+        priority = idx + 1
         rows = by_control.get(control_id, [])
         if not rows:
             matrix.append(
@@ -1865,7 +1726,6 @@ def write_artifact_control_outputs(
     paths = {
         "sensitivity_results": output_path / SENSITIVITY_RESULTS_FILENAME,
         "artifact_control_results": output_path / ARTIFACT_CONTROL_RESULTS_FILENAME,
-        "modality_comparison": output_path / MODALITY_COMPARISON_FILENAME,
         "duration_sensitivity": output_path / DURATION_SENSITIVITY_FILENAME,
         "specification_matrix": output_path / SPECIFICATION_MATRIX_FILENAME,
         "sensitivity_qc": output_path / SENSITIVITY_QC_FILENAME,
@@ -1892,44 +1752,14 @@ def write_artifact_control_outputs(
                 "table_status": TABLE_STATUS_SKIPPED_NOT_REQUESTED,
                 "status": STATUS_UNAVAILABLE,
                 "notes": (
-                    "Artifact-control table empty: series_controls were not "
-                    "requested for this run (not a failure)."
-                ),
-            }
-        ]
-
-    modality_rows = [
-        {**dict(row), "table_status": TABLE_STATUS_COMPLETED}
-        for row in result.modality_rows
-    ]
-    if not modality_rows:
-        modality_rows = [
-            {
-                "dataset_id": "",
-                "participant_id": "",
-                "session_id": "",
-                "condition": "",
-                "observation_id": "",
-                "duration_s": "",
-                "endpoint_name": ENDPOINT_ZLPI,
-                "band": "",
-                "power_representation": PRIMARY_POWER_REPRESENTATION,
-                "ecg_endpoint_index": float("nan"),
-                "ppg_endpoint_index": float("nan"),
-                "delta_ecg_minus_ppg": float("nan"),
-                "matched": False,
-                "table_status": TABLE_STATUS_SKIPPED_NOT_APPLICABLE,
-                "status": STATUS_UNAVAILABLE,
-                "notes": (
-                    "Modality comparison empty: no ECG/PPG modality labels "
-                    "available for matched comparison (analysis not applicable)."
+                    "Artifact-control table empty: optional CFA/series_controls "
+                    "were not requested for this run (not a failure)."
                 ),
             }
         ]
 
     _write_csv(paths["sensitivity_results"], result.sensitivity_rows, SENSITIVITY_FIELDS)
     _write_csv(paths["artifact_control_results"], artifact_rows, ARTIFACT_FIELDS)
-    _write_csv(paths["modality_comparison"], modality_rows, MODALITY_FIELDS)
     _write_csv(paths["duration_sensitivity"], result.duration_rows, DURATION_FIELDS)
     _write_csv(paths["specification_matrix"], result.specification_rows, SPEC_MATRIX_FIELDS)
     _write_csv(paths["sensitivity_qc"], result.qc_rows, QC_FIELDS)
@@ -1948,6 +1778,7 @@ def run_confirmatory_artifact_controls(
     *,
     control_inventory: Mapping[str, Mapping[str, object]] | None = None,
     series_controls: Sequence[Mapping[str, object]] | None = None,
+    enable_optional_artifact_controls: bool = False,
 ) -> ArtifactControlResult:
     """Load M8 tables and write M11 sensitivity outputs."""
     root = Path(group_tables_dir).expanduser().resolve()
@@ -1958,6 +1789,7 @@ def run_confirmatory_artifact_controls(
         paired_rows,
         control_inventory=control_inventory,
         series_controls=series_controls,
+        enable_optional_artifact_controls=enable_optional_artifact_controls,
     )
     write_artifact_control_outputs(result, output_dir)
     return result
@@ -1968,10 +1800,11 @@ __all__ = [
     "ARTIFACT_CONTROL_RESULTS_FILENAME",
     "CONTROL_BROADBAND",
     "CONTROL_CARDIAC_FIELD",
-    "CONTROL_ECG_VS_PPG",
+    "CORE_SENSITIVITY_CONTROL_IDS",
     "DURATION_SENSITIVITY_FILENAME",
-    "MODALITY_COMPARISON_FILENAME",
+    "OPTIONAL_ARTIFACT_CONTROL_IDS",
     "PRIMARY_CONTROL_ID",
+    "SENSITIVITY_CONTROL_IDS",
     "SENSITIVITY_QC_FILENAME",
     "SENSITIVITY_RESULTS_FILENAME",
     "SPECIFICATION_MATRIX_FILENAME",
@@ -1980,7 +1813,6 @@ __all__ = [
     "beat_density",
     "broadband_residualize_log_power",
     "build_specification_matrix",
-    "compare_matched_modalities",
     "control_availability",
     "duration_sensitivity_effects",
     "is_primary_cell",

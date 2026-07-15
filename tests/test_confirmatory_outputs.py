@@ -113,6 +113,34 @@ def _seed_frozen_outputs(root: Path) -> None:
                     "is_standard_zlpi": True,
                 }
             )
+            paired.append(
+                {
+                    "dataset_id": ds,
+                    "contrast_id": contrast,
+                    "participant_id": f"p{i}",
+                    "session_id": "single",
+                    "duration_s": 120,
+                    "endpoint_name": ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
+                    "band": "theta",
+                    "power_representation": "absolute_log10",
+                    "delta_endpoint_index": -0.40,
+                    "is_standard_zlpi": False,
+                }
+            )
+            paired.append(
+                {
+                    "dataset_id": ds,
+                    "contrast_id": contrast,
+                    "participant_id": f"p{i}",
+                    "session_id": "single",
+                    "duration_s": 60,
+                    "endpoint_name": ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
+                    "band": "theta",
+                    "power_representation": "absolute_log10",
+                    "delta_endpoint_index": -0.10,
+                    "is_standard_zlpi": False,
+                }
+            )
             subjects.append(
                 {
                     "dataset_id": ds,
@@ -144,26 +172,6 @@ def _seed_frozen_outputs(root: Path) -> None:
     _write_csv(root / "paired_contrasts.csv", paired)
     _write_csv(root / "subject_level_metrics.csv", subjects)
 
-    meta = [
-        {
-            "endpoint_name": ENDPOINT_ZLPI,
-            "duration_s": 240,
-            "band": band,
-            "power_representation": "absolute_log10",
-            "is_primary_analysis": True,
-            "pooled_effect": -0.22,
-            "ci_low": -0.30,
-            "ci_high": -0.14,
-            "n_datasets": 2,
-            "i2": 0.1,
-            "tau2": 0.01,
-            "p_value": 0.001,
-            "notes": "",
-        }
-        for band in ("theta", "alpha", "beta", "low_gamma")
-    ]
-    _write_csv(root / "meta_analysis_results.csv", meta)
-
     effects = [
         {
             "dataset_id": "ds003838",
@@ -178,9 +186,62 @@ def _seed_frozen_outputs(root: Path) -> None:
             "ci_low": -0.35,
             "ci_high": -0.15,
             "p_value": 0.01,
-        }
+            "enters_meta": True,
+        },
+        {
+            "dataset_id": "ds003838",
+            "contrast_id": "rest__memory",
+            "duration_s": 240,
+            "endpoint_name": ENDPOINT_ZLPI,
+            "band": "alpha",
+            "power_representation": "absolute_log10",
+            "is_primary_analysis": True,
+            "n_pairs": 6,
+            "effect_mean": -0.20,
+            "ci_low": -0.30,
+            "ci_high": -0.10,
+            "p_value": 0.02,
+            "enters_meta": True,
+        },
+        {
+            "dataset_id": "ds006848",
+            "contrast_id": "rest__verbalwm",
+            "duration_s": 240,
+            "endpoint_name": ENDPOINT_ZLPI,
+            "band": "alpha",
+            "power_representation": "absolute_log10",
+            "is_primary_analysis": True,
+            "n_pairs": 6,
+            "effect_mean": -0.18,
+            "ci_low": -0.28,
+            "ci_high": -0.08,
+            "p_value": 0.03,
+            "enters_meta": True,
+        },
     ]
     _write_csv(root / "dataset_effects.csv", effects)
+
+    meta = [
+        {
+            "endpoint_name": ENDPOINT_ZLPI,
+            "duration_s": 240,
+            "band": band,
+            "power_representation": "absolute_log10",
+            "is_primary_analysis": True,
+            "pooled_effect": -0.22,
+            "ci_low": -0.30,
+            "ci_high": -0.14,
+            "prediction_low": -0.40,
+            "prediction_high": -0.05,
+            "n_datasets": 2,
+            "i2": 0.1,
+            "tau2": 0.01,
+            "p_value": 0.001,
+            "notes": "",
+        }
+        for band in ("theta", "alpha", "beta", "low_gamma")
+    ]
+    _write_csv(root / "meta_analysis_results.csv", meta)
 
     equivalence = [
         {
@@ -188,6 +249,7 @@ def _seed_frozen_outputs(root: Path) -> None:
             "endpoint_name": ENDPOINT_ZLPI,
             "duration_s": 240,
             "band": "theta",
+            "power_representation": "absolute_log10",
             "mean_mu": 0.2,
             "ci_low": -0.3,
             "ci_high": 0.7,
@@ -201,17 +263,140 @@ def _seed_frozen_outputs(root: Path) -> None:
     peak_params = [
         {
             "dataset_id": "ds003838",
+            "subject_id": "sub-0",
+            "condition": "rest",
             "band": "theta",
             "duration_s": 240,
             "endpoint_name": ENDPOINT_ZLPI,
+            "power_representation": "absolute_log10",
             "has_identifiable_peak": True,
             "peak_center_mu_s": 0.5,
-        }
+            "fwhm_s": 12.0,
+        },
+        {
+            "dataset_id": "ds003838",
+            "subject_id": "sub-1",
+            "condition": "rest",
+            "band": "alpha",
+            "duration_s": 240,
+            "endpoint_name": ENDPOINT_ZLPI,
+            "power_representation": "absolute_log10",
+            "has_identifiable_peak": True,
+            "peak_center_mu_s": 0.2,
+            "fwhm_s": 10.0,
+        },
     ]
     _write_csv(root / "peak_fit_params.csv", peak_params)
 
+    # Expand subject-level with all bands for heatmap cells.
+    subjects_heatmap = list(subjects)
+    for ds in ("ds003838", "ds006848"):
+        for band in ("alpha", "beta", "low_gamma"):
+            for i in range(3):
+                subjects_heatmap.append(
+                    {
+                        "dataset_id": ds,
+                        "participant_id": f"p{i}",
+                        "session_id": "single",
+                        "condition": "rest",
+                        "duration_s": 240,
+                        "endpoint_name": ENDPOINT_ZLPI,
+                        "band": band,
+                        "power_representation": "absolute_log10",
+                        "endpoint_index": 0.35 - 0.02 * i,
+                        "endpoint_eligible": True,
+                    }
+                )
+    # Sensitivity cohort example.
+    for band in ("theta", "alpha", "beta", "low_gamma"):
+        subjects_heatmap.append(
+            {
+                "dataset_id": "hiit",
+                "participant_id": "h0",
+                "session_id": "ph",
+                "condition": "ph_post_rest",
+                "duration_s": 240,
+                "endpoint_name": ENDPOINT_ZLPI,
+                "band": band,
+                "power_representation": "absolute_log10",
+                "endpoint_index": 0.10,
+                "endpoint_eligible": True,
+            }
+        )
+    _write_csv(root / "subject_level_metrics.csv", subjects_heatmap)
+
+    endpoint_rows = []
+    for band in ("theta", "alpha", "beta", "low_gamma"):
+        for obs in range(3):
+            endpoint_rows.append(
+                {
+                    "dataset_id": "ds003838",
+                    "subject_id": f"sub-{obs}",
+                    "condition": "rest",
+                    "observation_id": f"obs-{obs}",
+                    "duration_s": 240,
+                    "endpoint_name": ENDPOINT_ZLPI,
+                    "band": band,
+                    "power_representation": "absolute_log10",
+                    "eligible": True,
+                    "z0": 0.25,
+                    "negative_shoulder_mean_z": 0.05,
+                    "positive_shoulder_mean_z": 0.08,
+                    "combined_flank_mean_z": 0.02,
+                    "endpoint_index": 0.23,
+                    "local_prominence": 0.17,
+                }
+            )
+    _write_csv(root / "confirmatory_endpoint_metrics_D240.csv", endpoint_rows)
+
+    null_summary = []
+    for ds, role_band_p in (
+        ("ds003838", 0.02),
+        ("ds006848", 0.20),
+        ("hiit", 0.40),
+    ):
+        for band in ("theta", "alpha", "beta", "low_gamma"):
+            null_summary.append(
+                {
+                    "dataset_id": ds,
+                    "condition": "rest" if ds != "hiit" else "ph_post_rest",
+                    "duration_s": 240,
+                    "endpoint_name": ENDPOINT_ZLPI,
+                    "band": band,
+                    "power_representation": "absolute_log10",
+                    "null_type": "circular_shift",
+                    "median_empirical_p": role_band_p,
+                    "median_observed_endpoint_index": 0.2,
+                }
+            )
+    _write_csv(root / "null_summary.csv", null_summary)
+
+    protocol = [
+        {
+            "dataset_id": "ds003838",
+            "dataset_role": "primary",
+            "cardiac_modality": "ECG",
+        },
+        {
+            "dataset_id": "ds006848",
+            "dataset_role": "primary",
+            "cardiac_modality": "ECG",
+        },
+        {
+            "dataset_id": "hiit",
+            "dataset_role": "sensitivity",
+            "cardiac_modality": "PPG",
+        },
+    ]
+    _write_csv(root / "protocol_audit.csv", protocol)
+
     null_rows = [
         {
+            "dataset_id": "ds003838",
+            "participant_id": f"p{i}",
+            "subject_id": f"sub-{i:02d}",
+            "session_id": "single",
+            "condition": "rest" if i % 2 == 0 else "memory",
             "observation_id": f"obs-{i}",
             "band": "theta",
             "null_type": "circular_shift",
@@ -221,6 +406,9 @@ def _seed_frozen_outputs(root: Path) -> None:
             "null_mean": 0.05,
             "empirical_p": 0.04,
             "effect_size_surrogate_z": 2.0,
+            "n_surrogates_requested": 20,
+            "n_surrogates_finite": 20,
+            "observed_eligible": True,
         }
         for i in range(5)
     ]
@@ -263,17 +451,24 @@ def _seed_frozen_outputs(root: Path) -> None:
     ]
     _write_csv(root / "duration_sensitivity.csv", duration)
 
-    modality = [
+    sensitivity = [
         {
+            "control_id": "broadband_residualized",
             "dataset_id": "hiit",
-            "participant_id": "p01",
             "band": "theta",
             "endpoint_name": ENDPOINT_ZLPI,
-            "matched": True,
-            "delta_ecg_minus_ppg": 0.05,
+            "duration_s": 240,
+            "power_representation": "broadband_residualized",
+            "effect_estimate": -0.18,
+            "ci_low": -0.28,
+            "ci_high": -0.08,
+            "n": 12,
+            "status": "sensitivity_only",
+            "is_primary_analysis": False,
+            "can_rescue_primary": False,
         }
     ]
-    _write_csv(root / "modality_comparison.csv", modality)
+    _write_csv(root / "sensitivity_results.csv", sensitivity)
 
     spec = [
         {
@@ -375,6 +570,10 @@ class TestManifest(unittest.TestCase):
 
 class TestFigures(unittest.TestCase):
     def test_mean_ci_and_figure_contracts(self) -> None:
+        from ppg_eeg.confirmatory import figures as fig_mod
+
+        # Keep figure generation fast in unit tests; production uses FIGURE1_BOOTSTRAP_N.
+        fig_mod.FIGURE1_BOOTSTRAP_N = 40
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "frozen"
             out = Path(tmp) / "figures"
@@ -399,6 +598,29 @@ class TestFigures(unittest.TestCase):
             self.assertEqual(result.figure_source_manifest.name, FIGURE_SOURCE_MANIFEST_FILENAME)
             payload = json.loads(result.figure_source_manifest.read_text(encoding="utf-8"))
             self.assertGreaterEqual(len(payload["panels"]), 8)
+            # Figure 1 six-panel sources.
+            for name in (
+                "figure1_panel_b_lag_curves_bootstrap_ci.csv",
+                "figure1_panel_c_lag_categories.csv",
+                "figure1_panel_d_zlpi_heatmap.csv",
+                "figure1_panel_e_alpha_replication_forest.csv",
+                "figure1_panel_f_participant_peaks.csv",
+            ):
+                self.assertTrue((out / "source_data" / name).is_file())
+            boot_csv = out / "source_data" / "figure1_panel_b_lag_curves_bootstrap_ci.csv"
+            with boot_csv.open(encoding="utf-8", newline="") as handle:
+                boot_rows = list(csv.DictReader(handle))
+            self.assertTrue(boot_rows)
+            self.assertEqual(boot_rows[0]["ci_method"], "participant_within_dataset_bootstrap")
+            heat_csv = out / "source_data" / "figure1_panel_d_zlpi_heatmap.csv"
+            with heat_csv.open(encoding="utf-8", newline="") as handle:
+                heat_rows = list(csv.DictReader(handle))
+            self.assertTrue(any(row.get("surrogate_significant", "").lower() == "true" for row in heat_rows))
+            forest_csv = out / "source_data" / "figure1_panel_e_alpha_replication_forest.csv"
+            with forest_csv.open(encoding="utf-8", newline="") as handle:
+                forest_rows = list(csv.DictReader(handle))
+            self.assertTrue(any(row.get("band") == "alpha" for row in forest_rows))
+            self.assertTrue(any(row.get("dataset_id") == "POOLED" for row in forest_rows))
             # Endpoint separation present in figure3 duration source.
             duration_csv = out / "source_data" / "figure3_panel_b_duration.csv"
             with duration_csv.open(encoding="utf-8", newline="") as handle:
@@ -410,6 +632,9 @@ class TestFigures(unittest.TestCase):
             # No hard-coded rescue: can_rescue_primary is false in source.
             for row in duration_rows:
                 self.assertEqual(str(row["can_rescue_primary"]).lower(), "false")
+            broadband_csv = out / "source_data" / "figure3_panel_c_broadband.csv"
+            self.assertTrue(broadband_csv.is_file())
+            self.assertFalse((out / "source_data" / "figure3_panel_c_modality.csv").exists())
             self.assertEqual(FIGURE_DPI, 300)
 
             eq_csv = out / "source_data" / "figure2_panel_d_mu_equivalence.csv"
@@ -440,12 +665,41 @@ class TestFigures(unittest.TestCase):
                 _meta_or_single_title(n_datasets=2), "Random-effects meta-analysis"
             )
             self.assertEqual(MSG_NOT_APPLICABLE, "Not applicable for this dataset")
-            self.assertEqual(FIGURE1_TITLE, "Lag-resolved EEG–cardiac coupling")
+            self.assertEqual(
+                FIGURE1_TITLE,
+                "Confirmatory EEG–cardiac coupling: structure, replication, and peaks",
+            )
             self.assertEqual(FIGURE2_TITLE, "State-dependent attenuation of coupling")
+
+
+class TestFigure1Bootstrap(unittest.TestCase):
+    def test_participant_within_dataset_bootstrap_ci(self) -> None:
+        from ppg_eeg.confirmatory.figure1_panels import bootstrap_mean_ci_by_lag
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "frozen"
+            _seed_frozen_outputs(root)
+            with (root / "confirmatory_cross_correlation_curves_D240.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                curves = list(csv.DictReader(handle))
+            series = bootstrap_mean_ci_by_lag(
+                curves, band="theta", condition_role="low_demand", n_bootstrap=50, seed=1
+            )
+            self.assertGreater(len(series), 50)
+            self.assertEqual(series[0]["ci_method"], "participant_within_dataset_bootstrap")
+            self.assertEqual(int(series[0]["n"]), 3)
+            self.assertTrue(math.isfinite(float(series[0]["ci_low"])))
+            self.assertTrue(math.isfinite(float(series[0]["ci_high"])))
+            self.assertLessEqual(float(series[0]["ci_low"]), float(series[0]["mean_z"]))
+            self.assertGreaterEqual(float(series[0]["ci_high"]), float(series[0]["mean_z"]))
 
 
 class TestReport(unittest.TestCase):
     def test_report_bundle_reads_frozen_outputs_only(self) -> None:
+        from ppg_eeg.confirmatory import figures as fig_mod
+
+        fig_mod.FIGURE1_BOOTSTRAP_N = 40
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "frozen"
             out = Path(tmp) / "reports"

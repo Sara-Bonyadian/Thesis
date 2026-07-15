@@ -119,6 +119,7 @@ class StageContext:
     dataset_path: Path
     n_surrogates: int = DEFAULT_N_SURROGATES
     force: bool = False
+    enable_optional_artifact_controls: bool = False
     repo_root: Path | None = None
     logs: list[dict[str, object]] = field(default_factory=list)
 
@@ -602,7 +603,11 @@ def run_c6(ctx: StageContext) -> dict[str, object]:
     group = ctx.stage_dir("C5")
     out = ctx.stage_dir("C6")
     run_confirmatory_inference_from_dir(group, out)
-    run_confirmatory_artifact_controls(group, out)
+    run_confirmatory_artifact_controls(
+        group,
+        out,
+        enable_optional_artifact_controls=bool(ctx.enable_optional_artifact_controls),
+    )
     return {"inference_and_sensitivities": str(out)}
 
 
@@ -758,6 +763,18 @@ def build_stage_parser() -> argparse.ArgumentParser:
         help="Skip prerequisite stage-directory checks.",
     )
     parser.add_argument(
+        "--optional-artifact-controls",
+        action="store_true",
+        help=(
+            "Enable optional dataset-conditional C6 artifact controls "
+            "(cardiac-field/QRS; motion/EOG/EMG; respiration; mean HR; "
+            "beat count/density; eye state). Disabled by default and executed "
+            "only when this flag is set and required signals are available. "
+            "Default confirmatory robustness remains C4 temporal surrogate "
+            "nulls plus C6 broadband residualization and duration sensitivity."
+        ),
+    )
+    parser.add_argument(
         "--production-root",
         type=str,
         default=None,
@@ -824,6 +841,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             ),
             force=bool(args.force),
+            enable_optional_artifact_controls=bool(args.optional_artifact_controls),
             repo_root=repo_root,
         )
         print(f"[confirmatory] dataset={dataset.dataset_id}")

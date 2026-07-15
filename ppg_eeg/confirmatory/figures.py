@@ -135,8 +135,11 @@ LAG_CONVENTION_NOTE = (
 )
 Z_YLABEL = "Fisher z"
 CI_95_LABEL = "Pointwise 95% CI"
+# Figure 1 Panel B: participant-within-dataset bootstrap (presentation only).
 CI_95_METHOD_NOTE = (
-    "Pointwise 95% CI = mean ± 1.96×SE in Fisher-z space (not bootstrap)"
+    "Pointwise 95% CI = percentile bootstrap of mean Fisher-z "
+    "(resample participants within each dataset; preserve all repeated "
+    "observations of each drawn participant)"
 )
 ZLPI_METRIC = "Fisher z"
 EEG_BAND_YLABEL = "EEG frequency band"
@@ -146,7 +149,7 @@ MU_CLARIFICATION_NOTE = (
     "Orange dotted line: median of participant-specific Gaussian-fitted peak centers (μ); "
     "this is not necessarily the location of the maximum of the group-average Fisher-z curve"
 )
-GROUP_MEAN_LABEL_TEMPLATE = "Group mean Fisher z (n = {n})"
+GROUP_MEAN_LABEL_TEMPLATE = "Group mean Fisher z (n = {n} participants)"
 MU_EQUIVALENCE_LABEL = f"μ equivalence ({EQUIVALENCE_REGION_LABEL})"
 MSG_NOT_INCLUDED = "Not included in the confirmatory analysis."
 MSG_NOT_APPLICABLE = "Not applicable for this dataset"
@@ -161,9 +164,43 @@ LOW_DEMAND_CONDITION_LABELS = {
     "ps_post_rest",
 }
 
-FIGURE1_TITLE = "Lag-resolved EEG–cardiac coupling"
+# Master.yaml dataset_roles mirrored for figure cohort splitting when audit omits role.
+FIGURE1_PRIMARY_DATASETS = frozenset(
+    {"ds003838", "ds006848", "ds003690", "ds004587"}
+)
+FIGURE1_SENSITIVITY_DATASETS = frozenset(
+    {"ds004582", "ds003816", "hiit", "mindfulness"}
+)
+FIGURE1_BOOTSTRAP_N = 2000
+FIGURE1_BOOTSTRAP_SEED = 20260715
+FIGURE1_BOOTSTRAP_CI_PERCENT = 95.0
+# Panel B: lighter ribbons keep four-band overlay readable at full-dataset scale.
+FIGURE1_PANEL_B_CI_ALPHA = 0.12
+FIGURE1_PANEL_B_USE_SMALL_MULTIPLES = False
+# Panel D: prespecified surrogate mark (display only; not a new inferential family).
+FIGURE1_PANEL_D_SURROGATE_ALPHA = 0.05
+FIGURE1_PANEL_D_SURROGATE_RULE_NOTE = (
+    f"Surrogate mark (*): median_empirical_p < {FIGURE1_PANEL_D_SURROGATE_ALPHA:g} "
+    f"for {PRIMARY_NULL_TYPE} on D{EXPECTED_PRIMARY_DURATION_S} "
+    f"{PRIMARY_REPRESENTATION} ZLPI (circular-shift significance only; "
+    "prespecified display α; not a new FDR family)."
+)
+FIGURE1_PANEL_D_ASTERISK_LABEL = (
+    f"* = circular-shift surrogate p < {FIGURE1_PANEL_D_SURROGATE_ALPHA:g} only"
+)
+FIGURE1_PANEL_E_NOTE = (
+    "Alpha-focused replication display of the equal four-band primary meta "
+    "(one prespecified contrast per dataset); not an alpha-only confirmatory hierarchy."
+)
+FIGURE1_PANEL_F_NOTE = (
+    "Participant-level identifiable Gaussian μ and FWHM with dataset summaries; "
+    "μ TOST / ±2 s band from existing peak_center_equivalence (no hierarchical "
+    "FWHM inference)."
+)
+
+FIGURE1_TITLE = "Confirmatory EEG–cardiac coupling: structure, replication, and peaks"
 FIGURE2_TITLE = "State-dependent attenuation of coupling"
-FIGURE3_TITLE = "Temporal specificity and artifact controls"
+FIGURE3_TITLE = "Temporal specificity and core robustness"
 
 FIGURE1_STEM = "figure1_lag_resolved_zero_lag"
 FIGURE2_STEM = "figure2_state_attenuation_replication"
@@ -761,6 +798,7 @@ def resolve_reporting_inputs(confirmatory_root: str | Path) -> dict[str, Path | 
         "curves_d180": "confirmatory_cross_correlation_curves_D180.csv",
         "curves_d120": "confirmatory_cross_correlation_curves_D120.csv",
         "curves_d60": "confirmatory_cross_correlation_curves_D60.csv",
+        "endpoints_d240": "confirmatory_endpoint_metrics_D240.csv",
         "subject_level": "subject_level_metrics.csv",
         "paired_contrasts": "paired_contrasts.csv",
         "dataset_effects": "dataset_effects.csv",
@@ -770,9 +808,9 @@ def resolve_reporting_inputs(confirmatory_root: str | Path) -> dict[str, Path | 
         "peak_equivalence": "peak_center_equivalence.csv",
         "null_subject": "null_subject_results.csv",
         "null_summary": "null_summary.csv",
+        "protocol_audit": "protocol_audit.csv",
         "sensitivity": "sensitivity_results.csv",
         "specification_matrix": "specification_matrix.csv",
-        "modality": "modality_comparison.csv",
         "duration_sensitivity": "duration_sensitivity.csv",
         "eligibility": "eligibility_by_duration.csv",
     }
@@ -878,210 +916,10 @@ def render_figure1(
     inputs: Mapping[str, Path | None],
     output_dir: Path,
 ) -> FigureArtifacts:
-    """Figure 1: lag-resolved zero-lag structure (D240 ZLPI Fisher-z).
+    """Figure 1: six-panel manuscript layout (presentation only; C0–C6 frozen)."""
+    from .figure1_panels import render_figure1 as _render_figure1_panels
 
-    Aggregation uses the full 1-s lag grid. Plotting may thin to every
-    ``FIGURE1_DISPLAY_LAG_STEP_S`` lag for readability (no interpolation/smoothing).
-    """
-    _configure_publication_style()
-    curves = read_csv_rows(inputs.get("curves_d240"))
-    peak_rows = read_csv_rows(inputs.get("peak_params"))
-    source_dir = output_dir / "source_data"
-    panel_sources: list[FigurePanelSource] = []
-    source_paths: list[Path] = []
-
-    fig, axes = plt.subplots(
-        2,
-        2,
-        figsize=(13.6, 12.6),
-        sharex=True,
-        sharey=True,
-        constrained_layout=False,
-    )
-    axes_flat = list(axes.ravel())
-    panel_letters = ("A", "B", "C", "D")
-    shared_handles: list[object] = []
-    shared_labels: list[str] = []
-    primary_contract = contract_for_duration(EXPECTED_PRIMARY_DURATION_S)
-    for ax, band, letter in zip(axes_flat, BAND_ORDER, panel_letters, strict=True):
-        series = mean_ci_by_lag(curves, band=band, condition_role="low_demand")
-        fields = (
-            "lag_s",
-            "band",
-            "duration_s",
-            "endpoint_name",
-            "power_representation",
-            "n",
-            "mean_z",
-            "ci_low",
-            "ci_high",
-        )
-        csv_path = source_dir / f"figure1_panel_{band}_mean_ci.csv"
-        # Source CSV retains the full 1-s analysis grid.
-        write_source_csv(csv_path, series, fields)
-        source_paths.append(csv_path)
-        color = _band_color(band)
-        if series:
-            _shade_flanks(ax, EXPECTED_PRIMARY_DURATION_S)
-            lags = np.asarray([r["lag_s"] for r in series], dtype=float)
-            mean = np.asarray([r["mean_z"] for r in series], dtype=float)
-            lo = np.asarray([r["ci_low"] for r in series], dtype=float)
-            hi = np.asarray([r["ci_high"] for r in series], dtype=float)
-            mask = display_lag_mask(lags, FIGURE1_DISPLAY_LAG_STEP_S)
-            lags_d, mean_d, lo_d, hi_d = lags[mask], mean[mask], lo[mask], hi[mask]
-            n = int(series[0]["n"]) if series else 0
-            ax.fill_between(
-                lags_d,
-                lo_d,
-                hi_d,
-                color=color,
-                alpha=CI_ALPHA,
-                linewidth=0,
-                label=CI_95_LABEL,
-                zorder=2,
-            )
-            ax.plot(
-                lags_d,
-                mean_d,
-                color=color,
-                lw=LINE_WIDTH,
-                ls=_band_linestyle(band),
-                label=GROUP_MEAN_LABEL_TEMPLATE.format(n=n),
-                zorder=3,
-            )
-            # Peak μ overlay: low-demand identifiable peaks only (match curve state).
-            mus = [
-                _as_float(r.get("peak_center_mu_s"))
-                for r in peak_rows
-                if _as_str(r.get("band")).casefold() == band
-                and _as_int(r.get("duration_s"), 240) == 240
-                and _as_str(r.get("endpoint_name"), ENDPOINT_ZLPI) == ENDPOINT_ZLPI
-                and _as_str(r.get("power_representation"), PRIMARY_REPRESENTATION).casefold()
-                == PRIMARY_REPRESENTATION
-                and str(r.get("has_identifiable_peak", "")).lower() in {"true", "1", "yes"}
-                and _is_low_demand_condition(r)
-            ]
-            mus = [m for m in mus if math.isfinite(m)]
-            if mus:
-                ax.axvspan(
-                    -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
-                    EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
-                    facecolor=PALETTE["orange"],
-                    alpha=0.14,
-                    zorder=1,
-                    linewidth=0,
-                    label=MU_EQUIVALENCE_LABEL,
-                )
-                ax.axvline(
-                    float(np.median(mus)),
-                    color=PALETTE["orange"],
-                    ls=":",
-                    lw=LINE_WIDTH,
-                    label=MEDIAN_PEAK_CENTER_LABEL,
-                    zorder=4,
-                )
-            _set_lag_axes(ax, EXPECTED_PRIMARY_DURATION_S)
-            _set_panel_title(ax, f"{_band_display(band)} · low-demand (n = {n})")
-            _add_panel_label(ax, letter)
-            if letter == "A":
-                shared_handles, shared_labels = ax.get_legend_handles_labels()
-                # Keep legend order: mean, CI, median μ, equivalence (if present).
-                preferred = [
-                    GROUP_MEAN_LABEL_TEMPLATE.format(n=n),
-                    CI_95_LABEL,
-                    MEDIAN_PEAK_CENTER_LABEL,
-                    MU_EQUIVALENCE_LABEL,
-                ]
-                ordered = []
-                for lab in preferred:
-                    for h, L in zip(shared_handles, shared_labels, strict=False):
-                        if L == lab:
-                            ordered.append((h, L))
-                            break
-                if ordered:
-                    shared_handles, shared_labels = map(list, zip(*ordered, strict=False))
-        else:
-            _set_panel_title(ax, _band_display(band))
-            _add_panel_label(ax, letter)
-            _mark_empty_panel(
-                ax,
-                _band_not_analyzed_message(band),
-                xlabel=LAG_XLABEL,
-                ylabel=Z_YLABEL,
-                xlim=(
-                    float(contract_for_duration(EXPECTED_PRIMARY_DURATION_S).lag_min_s),
-                    float(contract_for_duration(EXPECTED_PRIMARY_DURATION_S).lag_max_s),
-                ),
-                ylim=(-0.2, 0.2),
-            )
-        panel_sources.append(
-            FigurePanelSource(
-                figure_id="figure1",
-                panel_id=f"band_{band}",
-                title=f"Low-demand Fisher-z lag curve ({band})",
-                endpoint_name=ENDPOINT_ZLPI,
-                duration_s=EXPECTED_PRIMARY_DURATION_S,
-                input_tables=[
-                    str(inputs.get("curves_d240") or ""),
-                    str(inputs.get("peak_params") or ""),
-                ],
-                source_data_csv=str(csv_path),
-                analysis_keys=[
-                    f"duration={EXPECTED_PRIMARY_DURATION_S}",
-                    f"endpoint={ENDPOINT_ZLPI}",
-                    f"band={band}",
-                    f"representation={PRIMARY_REPRESENTATION}",
-                ],
-                notes=(
-                    f"Low-demand D{EXPECTED_PRIMARY_DURATION_S} absolute_log10 curves; "
-                    f"distant flanks |τ|∈[{primary_contract.flank_inner_s},"
-                    f"{primary_contract.flank_outer_s}] s; "
-                    f"local shoulders |τ|∈[{primary_contract.shoulders_inner_s},"
-                    f"{primary_contract.shoulders_outer_s}] s; "
-                    f"orange band = {EQUIVALENCE_REGION_LABEL} μ equivalence when "
-                    f"low-demand peaks exist. Ribbon is {CI_95_METHOD_NOTE}. "
-                    f"Analysis lag step=1 s; display lag step={FIGURE1_DISPLAY_LAG_STEP_S} s "
-                    "(plot thinning only)."
-                ),
-            )
-        )
-
-    # Annotate lag regions after shared y-limits are established.
-    for ax in axes_flat:
-        _annotate_lag_regions(ax, EXPECTED_PRIMARY_DURATION_S, enabled=True)
-        # sharex=True hides tick numbers on the top row; show them on A–D.
-        ax.tick_params(axis="x", labelbottom=True)
-    if shared_handles:
-        fig.legend(
-            shared_handles,
-            shared_labels,
-            loc="lower center",
-            ncol=min(4, len(shared_labels)),
-            fontsize=FS_LEGEND - 2,
-            frameon=False,
-            bbox_to_anchor=(0.5, 0.025),
-        )
-    fig.suptitle(FIGURE1_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.985)
-    fig.text(
-        0.5,
-        0.018,
-        f"{LAG_CONVENTION_NOTE}.  {CI_95_METHOD_NOTE}.  {FIGURE1_DISPLAY_GRID_DISCLOSURE}",
-        ha="center",
-        va="bottom",
-        fontsize=FS_TICK - 2,
-        color=PALETTE["dark_gray"],
-    )
-    # Bottom room for C/D "Lag τ (s)" above legend; hspace keeps A/B labels off C/D titles.
-    fig.subplots_adjust(left=0.08, right=0.99, top=0.93, bottom=0.20, wspace=0.18, hspace=0.44)
-    pdf, svg, png = save_figure_trio(fig, output_dir, FIGURE1_STEM)
-    return FigureArtifacts(
-        figure_id="figure1",
-        pdf=pdf,
-        svg=svg,
-        png=png,
-        source_csvs=tuple(source_paths),
-        panels=tuple(panel_sources),
-    )
+    return _render_figure1_panels(inputs, output_dir)
 
 
 def _paired_points_for_dataset(
@@ -2372,14 +2210,12 @@ def render_figure3(
     inputs: Mapping[str, Path | None],
     output_dir: Path,
 ) -> FigureArtifacts:
-    """Figure 3: nulls, modality, duration robustness, sensitivity matrix, LOO."""
+    """Figure 3: nulls, duration robustness, broadband sensitivity, LOO."""
     null_rows = read_csv_rows(inputs.get("null_subject"))
-    modality = read_csv_rows(inputs.get("modality"))
     duration = read_csv_rows(inputs.get("duration_sensitivity"))
     paired_rows = read_csv_rows(inputs.get("paired_contrasts"))
-    sensitivity = read_csv_rows(inputs.get("specification_matrix")) or read_csv_rows(
-        inputs.get("sensitivity")
-    )
+    sensitivity_detail = read_csv_rows(inputs.get("sensitivity"))
+    sensitivity = read_csv_rows(inputs.get("specification_matrix")) or sensitivity_detail
     loo = read_csv_rows(inputs.get("leave_one_out"))
     source_dir = output_dir / "source_data"
     panel_sources: list[FigurePanelSource] = []
@@ -3006,72 +2842,135 @@ def render_figure3(
         )
     )
 
-    # Panel C: matched ECG vs PPG.
+    # Panel C: broadband residualization sensitivity.
     ax_c = fig.add_subplot(gs[1, 0])
-    modality_source = []
-    for row in modality:
-        if str(row.get("matched", "")).lower() not in {"true", "1", "yes"}:
+    broadband_source = []
+    broadband_rows = [
+        row
+        for row in (sensitivity_detail or sensitivity)
+        if _as_str(row.get("control_id")).casefold() == "broadband_residualized"
+    ]
+    for row in broadband_rows:
+        effect = _as_float(row.get("effect_estimate") or row.get("pooled_effect"))
+        status = _as_str(row.get("status")).casefold()
+        if status == "control_unavailable":
             continue
-        delta = _as_float(row.get("delta_ecg_minus_ppg"))
-        modality_source.append(
+        if not math.isfinite(effect) and not broadband_source:
+            # Keep unavailable rows out of the plot, but track for empty-panel logic.
+            continue
+        if not math.isfinite(effect):
+            continue
+        broadband_source.append(
             {
-                "dataset_id": _as_str(row.get("dataset_id")),
-                "participant_id": _as_str(row.get("participant_id")),
-                "band": _as_str(row.get("band")),
+                "control_id": "broadband_residualized",
+                "dataset_id": _as_str(row.get("dataset_id"), "pooled"),
+                "band": _as_str(row.get("band"), "pooled"),
                 "endpoint_name": _as_str(row.get("endpoint_name"), ENDPOINT_ZLPI),
-                "delta_ecg_minus_ppg": delta,
+                "duration_s": _as_int(row.get("duration_s"), 240),
+                "power_representation": _as_str(
+                    row.get("power_representation"), "broadband_residualized"
+                ),
+                "effect_estimate": effect,
+                "ci_low": _as_float(row.get("ci_low")),
+                "ci_high": _as_float(row.get("ci_high")),
+                "n": _as_int(row.get("n")),
+                "status": _as_str(row.get("status")),
+                "can_rescue_primary": False,
             }
         )
-    if modality_source:
-        vals = np.asarray([r["delta_ecg_minus_ppg"] for r in modality_source], dtype=float)
-        ax_c.hist(
-            vals[np.isfinite(vals)],
-            bins=15,
+    y_labels_c: list[str] = []
+    for row in broadband_source:
+        effect = _as_float(row["effect_estimate"])
+        lo = _as_float(row["ci_low"])
+        hi = _as_float(row["ci_high"])
+        xerr = None
+        if math.isfinite(lo) and math.isfinite(hi):
+            xerr = [[effect - lo], [hi - effect]]
+        band = _as_str(row["band"]) or "pooled"
+        dataset = _as_str(row["dataset_id"]) or "pooled"
+        label = band if dataset in {"", "pooled"} else f"{band} · {dataset}"
+        ax_c.errorbar(
+            effect,
+            len(y_labels_c),
+            xerr=xerr,
+            fmt="o",
             color=PALETTE["purple"],
-            alpha=0.85,
-            edgecolor=PALETTE["dark_gray"],
-            linewidth=0.6,
+            markersize=MARKER_SIZE,
+            capsize=4,
+            elinewidth=LINE_WIDTH,
+            markeredgecolor=PALETTE["dark_gray"],
+            markeredgewidth=0.6,
         )
+        y_labels_c.append(label)
+    if y_labels_c:
         _ref_vline(ax_c, 0.0)
-        ax_c.set_xlabel(f"ECG − PPG endpoint difference ({ZLPI_METRIC})", fontsize=FS_AXIS)
-        ax_c.set_ylabel("Count", fontsize=FS_AXIS)
+        ax_c.set_yticks(range(len(y_labels_c)))
+        ax_c.set_yticklabels(y_labels_c, fontsize=FS_TICK - 1)
+        ax_c.set_ylabel("Band / dataset", fontsize=FS_AXIS, labelpad=6)
+        ax_c.set_xlabel(
+            f"Broadband-residualized effect ({ZLPI_METRIC}; {CI_95_LABEL})",
+            fontsize=FS_AXIS,
+            labelpad=8,
+        )
         _style_axes(ax_c)
-        _set_panel_title(ax_c, f"Matched ECG−PPG (n = {int(np.isfinite(vals).sum())})", fontsize=FS_PANEL_TITLE - 2, pad=10)
+        _set_panel_title(
+            ax_c,
+            f"Broadband residualization (n cells = {len(y_labels_c)})",
+            fontsize=FS_PANEL_TITLE - 2,
+            pad=10,
+        )
         _add_panel_label(ax_c, "C")
     else:
         _mark_empty_panel(
             ax_c,
-            MSG_NOT_APPLICABLE,
-            xlabel=f"ECG − PPG endpoint difference ({ZLPI_METRIC})",
-            ylabel="Count",
+            MSG_NOT_INCLUDED,
+            xlabel=f"Broadband-residualized effect ({ZLPI_METRIC}; {CI_95_LABEL})",
+            ylabel="Band / dataset",
             xlim=(-1.0, 1.0),
             ylim=(0.0, 1.0),
         )
-        _set_panel_title(ax_c, "Matched ECG−PPG", fontsize=FS_PANEL_TITLE - 2, pad=10)
+        _set_panel_title(ax_c, "Broadband residualization", fontsize=FS_PANEL_TITLE - 2, pad=10)
         _add_panel_label(ax_c, "C")
-    modality_csv = source_dir / "figure3_panel_c_modality.csv"
+    broadband_csv = source_dir / "figure3_panel_c_broadband.csv"
     write_source_csv(
-        modality_csv,
-        modality_source,
+        broadband_csv,
+        broadband_source,
         (
+            "control_id",
             "dataset_id",
-            "participant_id",
             "band",
             "endpoint_name",
-            "delta_ecg_minus_ppg",
+            "duration_s",
+            "power_representation",
+            "effect_estimate",
+            "ci_low",
+            "ci_high",
+            "n",
+            "status",
+            "can_rescue_primary",
         ),
     )
-    source_paths.append(modality_csv)
+    source_paths.append(broadband_csv)
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure3",
-            panel_id="modality_ecg_ppg",
-            title="Matched ECG versus PPG",
+            panel_id="broadband_residualized",
+            title="Broadband residualization sensitivity",
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=240,
-            input_tables=[str(inputs.get("modality") or "")],
-            source_data_csv=str(modality_csv),
-            analysis_keys=["matched_only=true"],
+            input_tables=[
+                str(inputs.get("sensitivity") or ""),
+                str(inputs.get("specification_matrix") or ""),
+            ],
+            source_data_csv=str(broadband_csv),
+            analysis_keys=[
+                "control_id=broadband_residualized",
+                "can_rescue_primary=false",
+            ],
+            notes=(
+                "Default confirmatory representation sensitivity only; cannot "
+                "rescue primary D240 absolute-power ZLPI."
+            ),
         )
     )
 
@@ -3371,6 +3270,7 @@ __all__ = [
     "FiguresResult",
     "generate_confirmatory_figures",
     "mean_ci_by_lag",
+    "render_figure1",
     "resolve_reporting_inputs",
     "save_figure_trio",
 ]

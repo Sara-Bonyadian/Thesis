@@ -6,6 +6,18 @@ confirmatory:
   root_seed: 20260713
   # Null battery: DEFAULT_N_SURROGATES=1000 in code for production. Smoke YAML
   # files set n_surrogates: 20 for fast CI / M13 checks.
+  #
+  # Robustness design (finalized; Methods-facing):
+  #   Default confirmatory robustness:
+  #     - C4 temporal surrogate nulls (circular shift, phase randomization,
+  #       block shuffle, cross-subject mismatch, AR(1) innovations)
+  #     - C6 broadband EEG residualization
+  #     - C6 duration sensitivity (D180 ZLPI; D120 MWPI; D60 SWPI)
+  #   Optional dataset-conditional artifact controls (CLI only; not a YAML key):
+  #     --optional-artifact-controls enables CFA/QRS, motion/EOG/EMG, respiration,
+  #     mean HR, beat count/density, eye state when required signals are present.
+  #   Cardiac modality: each dataset selects one primary ECG or PPG channel for
+  #   instantaneous HR in dataset YAML / PROTOCOL_SPECS (no dual-modality tables).
 
   bands:
     theta: [4, 7]

@@ -69,6 +69,32 @@ Canonical source: `ppg_eeg/confirmatory/duration_contracts.py`.
 | D120 | −30…+30 | MWPI | **no** |
 | D60 | −20…+20 | SWPI | **no** |
 
+## Robustness design (finalized)
+
+### Default confirmatory robustness (always on in C4/C6)
+
+| Analysis | Stage | Notes |
+|----------|-------|-------|
+| Temporal surrogate nulls | C4 | Circular shift, phase randomization, block shuffle, cross-subject mismatch, AR(1) innovations |
+| Broadband EEG residualization | C6 | Core representation sensitivity; cannot rescue primary |
+| Duration sensitivity | C6 | D180 ZLPI; D120 MWPI; D60 SWPI; cannot rescue primary |
+
+### Optional dataset-conditional artifact controls (off by default)
+
+Enable only with an explicit CLI flag **and** when required signals exist:
+
+```bash
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml \
+  --stage C6 --optional-artifact-controls
+```
+
+Optional controls: cardiac-field/QRS, motion/EOG/EMG, respiration, mean HR, beat count/density, eye state.
+
+### Cardiac modality
+
+Each dataset config / `PROTOCOL_SPECS` chooses **one** primary cardiac source (ECG or PPG) for instantaneous HR derivation. Dual-modality comparison tables are not part of the confirmatory design.
+
 ## Status
 
 See `.cursor/plans/zero_lag_redesign_e761cae5.plan.md`.

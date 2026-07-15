@@ -118,7 +118,10 @@ def build_methods_summary(inputs: Mapping[str, Path | None]) -> list[dict[str, o
             "item": "mu_equivalence_bounds_s",
             "value": f"±{EXPECTED_PEAK_CENTER_EQUIVALENCE_S}",
             "source": "duration_contracts",
-            "notes": "TOST bounds for low-demand peak centers.",
+            "notes": (
+                "TOST bounds for absolute low-demand peak centers μ "
+                "(not paired task−rest)."
+            ),
         },
         {
             "section": "multiplicity",
@@ -128,11 +131,51 @@ def build_methods_summary(inputs: Mapping[str, Path | None]) -> list[dict[str, o
             "notes": "Applied within prespecified families only.",
         },
         {
+            "section": "robustness_default",
+            "item": "temporal_surrogate_nulls",
+            "value": "C4 circular_shift;phase_randomization;block_shuffle;"
+            "cross_subject_mismatch;ar1_innovations",
+            "source": "nulls",
+            "notes": "Default confirmatory temporal specificity battery on ZLPI.",
+        },
+        {
+            "section": "robustness_default",
+            "item": "broadband_residualization",
+            "value": "broadband_residualized",
+            "source": "artifact_controls",
+            "notes": "Default C6 core sensitivity; cannot rescue primary.",
+        },
+        {
+            "section": "robustness_default",
+            "item": "duration_sensitivity",
+            "value": "D180_zlpi;D120_mwpi;D60_swpi",
+            "source": "artifact_controls",
+            "notes": "Default nested duration sensitivities; cannot rescue primary.",
+        },
+        {
+            "section": "robustness_optional",
+            "item": "optional_artifact_controls",
+            "value": "disabled_by_default",
+            "source": "artifact_controls",
+            "notes": (
+                "CFA/QRS, motion/EOG/EMG, respiration, mean HR, beat "
+                "count/density, eye state via --optional-artifact-controls "
+                "when signals are available."
+            ),
+        },
+        {
             "section": "sensitivity",
             "item": "can_rescue_primary",
             "value": False,
             "source": "artifact_controls",
-            "notes": "Sensitivity/D180/D120/D60 cannot replace primary D240 ZLPI.",
+            "notes": "Default and optional sensitivities cannot replace primary D240 ZLPI.",
+        },
+        {
+            "section": "cardiac",
+            "item": "modality_policy",
+            "value": "single_primary_modality_per_dataset",
+            "source": "protocol_audit",
+            "notes": "ECG or PPG chosen in PROTOCOL_SPECS / dataset YAML for HR only.",
         },
     ]
     for key, path in sorted(inputs.items()):
@@ -312,6 +355,18 @@ def build_visual_review_checklist() -> list[dict[str, object]]:
             "item_id": "fig3_nulls",
             "figure_id": "figure3",
             "check": "Surrogate/null markers shown against observed endpoints",
+            "status": "pending_review",
+        },
+        {
+            "item_id": "fig3_broadband",
+            "figure_id": "figure3",
+            "check": "Panel C shows broadband residualization (core robustness), not optional CFA/nuisance",
+            "status": "pending_review",
+        },
+        {
+            "item_id": "fig3_duration",
+            "figure_id": "figure3",
+            "check": "Duration sensitivity labeled non-rescuing of primary D240 ZLPI",
             "status": "pending_review",
         },
         {

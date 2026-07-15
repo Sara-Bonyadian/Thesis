@@ -247,7 +247,11 @@ def cmd_m10(work: Path) -> int:
 
 def cmd_m11(work: Path) -> int:
     out = work / "m11_artifacts"
-    run_confirmatory_artifact_controls(work / "m8_group", out)
+    run_confirmatory_artifact_controls(
+        work / "m8_group",
+        out,
+        enable_optional_artifact_controls=False,
+    )
     print(f"wrote artifact controls under {out}")
     return 0
 

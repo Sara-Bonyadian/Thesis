@@ -27,8 +27,6 @@ from .artifact_controls import (
     ARTIFACT_FIELDS,
     DURATION_FIELDS,
     DURATION_SENSITIVITY_FILENAME,
-    MODALITY_COMPARISON_FILENAME,
-    MODALITY_FIELDS,
     SENSITIVITY_FIELDS,
     SENSITIVITY_QC_FILENAME,
     SENSITIVITY_RESULTS_FILENAME,
@@ -1353,13 +1351,16 @@ def execute_smoke_pipeline(
 
     # M11
     started = time.perf_counter()
-    command = f"run_confirmatory_artifact_controls({group_dir}, {artifacts_dir})"
-    run_confirmatory_artifact_controls(group_dir, artifacts_dir)
+    command = f"run_confirmatory_artifact_controls({group_dir}, {artifacts_dir}, enable_optional_artifact_controls=False)"
+    run_confirmatory_artifact_controls(
+        group_dir,
+        artifacts_dir,
+        enable_optional_artifact_controls=False,
+    )
     schema_ok, detail = _assert_schemas(
         [
             (artifacts_dir / SENSITIVITY_RESULTS_FILENAME, SENSITIVITY_FIELDS),
             (artifacts_dir / ARTIFACT_CONTROL_RESULTS_FILENAME, ARTIFACT_FIELDS),
-            (artifacts_dir / MODALITY_COMPARISON_FILENAME, MODALITY_FIELDS),
             (artifacts_dir / DURATION_SENSITIVITY_FILENAME, DURATION_FIELDS),
             (artifacts_dir / SPECIFICATION_MATRIX_FILENAME, SPEC_MATRIX_FIELDS),
         ]

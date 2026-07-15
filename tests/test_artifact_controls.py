@@ -14,18 +14,17 @@ from ppg_eeg.confirmatory.artifact_controls import (
     CONTROL_D120,
     CONTROL_D180,
     CONTROL_D60,
-    CONTROL_ECG_VS_PPG,
     CONTROL_MOTION,
     CONTROL_RESPIRATION,
+    CORE_SENSITIVITY_CONTROL_IDS,
     DURATION_SENSITIVITY_FILENAME,
-    MODALITY_COMPARISON_FILENAME,
+    OPTIONAL_ARTIFACT_CONTROL_IDS,
     PRIMARY_CONTROL_ID,
     SENSITIVITY_QC_FILENAME,
     SENSITIVITY_RESULTS_FILENAME,
     SPECIFICATION_MATRIX_FILENAME,
     beat_density,
     broadband_residualize_log_power,
-    compare_matched_modalities,
     control_availability,
     is_primary_cell,
     qrs_interpolate_eeg,
@@ -137,6 +136,7 @@ class TestArtifactInjection(unittest.TestCase):
         result = run_artifact_controls(
             [],
             [],
+            enable_optional_artifact_controls=True,
             series_controls=[
                 {
                     "observation_id": "obs-1",
@@ -180,6 +180,7 @@ class TestMissingNuisanceSignals(unittest.TestCase):
         result = run_artifact_controls(
             subjects,
             paired,
+            enable_optional_artifact_controls=True,
             control_inventory={"obs-a": {"motion": False, "respiration": False}},
         )
         motion = [
@@ -198,44 +199,46 @@ class TestMissingNuisanceSignals(unittest.TestCase):
         self.assertEqual(respiration[0]["status"], "control_unavailable")
 
 
-class TestMatchedModalityComparison(unittest.TestCase):
-    def test_compares_only_matched_ecg_ppg_pairs(self) -> None:
-        subjects = [
-            _subject(
-                participant_id="p01",
-                condition="rest",
-                modality="ecg",
-                endpoint_index=0.40,
-            ),
-            _subject(
-                participant_id="p01",
-                condition="rest",
-                modality="ppg",
-                endpoint_index=0.30,
-            ),
-            _subject(
-                participant_id="p02",
-                condition="rest",
-                modality="ecg",
-                endpoint_index=0.50,
-            ),
-            # p02 PPG missing → unmatched
-        ]
-        rows = compare_matched_modalities(subjects)
-        matched = [r for r in rows if r["matched"]]
-        unmatched = [r for r in rows if not r["matched"]]
-        self.assertEqual(len(matched), 1)
-        self.assertAlmostEqual(float(matched[0]["delta_ecg_minus_ppg"]), 0.10, places=12)
-        self.assertTrue(unmatched)
-        self.assertEqual(unmatched[0]["status"], "control_unavailable")
+class TestOptionalArtifactControlsDefault(unittest.TestCase):
+    def test_default_omits_optional_controls_from_sensitivity_and_qc(self) -> None:
+        paired = [_paired(participant_id=f"p{i}", delta=-0.2) for i in range(6)]
+        result = run_artifact_controls([], paired)
+        sensitivity_ids = {r["control_id"] for r in result.sensitivity_rows}
+        qc_ids = {r["control_id"] for r in result.qc_rows}
+        for control_id in OPTIONAL_ARTIFACT_CONTROL_IDS:
+            self.assertNotIn(control_id, sensitivity_ids)
+            self.assertNotIn(control_id, qc_ids)
+        for control_id in CORE_SENSITIVITY_CONTROL_IDS:
+            self.assertIn(control_id, sensitivity_ids)
+        self.assertIn(PRIMARY_CONTROL_ID, sensitivity_ids)
+        self.assertIn(CONTROL_BROADBAND, sensitivity_ids)
+        self.assertIn(CONTROL_D180, sensitivity_ids)
+        spec_ids = {r["control_id"] for r in result.specification_rows}
+        self.assertEqual(
+            spec_ids,
+            {PRIMARY_CONTROL_ID, *CORE_SENSITIVITY_CONTROL_IDS},
+        )
+        self.assertFalse(result.artifact_rows)
 
-        result = run_artifact_controls(subjects, [])
-        modality_effects = [
-            r for r in result.sensitivity_rows if r["control_id"] == CONTROL_ECG_VS_PPG
+    def test_optional_enabled_without_inventory_marks_unavailable(self) -> None:
+        paired = [_paired(participant_id=f"p{i}", delta=-0.2) for i in range(6)]
+        result = run_artifact_controls(
+            [],
+            paired,
+            enable_optional_artifact_controls=True,
+        )
+        motion = [
+            r for r in result.sensitivity_rows if r["control_id"] == CONTROL_MOTION
         ]
-        self.assertTrue(modality_effects)
-        self.assertFalse(modality_effects[0]["is_primary_analysis"])
-        self.assertFalse(modality_effects[0]["can_rescue_primary"])
+        self.assertTrue(motion)
+        self.assertEqual(motion[0]["status"], "control_unavailable")
+        cfa = [
+            r
+            for r in result.sensitivity_rows
+            if r["control_id"] == CONTROL_CARDIAC_FIELD
+        ]
+        self.assertTrue(cfa)
+        self.assertEqual(cfa[0]["status"], "control_unavailable")
 
 
 class TestDurationSeparation(unittest.TestCase):
@@ -364,11 +367,12 @@ class TestPrimaryProtection(unittest.TestCase):
             r for r in result.qc_rows if r["control_id"] == "guardrail"
         ]
         self.assertEqual(guard[0]["status"], "ok")
-        # Specification matrix includes every control id.
+        # Default specification matrix is primary + core only.
         control_ids = {r["control_id"] for r in result.specification_rows}
         self.assertIn(PRIMARY_CONTROL_ID, control_ids)
         self.assertIn(CONTROL_D120, control_ids)
-        self.assertIn(CONTROL_CARDIAC_FIELD, control_ids)
+        self.assertIn(CONTROL_BROADBAND, control_ids)
+        self.assertNotIn(CONTROL_CARDIAC_FIELD, control_ids)
         primary = next(
             r for r in result.specification_rows if r["control_id"] == PRIMARY_CONTROL_ID
         )
@@ -389,7 +393,6 @@ class TestHelpersAndOutputs(unittest.TestCase):
             expected = {
                 SENSITIVITY_RESULTS_FILENAME,
                 ARTIFACT_CONTROL_RESULTS_FILENAME,
-                MODALITY_COMPARISON_FILENAME,
                 DURATION_SENSITIVITY_FILENAME,
                 SPECIFICATION_MATRIX_FILENAME,
                 SENSITIVITY_QC_FILENAME,
@@ -397,14 +400,11 @@ class TestHelpersAndOutputs(unittest.TestCase):
             self.assertEqual({p.name for p in paths.values()}, expected)
             for path in paths.values():
                 self.assertTrue(path.is_file())
+            self.assertNotIn("modality_comparison", paths)
             with paths["artifact_control_results"].open(encoding="utf-8", newline="") as handle:
                 artifact = list(csv.DictReader(handle))
             self.assertEqual(len(artifact), 1)
             self.assertEqual(artifact[0]["table_status"], "skipped_not_requested")
-            with paths["modality_comparison"].open(encoding="utf-8", newline="") as handle:
-                modality = list(csv.DictReader(handle))
-            self.assertEqual(len(modality), 1)
-            self.assertEqual(modality[0]["table_status"], "skipped_not_applicable")
 
 
 if __name__ == "__main__":
