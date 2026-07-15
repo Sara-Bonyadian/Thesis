@@ -19,7 +19,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy import stats
 
+from .artifact_controls import participant_duration_sensitivity_effects
 from .config import EXPECTED_BANDS_HZ
 from .duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
@@ -38,6 +40,20 @@ from .manifest import (
     hash_directory_files,
     sha256_file,
 )
+from .null_delta_inference import (
+    DATASET_DISPLAY_ORDER,
+    INDEPENDENT_UNIT_VERDICT,
+    PRIMARY_BAND,
+    PRIMARY_DURATION_S,
+    PRIMARY_NULL_TYPE,
+    SECONDARY_NULL_TYPES,
+    analyze_null_slice,
+    analyze_null_slice_full,
+    independent_unit_verdict_rows,
+    leave_one_participant_out,
+    secondary_band_null_fdr_table,
+)
+from .paired_delta_inference import infer_paired_deltas_cluster_aware
 
 FIGURE_DPI = 300
 
@@ -77,6 +93,15 @@ BAND_LINESTYLES: dict[str, str | tuple] = {
     "beta": "-",
     "low_gamma":"-",
 }
+# Horizontal jitter within each duration column so bands do not overplot.
+BAND_DURATION_X_OFFSET: dict[str, float] = {
+    "delta": 0.0,
+    "theta": -7.5,
+    "alpha": -2.5,
+    "beta": 2.5,
+    "low_gamma": 7.5,
+}
+FIGURE3_DURATION_XLIM = (42.0, 258.0)
 DATASET_DISPLAY: dict[str, str] = {
     "hiit": "HIIT",
 }
@@ -143,6 +168,28 @@ FIGURE3_TITLE = "Temporal specificity and artifact controls"
 FIGURE1_STEM = "figure1_lag_resolved_zero_lag"
 FIGURE2_STEM = "figure2_state_attenuation_replication"
 FIGURE3_STEM = "figure3_temporal_artifact_specificity"
+FIGURE3_SUPPLEMENT_STEM = "figure3_supplement_null_diagnostics"
+FIGURE3_SUPPLEMENT_LABEL = "Descriptive nested-observation diagnostic"
+FIGURE3_PARTICIPANT_FOREST_STEM = "figure3_supplement_participant_null_forests"
+FIGURE3_PARTICIPANT_FOREST_MAX_ROWS = 24
+FIGURE3_PANEL_B_ENCODING_NOTE = (
+    "Color = EEG frequency band · Marker shape = endpoint index "
+    "(ZLPI at 240/180 s; MWPI at 120 s; SWPI at 60 s)"
+)
+FIGURE3_PANEL_B_FOOTNOTE_SHORT = (
+    "Panel B encoding: color = band · shape = index "
+    "(ZLPI 240/180; MWPI 120; SWPI 60); Student-t 95% CIs; "
+    "absolute estimates (not equivalence)"
+)
+FIGURE3_FIGSIZE = (15.2, 12.6)
+FIGURE3_SUBPLOT_ADJUST = {
+    "left": 0.08,
+    "right": 0.86,
+    "top": 0.91,
+    "bottom": 0.09,
+    "wspace": 0.45,
+    "hspace": 0.50,
+}
 # Display-only: analysis remains on the 1-s lag grid; plotting uses every Nth lag.
 FIGURE1_DISPLAY_LAG_STEP_S = 2
 FIGURE1_DISPLAY_GRID_DISCLOSURE = (
@@ -242,9 +289,15 @@ def _add_panel_label(ax: plt.Axes, letter: str) -> None:
     )
 
 
-def _set_panel_title(ax: plt.Axes, title: str) -> None:
+def _set_panel_title(ax: plt.Axes, title: str, *, fontsize: float | None = None, pad: float = 12) -> None:
     # Left-aligned title with extra pad so it clears the panel letter.
-    ax.set_title(title, fontsize=FS_PANEL_TITLE, fontweight="normal", pad=12, loc="left")
+    ax.set_title(
+        title,
+        fontsize=FS_PANEL_TITLE if fontsize is None else fontsize,
+        fontweight="normal",
+        pad=pad,
+        loc="left",
+    )
 
 
 def _legend_inside(
@@ -272,6 +325,107 @@ def _legend_inside(
         ax.legend(handles, labels, **kwargs)
     else:
         ax.legend(**kwargs)
+
+
+def _band_duration_x(duration_s: int, band: str) -> float:
+    """Nominal duration tick plus band-specific horizontal offset."""
+    return float(duration_s) + BAND_DURATION_X_OFFSET.get(_as_str(band).casefold(), 0.0)
+
+
+def _participant_forest_labels(rows: Sequence[object]) -> list[str]:
+    """Compact participant labels; drop redundant dataset prefix when uniform."""
+    datasets = {_as_str(getattr(r, "dataset_id", "")) for r in rows}  # type: ignore[arg-type]
+    single_dataset = len({d for d in datasets if d}) == 1
+    labels: list[str] = []
+    for row in rows:
+        label = _as_str(getattr(row, "display_label", ""))  # type: ignore[arg-type]
+        dataset = _as_str(getattr(row, "dataset_id", ""))  # type: ignore[arg-type]
+        if single_dataset and label:
+            labels.append(label)
+        elif dataset and label:
+            labels.append(f"{dataset}:{label}")
+        else:
+            labels.append(label or dataset or "participant")
+    return labels
+
+
+def _clipped_vertical_errorbar(
+    ax: plt.Axes,
+    x: float,
+    y: float,
+    lo: float,
+    hi: float,
+    *,
+    y_lo: float,
+    y_hi: float,
+    **kwargs: object,
+) -> None:
+    """Plot error bars, truncating at axis limits with limit indicators."""
+    low_err = y - lo
+    high_err = hi - y
+    lolims = uplims = False
+    if math.isfinite(lo) and lo < y_lo:
+        low_err = max(0.0, y - y_lo)
+        lolims = True
+    if math.isfinite(hi) and hi > y_hi:
+        high_err = max(0.0, y_hi - y)
+        uplims = True
+    if not (math.isfinite(low_err) and math.isfinite(high_err)):
+        ax.scatter([x], [y], zorder=3, **{k: v for k, v in kwargs.items() if k != "yerr"})
+        return
+    ax.errorbar(
+        x,
+        y,
+        yerr=[[low_err], [high_err]],
+        lolims=lolims,
+        uplims=uplims,
+        zorder=3,
+        **kwargs,
+    )
+
+
+def _legend_dual_encoding(
+    ax: plt.Axes,
+    band_handles: Sequence[object],
+    band_labels: Sequence[str],
+    index_handles: Sequence[object],
+    index_labels: Sequence[str],
+    *,
+    loc: str = "upper right",
+) -> None:
+    """Two stacked in-panel legends: band color and endpoint marker shape."""
+    legend_kw = {
+        "fontsize": FS_LEGEND - 2,
+        "frameon": True,
+        "fancybox": False,
+        "edgecolor": PALETTE["light_gray"],
+        "framealpha": 0.92,
+        "borderaxespad": 0.3,
+        "handlelength": 1.3,
+        "labelspacing": 0.22,
+        "columnspacing": 0.7,
+        "handletextpad": 0.35,
+        "title_fontsize": FS_LEGEND - 1,
+    }
+    band_legend = ax.legend(
+        band_handles,
+        band_labels,
+        title="Band",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        ncol=1,
+        **legend_kw,
+    )
+    ax.add_artist(band_legend)
+    ax.legend(
+        index_handles,
+        index_labels,
+        title="Index",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 0.52),
+        ncol=1,
+        **legend_kw,
+    )
 
 
 def _legend_outside(
@@ -363,6 +517,19 @@ def _as_int(value: object, default: int = 0) -> int:
         return int(float(value))  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _as_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _as_str(value).casefold()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "t"}:
+        return True
+    if text in {"0", "false", "no", "n", "f"}:
+        return False
+    return default
 
 
 def _band_color(band: str) -> str:
@@ -924,6 +1091,17 @@ def _paired_points_for_dataset(
     dataset_id: str,
     band: str = "theta",
 ) -> list[dict[str, object]]:
+    """Collect observation-level Δ rows for Panel A.
+
+    Missing / ineligible contrasts are dropped before participant means:
+    - non-primary representation / wrong duration / band / endpoint skipped;
+    - ``contrast_eligible`` False skipped when that column is present;
+    - non-finite ``delta_endpoint_index`` skipped.
+    Participants with no remaining finite eligible contrasts contribute no unit
+    mean (and therefore no inferential weight). Participants with unequal numbers
+    of remaining contrasts still receive equal weight via within-participant
+    averaging before the across-participant mean.
+    """
     rows: list[dict[str, object]] = []
     for row in paired_rows:
         if _as_str(row.get("dataset_id")).casefold() != dataset_id.casefold():
@@ -939,17 +1117,26 @@ def _paired_points_for_dataset(
             != PRIMARY_REPRESENTATION
         ):
             continue
+        # When eligibility is recorded, keep only eligible contrasts.
+        if "contrast_eligible" in row and not _as_bool(row.get("contrast_eligible")):
+            continue
+        delta = _as_float(row.get("delta_endpoint_index"))
+        if not math.isfinite(delta):
+            continue
         rows.append(
             {
                 "dataset_id": dataset_id,
                 "participant_id": _as_str(row.get("participant_id")),
+                "session_id": _as_str(row.get("session_id"), "single"),
                 "contrast_id": _as_str(row.get("contrast_id")),
                 "band": band,
                 "duration_s": 240,
                 "endpoint_name": ENDPOINT_ZLPI,
+                "power_representation": PRIMARY_REPRESENTATION,
+                "sampling_unit": "participant_x_contrast",
                 "low_endpoint_index": _as_float(row.get("low_endpoint_index")),
                 "effort_endpoint_index": _as_float(row.get("effort_endpoint_index")),
-                "delta_endpoint_index": _as_float(row.get("delta_endpoint_index")),
+                "delta_endpoint_index": delta,
             }
         )
     # If paired table lacks absolute sides, recover from subject metrics.
@@ -999,6 +1186,7 @@ def render_figure2(
     gs = fig.add_gridspec(2, 2, hspace=0.40, wspace=0.38)
 
     # Panel A: paired deltas by dataset (theta ZLPI D240).
+    # Points = observation-level participant×contrast; mean/CI from independent units.
     ax_a = fig.add_subplot(gs[0, 0])
     datasets = sorted(
         {
@@ -1010,6 +1198,8 @@ def render_figure2(
         }
     )
     paired_source: list[dict[str, object]] = []
+    unit_source: list[dict[str, object]] = []
+    inference_source: list[dict[str, object]] = []
     plotted_any = False
     dataset_tick_labels: list[str] = []
     for idx, dataset_id in enumerate(datasets):
@@ -1017,20 +1207,52 @@ def render_figure2(
             subjects, paired, dataset_id=dataset_id, band="theta"
         )
         paired_source.extend(points)
-        ys = np.asarray([_as_float(p["delta_endpoint_index"]) for p in points], dtype=float)
-        ys = ys[np.isfinite(ys)]
+        ys = np.asarray(
+            [_as_float(p["delta_endpoint_index"]) for p in points], dtype=float
+        )
+        finite_mask = np.isfinite(ys)
+        ys_plot = ys[finite_mask]
         base = _dataset_display(dataset_id)
-        dataset_tick_labels.append(f"{base}\n(n = {int(ys.size)} pairs)")
-        if ys.size == 0:
+        seed = int(hashlib.sha256(dataset_id.encode("utf-8")).hexdigest()[:8], 16)
+        inference, unit_summaries = infer_paired_deltas_cluster_aware(
+            points,
+            bootstrap_seed=seed,
+        )
+        for summary in unit_summaries:
+            unit_source.append(
+                {
+                    "dataset_id": dataset_id,
+                    "unit_id": summary.unit_id,
+                    "unit_field": inference.unit_field,
+                    "n_observations": summary.n_observations,
+                    "mean_delta": summary.mean_delta,
+                    "band": "theta",
+                    "duration_s": 240,
+                    "endpoint_name": ENDPOINT_ZLPI,
+                }
+            )
+        inference_row = {
+            "dataset_id": dataset_id,
+            "band": "theta",
+            "duration_s": 240,
+            "endpoint_name": ENDPOINT_ZLPI,
+            **inference.as_dict(),
+        }
+        inference_source.append(inference_row)
+        dataset_tick_labels.append(
+            f"{base}\n"
+            f"({inference.n_observations} obs, "
+            f"{inference.n_units} {inference.unit_label}s)"
+        )
+        if ys_plot.size == 0:
             continue
         plotted_any = True
-        seed = int(hashlib.sha256(dataset_id.encode("utf-8")).hexdigest()[:8], 16)
-        x = np.full(ys.shape, idx, dtype=float) + 0.05 * np.random.default_rng(
+        x = np.full(ys_plot.shape, idx, dtype=float) + 0.05 * np.random.default_rng(
             seed
-        ).normal(size=ys.size)
+        ).normal(size=ys_plot.size)
         ax_a.scatter(
             x,
-            ys,
+            ys_plot,
             s=SCATTER_SIZE,
             alpha=0.75,
             color=_band_color("theta"),
@@ -1040,12 +1262,23 @@ def render_figure2(
             label=None,
             zorder=2,
         )
+        # Inferential marker: mean of independent-unit means ± Student-t CI.
+        mean_u = float(inference.mean_delta)
+        if (
+            math.isfinite(mean_u)
+            and math.isfinite(float(inference.ci_low))
+            and math.isfinite(float(inference.ci_high))
+        ):
+            yerr = [
+                [mean_u - float(inference.ci_low)],
+                [float(inference.ci_high) - mean_u],
+            ]
+        else:
+            yerr = 0.0
         ax_a.errorbar(
             idx,
-            float(np.mean(ys)),
-            yerr=1.959963984540054 * float(np.std(ys, ddof=1) / math.sqrt(ys.size))
-            if ys.size >= 2
-            else 0.0,
+            mean_u if math.isfinite(mean_u) else 0.0,
+            yerr=yerr,
             fmt="s",
             color=PALETTE["vermillion"],
             markersize=MARKER_SIZE,
@@ -1067,7 +1300,6 @@ def render_figure2(
             labelpad=10,
         )
         _style_axes(ax_a)
-        # CI is stated on the axis title family; no redundant legend.
     else:
         _mark_empty_panel(
             ax_a,
@@ -1087,16 +1319,70 @@ def render_figure2(
         (
             "dataset_id",
             "participant_id",
+            "session_id",
             "contrast_id",
             "band",
             "duration_s",
             "endpoint_name",
+            "power_representation",
+            "sampling_unit",
             "low_endpoint_index",
             "effort_endpoint_index",
             "delta_endpoint_index",
         ),
     )
-    source_paths.append(paired_csv)
+    unit_csv = source_dir / "figure2_panel_a_unit_summaries.csv"
+    write_source_csv(
+        unit_csv,
+        unit_source,
+        (
+            "dataset_id",
+            "unit_id",
+            "unit_field",
+            "n_observations",
+            "mean_delta",
+            "band",
+            "duration_s",
+            "endpoint_name",
+        ),
+    )
+    inference_csv = source_dir / "figure2_panel_a_inference.csv"
+    inference_fields = (
+        "dataset_id",
+        "band",
+        "duration_s",
+        "endpoint_name",
+        "estimand",
+        "unit_field",
+        "unit_label",
+        "n_observations",
+        "n_units",
+        "nested_repeated_measures",
+        "unit_detection_reason",
+        "mean_delta",
+        "se_delta",
+        "ci_low",
+        "ci_high",
+        "t_stat",
+        "p_value",
+        "df",
+        "ci_method",
+        "cluster_bootstrap_mean",
+        "cluster_bootstrap_ci_low",
+        "cluster_bootstrap_ci_high",
+        "cluster_bootstrap_n_draws",
+        "bootstrap_agrees_with_unit_ci",
+        "mixed_model_appropriate",
+        "mixed_model_recommendation",
+        "mixed_model_status",
+        "mixed_model_mean",
+        "mixed_model_ci_low",
+        "mixed_model_ci_high",
+        "mixed_model_p_value",
+        "notes",
+    )
+    write_source_csv(inference_csv, inference_source, inference_fields)
+    source_paths.extend([paired_csv, unit_csv, inference_csv])
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure2",
@@ -1104,10 +1390,24 @@ def render_figure2(
             title="Paired task-minus-low-demand ZLPI",
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=240,
-            input_tables=[str(inputs.get("paired_contrasts") or ""), str(inputs.get("subject_level") or "")],
+            input_tables=[
+                str(inputs.get("paired_contrasts") or ""),
+                str(inputs.get("subject_level") or ""),
+            ],
             source_data_csv=str(paired_csv),
-            analysis_keys=["endpoint=zlpi", "duration=240", "band=theta"],
-            notes=f"n_datasets={len(datasets)}; points are participants.",
+            analysis_keys=[
+                "endpoint=zlpi",
+                "duration=240",
+                "band=theta",
+                "inference=independent_unit_means",
+            ],
+            notes=(
+                f"n_datasets={len(datasets)}; each plotted point is one "
+                "participant×contrast ΔZLPI (task − low-demand). Orange marker = "
+                "mean of participant-level mean Δ with Student-t 95% CI; SE uses "
+                "n_participants, not n_contrast rows. Companion CSVs: unit "
+                "summaries + cluster-bootstrap / mixed-model diagnostics."
+            ),
         )
     )
 
@@ -1557,6 +1857,517 @@ def render_figure2(
     )
 
 
+def _plot_dataset_null_forest(
+    ax: plt.Axes,
+    dataset_inferences: Sequence[object],
+    *,
+    title: str,
+    panel_label: str | None = "A",
+) -> None:
+    """Main Panel A: one row per dataset (participant-mean Δ ± Student-t CI)."""
+    rows = list(dataset_inferences)
+    if not rows:
+        _mark_empty_panel(
+            ax,
+            MSG_NOT_INCLUDED,
+            xlabel=f"Participant mean Δ ({ZLPI_METRIC})",
+            ylabel="Dataset",
+        )
+        if panel_label:
+            _add_panel_label(ax, panel_label)
+        _set_panel_title(ax, title)
+        return
+
+    y_pos = np.arange(len(rows), dtype=float)
+    labels: list[str] = []
+    for idx, row in enumerate(rows):
+        dataset = _as_str(getattr(row, "dataset_id", ""))
+        n_part = int(getattr(row, "n_participants", 0))
+        labels.append(f"{dataset}  (n={n_part})")
+        mean = float(getattr(row, "mean_delta"))
+        ci_l = float(getattr(row, "ci_low"))
+        ci_h = float(getattr(row, "ci_high"))
+        y = float(idx)
+        if math.isfinite(mean) and math.isfinite(ci_l) and math.isfinite(ci_h):
+            ax.errorbar(
+                mean,
+                y,
+                xerr=[[mean - ci_l], [ci_h - mean]],
+                fmt="D",
+                color=PALETTE["orange"],
+                markersize=MARKER_SIZE + 1.0,
+                capsize=5,
+                elinewidth=LINE_WIDTH,
+                markeredgecolor=PALETTE["dark_gray"],
+                markeredgewidth=0.7,
+                zorder=4,
+            )
+        elif math.isfinite(mean):
+            ax.scatter(
+                [mean],
+                [y],
+                s=SCATTER_SIZE + 16,
+                color=PALETTE["orange"],
+                marker="D",
+                edgecolors=PALETTE["dark_gray"],
+                linewidths=0.7,
+                zorder=4,
+            )
+    _ref_vline(ax, 0.0)
+    ax.set_yticks(list(y_pos))
+    ax.set_yticklabels(labels, fontsize=FS_TICK - 1)
+    ax.set_xlabel(
+        f"Participant mean Δ (observed − null; {ZLPI_METRIC})",
+        fontsize=FS_AXIS - 1,
+        labelpad=8,
+    )
+    ax.set_ylabel("Dataset", fontsize=FS_AXIS - 1, labelpad=6)
+    run_classes = {_as_str(getattr(r, "run_class", "")) for r in rows}
+    interps = {_as_str(getattr(r, "interpretation", "")) for r in rows}
+    run_class = next(iter(run_classes)) if len(run_classes) == 1 else "mixed"
+    badge = "SMOKE DIAGNOSTIC" if run_class == "smoke_diagnostic" else run_class
+    interp_text = next(iter(interps)) if len(interps) == 1 else "see source data"
+    ax.text(
+        0.02,
+        0.08,
+        f"{badge}\n{interp_text}\nNo pooled row",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=FS_TICK - 3,
+        color=PALETTE["dark_gray"],
+        linespacing=1.2,
+        bbox={
+            "facecolor": "white",
+            "edgecolor": "none",
+            "alpha": 0.88,
+            "pad": 1.5,
+        },
+        zorder=6,
+    )
+    _style_axes(ax)
+    _set_panel_title(ax, title, fontsize=FS_PANEL_TITLE - 2, pad=10)
+    if panel_label:
+        _add_panel_label(ax, panel_label)
+
+
+def _plot_participant_null_forest(
+    ax: plt.Axes,
+    participant_rows: Sequence[object],
+    inference: object,
+    *,
+    title: str,
+    panel_label: str | None = "A",
+    ylabel: str = "Participant",
+) -> None:
+    """Supplemental horizontal forest of biological-participant Δ_p ± mean CI."""
+    rows = list(participant_rows)
+    if not rows:
+        _mark_empty_panel(
+            ax,
+            MSG_NOT_INCLUDED,
+            xlabel=f"Observed − null mean ({ZLPI_METRIC})",
+            ylabel=ylabel,
+        )
+        if panel_label:
+            _add_panel_label(ax, panel_label)
+        _set_panel_title(ax, title)
+        return
+
+    y_labels = _participant_forest_labels(rows)
+    y_pos = np.arange(len(rows), dtype=float)
+    deltas = np.asarray([float(r.delta_p) for r in rows], dtype=float)  # type: ignore[attr-defined]
+    ax.scatter(
+        deltas,
+        y_pos,
+        s=SCATTER_SIZE,
+        color=PALETTE["blue"],
+        marker="o",
+        edgecolors=PALETTE["dark_gray"],
+        linewidths=0.6,
+        zorder=3,
+    )
+    summary_y = float(len(rows))
+    mean = float(getattr(inference, "mean_delta"))
+    lo = float(getattr(inference, "ci_low"))
+    hi = float(getattr(inference, "ci_high"))
+    if math.isfinite(mean):
+        if math.isfinite(lo) and math.isfinite(hi):
+            ax.errorbar(
+                mean,
+                summary_y,
+                xerr=[[mean - lo], [hi - mean]],
+                fmt="D",
+                color=PALETTE["orange"],
+                markersize=MARKER_SIZE + 1.5,
+                capsize=5,
+                elinewidth=LINE_WIDTH,
+                markeredgecolor=PALETTE["dark_gray"],
+                markeredgewidth=0.7,
+                zorder=4,
+            )
+        else:
+            ax.scatter(
+                [mean],
+                [summary_y],
+                s=SCATTER_SIZE + 20,
+                color=PALETTE["orange"],
+                marker="D",
+                edgecolors=PALETTE["dark_gray"],
+                linewidths=0.7,
+                zorder=4,
+            )
+    _ref_vline(ax, 0.0)
+    size_label = _as_str(getattr(inference, "sample_size_label", ""))
+    if not size_label:
+        size_label = f"n={int(getattr(inference, 'n_participants'))} participants"
+    ax.set_yticks(list(y_pos) + [summary_y])
+    ax.set_yticklabels(
+        y_labels + [f"Mean Δ ({size_label})"],
+        fontsize=FS_TICK - 1,
+    )
+    ax.set_xlabel(
+        f"Participant Δ = observed − null mean ({ZLPI_METRIC})",
+        fontsize=FS_AXIS,
+        labelpad=8,
+    )
+    ax.set_ylabel(ylabel, fontsize=FS_AXIS, labelpad=6)
+    run_class = _as_str(getattr(inference, "run_class", ""))
+    interp = _as_str(getattr(inference, "interpretation", ""))
+    badge = "SMOKE DIAGNOSTIC" if run_class == "smoke_diagnostic" else run_class
+    ax.text(
+        0.02,
+        0.98,
+        f"{badge}\n{interp}",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=FS_TICK - 2,
+        color=PALETTE["dark_gray"],
+    )
+    _style_axes(ax)
+    _set_panel_title(ax, title)
+    if panel_label:
+        _add_panel_label(ax, panel_label)
+
+
+def _chunked(items: Sequence[object], size: int) -> list[list[object]]:
+    if size <= 0:
+        return [list(items)]
+    return [list(items[i : i + size]) for i in range(0, len(items), size)]
+
+
+def _render_figure3_participant_forest_supplement(
+    analysis: object,
+    output_dir: Path,
+) -> tuple[list[tuple[Path, Path, Path]], list[Path], list[FigurePanelSource]]:
+    """Faceted / paginated biological-participant forests (supplement)."""
+    source_dir = output_dir / "source_data"
+    source_paths: list[Path] = []
+    panel_sources: list[FigurePanelSource] = []
+    trios: list[tuple[Path, Path, Path]] = []
+
+    participants = list(getattr(analysis, "participants"))
+    dataset_inferences = {
+        _as_str(getattr(inf, "dataset_id")): inf
+        for inf in getattr(analysis, "dataset_inferences")
+    }
+    by_dataset: dict[str, list[object]] = {}
+    for row in participants:
+        by_dataset.setdefault(_as_str(getattr(row, "dataset_id")), []).append(row)
+
+    page_payloads: list[tuple[str, list[object], object, int]] = []
+
+    def _dataset_sort_key(dataset_id: str) -> tuple[int, str]:
+        try:
+            return (DATASET_DISPLAY_ORDER.index(dataset_id), dataset_id)
+        except ValueError:
+            return (len(DATASET_DISPLAY_ORDER), dataset_id)
+
+    for dataset_id in sorted(by_dataset, key=_dataset_sort_key):
+        rows = sorted(
+            by_dataset[dataset_id],
+            key=lambda r: _as_str(getattr(r, "display_label")),
+        )
+        chunks = _chunked(rows, FIGURE3_PARTICIPANT_FOREST_MAX_ROWS)
+        inference = dataset_inferences.get(dataset_id)
+        if inference is None:
+            continue
+        for page_i, chunk in enumerate(chunks, start=1):
+            page_payloads.append((dataset_id, chunk, inference, page_i if len(chunks) > 1 else 0))
+
+    if not page_payloads:
+        return trios, source_paths, panel_sources
+
+    # One figure page per dataset chunk so labels stay readable.
+    for page_idx, (dataset_id, chunk, inference, page_i) in enumerate(page_payloads, start=1):
+        n_rows = len(chunk)
+        fig_h = max(4.5, 0.42 * (n_rows + 2) + 1.2)
+        _configure_publication_style()
+        fig, ax = plt.subplots(figsize=(8.5, fig_h))
+        page_note = f" (page {page_i})" if page_i else ""
+        size_label = _as_str(getattr(inference, "sample_size_label", ""))
+        _plot_participant_null_forest(
+            ax,
+            chunk,
+            inference,
+            title=(
+                f"{dataset_id}: biological-participant Δ vs circular-shift null"
+                f"{page_note}"
+            ),
+            panel_label=None,
+            ylabel="Participant",
+        )
+        fig.suptitle(
+            "Figure 3 supplement — participant null forests",
+            fontsize=FS_SUPTITLE - 2,
+            fontweight="bold",
+            y=0.995,
+        )
+        fig.text(
+            0.5,
+            0.01,
+            (
+                f"{size_label}; each row = one unique biological participant. "
+                "Main Panel A aggregates to one row per dataset."
+            ),
+            ha="center",
+            va="bottom",
+            fontsize=FS_TICK - 2,
+            color=PALETTE["dark_gray"],
+        )
+        fig.subplots_adjust(left=0.18, right=0.96, top=0.88, bottom=0.10)
+        stem = (
+            f"{FIGURE3_PARTICIPANT_FOREST_STEM}_{dataset_id}"
+            if len(page_payloads) == 1
+            else f"{FIGURE3_PARTICIPANT_FOREST_STEM}_{dataset_id}_p{page_idx:02d}"
+        )
+        trio = save_figure_trio(fig, output_dir, stem)
+        trios.append(trio)
+        plt.close(fig)
+
+    panel_sources.append(
+        FigurePanelSource(
+            figure_id="figure3_supplement",
+            panel_id="participant_null_forests",
+            title="Biological-participant null forests by dataset",
+            endpoint_name=ENDPOINT_ZLPI,
+            duration_s=PRIMARY_DURATION_S,
+            input_tables=[],
+            source_data_csv=str(source_dir / "figure3_panel_a_participant_deltas.csv"),
+            analysis_keys=[
+                "role=supplement",
+                "unit=biological_participant",
+                f"max_rows_per_page={FIGURE3_PARTICIPANT_FOREST_MAX_ROWS}",
+            ],
+            notes=(
+                "Supplemental participant forests faceted by dataset and paginated "
+                f"when n_participants > {FIGURE3_PARTICIPANT_FOREST_MAX_ROWS}. "
+                + INDEPENDENT_UNIT_VERDICT
+            ),
+        )
+    )
+    return trios, source_paths, panel_sources
+
+
+
+def _render_figure3_null_supplement(
+    null_rows: Sequence[Mapping[str, object]],
+    output_dir: Path,
+    *,
+    secondary_records: Sequence[Mapping[str, object]],
+) -> tuple[tuple[Path, Path, Path], list[Path], list[FigurePanelSource]]:
+    """Supplemental nested scatter + secondary-null participant forests."""
+    source_dir = output_dir / "source_data"
+    source_paths: list[Path] = []
+    panel_sources: list[FigurePanelSource] = []
+    null_type_styles: dict[str, tuple[str, str]] = {
+        "circular_shift": (PALETTE["blue"], "o"),
+        "phase_randomization": (PALETTE["orange"], "s"),
+        "block_shuffle": (PALETTE["green"], "^"),
+        "cross_subject_mismatch": (PALETTE["vermillion"], "D"),
+        "ar1_innovations": (PALETTE["purple"], "v"),
+    }
+    scatter_source = []
+    for row in null_rows:
+        if _as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
+            continue
+        if _as_int(row.get("duration_s"), PRIMARY_DURATION_S) != PRIMARY_DURATION_S:
+            continue
+        if (
+            _as_str(row.get("power_representation"), PRIMARY_REPRESENTATION).casefold()
+            != PRIMARY_REPRESENTATION
+        ):
+            continue
+        scatter_source.append(
+            {
+                "dataset_id": _as_str(row.get("dataset_id")),
+                "subject_id": _as_str(row.get("subject_id")),
+                "observation_id": _as_str(row.get("observation_id")),
+                "condition": _as_str(row.get("condition")),
+                "band": _as_str(row.get("band")),
+                "power_representation": PRIMARY_REPRESENTATION,
+                "null_type": _as_str(row.get("null_type")),
+                "endpoint_name": ENDPOINT_ZLPI,
+                "n_surrogates_requested": _as_int(row.get("n_surrogates_requested")),
+                "n_surrogates_finite": _as_int(row.get("n_surrogates_finite")),
+                "observed_endpoint_index": _as_float(row.get("observed_endpoint_index")),
+                "null_mean": _as_float(row.get("null_mean")),
+                "empirical_p": _as_float(row.get("empirical_p")),
+                "effect_size_surrogate_z": _as_float(row.get("effect_size_surrogate_z")),
+                "diagnostic_label": FIGURE3_SUPPLEMENT_LABEL,
+            }
+        )
+
+    _configure_publication_style()
+    fig = plt.figure(figsize=(14.0, 14.0), constrained_layout=False)
+    gs = fig.add_gridspec(3, 2, hspace=0.45, wspace=0.40, height_ratios=[1.15, 1.0, 1.0])
+
+    ax_scatter = fig.add_subplot(gs[0, :])
+    if scatter_source:
+        observed = np.asarray(
+            [r["observed_endpoint_index"] for r in scatter_source], dtype=float
+        )
+        null_mean = np.asarray([r["null_mean"] for r in scatter_source], dtype=float)
+        for null_type, (color, marker) in null_type_styles.items():
+            mask = np.asarray(
+                [r["null_type"] == null_type for r in scatter_source], dtype=bool
+            )
+            if not np.any(mask):
+                continue
+            ax_scatter.scatter(
+                null_mean[mask],
+                observed[mask],
+                s=SCATTER_SIZE,
+                alpha=0.65,
+                color=color,
+                marker=marker,
+                edgecolors=PALETTE["dark_gray"],
+                linewidths=0.5,
+                zorder=2,
+                label=null_type.replace("_", " "),
+            )
+        lims = [
+            float(np.nanmin([null_mean.min(), observed.min()])),
+            float(np.nanmax([null_mean.max(), observed.max()])),
+        ]
+        ax_scatter.plot(lims, lims, color=REF_LINE_COLOR, ls="--", lw=1.0, zorder=1)
+        ax_scatter.legend(
+            loc="lower right",
+            fontsize=FS_LEGEND - 2,
+            frameon=True,
+            title="null type",
+        )
+    else:
+        _mark_empty_panel(
+            ax_scatter,
+            MSG_NOT_INCLUDED,
+            xlabel=f"Null mean endpoint ({ZLPI_METRIC})",
+            ylabel=f"Observed {_endpoint_display(ENDPOINT_ZLPI)} ({ZLPI_METRIC})",
+        )
+    ax_scatter.set_xlabel(f"Null mean endpoint ({ZLPI_METRIC})", fontsize=FS_AXIS)
+    ax_scatter.set_ylabel(
+        f"Observed {_endpoint_display(ENDPOINT_ZLPI)} ({ZLPI_METRIC})",
+        fontsize=FS_AXIS,
+    )
+    _style_axes(ax_scatter)
+    _set_panel_title(ax_scatter, FIGURE3_SUPPLEMENT_LABEL)
+    _add_panel_label(ax_scatter, "S1")
+    ax_scatter.text(
+        0.01,
+        0.98,
+        (
+            "Each point = observation × band × null type (nested).\n"
+            "Not independent; no inference from density / diagonal.\n"
+            "Confirmatory inference: participant-level Δ elsewhere."
+        ),
+        transform=ax_scatter.transAxes,
+        va="top",
+        ha="left",
+        fontsize=FS_TICK - 2,
+        color=PALETTE["dark_gray"],
+    )
+
+    # Secondary null forests at theta (participant-level), excluding primary.
+    for idx, null_type in enumerate(SECONDARY_NULL_TYPES):
+        row = 1 + idx // 2
+        col = idx % 2
+        ax = fig.add_subplot(gs[row, col])
+        participants, inference, _matched = analyze_null_slice(
+            null_rows,
+            band=PRIMARY_BAND,
+            null_type=null_type,
+            is_primary_slice=False,
+        )
+        _plot_participant_null_forest(
+            ax,
+            participants,
+            inference,
+            title=f"Secondary: {null_type.replace('_', ' ')} (theta)",
+            panel_label=f"S{idx + 2}",
+        )
+
+    fig.suptitle(
+        "Figure 3 supplement — null diagnostics (not confirmatory Panel A)",
+        fontsize=FS_SUPTITLE - 2,
+        fontweight="bold",
+        y=0.98,
+    )
+    fig.subplots_adjust(left=0.12, right=0.97, top=0.92, bottom=0.06, wspace=0.45, hspace=0.42)
+    trio = save_figure_trio(fig, output_dir, FIGURE3_SUPPLEMENT_STEM)
+
+    scatter_csv = source_dir / "figure3_supplement_nested_null_scatter.csv"
+    write_source_csv(
+        scatter_csv,
+        scatter_source,
+        (
+            "dataset_id",
+            "subject_id",
+            "observation_id",
+            "condition",
+            "band",
+            "power_representation",
+            "null_type",
+            "endpoint_name",
+            "n_surrogates_requested",
+            "n_surrogates_finite",
+            "observed_endpoint_index",
+            "null_mean",
+            "empirical_p",
+            "effect_size_surrogate_z",
+            "diagnostic_label",
+        ),
+    )
+    source_paths.append(scatter_csv)
+    panel_sources.append(
+        FigurePanelSource(
+            figure_id="figure3_supplement",
+            panel_id="nested_null_scatter_diagnostic",
+            title=FIGURE3_SUPPLEMENT_LABEL,
+            endpoint_name=ENDPOINT_ZLPI,
+            duration_s=PRIMARY_DURATION_S,
+            input_tables=[],
+            source_data_csv=str(scatter_csv),
+            analysis_keys=[
+                "role=supplement_diagnostic",
+                "endpoint=zlpi",
+                f"duration={PRIMARY_DURATION_S}",
+                f"representation={PRIMARY_REPRESENTATION}",
+                "not_for_confirmatory_inference=true",
+            ],
+            notes=(
+                "Descriptive nested-observation diagnostic. Each point is "
+                "observation×band×null type; points are not independent; no "
+                "inference from density or proportion above y=x. All statistical "
+                "inference comes from participant-level observed-minus-null Δ."
+            ),
+        )
+    )
+    # Retain secondary_records reference in notes via export already written by caller.
+    _ = secondary_records
+    return trio, source_paths, panel_sources
+
+
 def render_figure3(
     inputs: Mapping[str, Path | None],
     output_dir: Path,
@@ -1565,6 +2376,7 @@ def render_figure3(
     null_rows = read_csv_rows(inputs.get("null_subject"))
     modality = read_csv_rows(inputs.get("modality"))
     duration = read_csv_rows(inputs.get("duration_sensitivity"))
+    paired_rows = read_csv_rows(inputs.get("paired_contrasts"))
     sensitivity = read_csv_rows(inputs.get("specification_matrix")) or read_csv_rows(
         inputs.get("sensitivity")
     )
@@ -1574,179 +2386,516 @@ def render_figure3(
     source_paths: list[Path] = []
 
     _configure_publication_style()
-    fig = plt.figure(figsize=(13.5, 10.5), constrained_layout=False)
-    gs = fig.add_gridspec(2, 2, hspace=0.40, wspace=0.38)
+    fig = plt.figure(figsize=FIGURE3_FIGSIZE, constrained_layout=False)
+    gs = fig.add_gridspec(2, 2, hspace=FIGURE3_SUBPLOT_ADJUST["hspace"], wspace=FIGURE3_SUBPLOT_ADJUST["wspace"])
 
-    # Panel A: observed vs null surrogate markers.
+    # Panel A: dataset-level forest (biological-participant mean Δ ± CI).
     ax_a = fig.add_subplot(gs[0, 0])
-    null_source = []
-    for row in null_rows:
-        if _as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
-            continue
-        if _as_int(row.get("duration_s"), 240) != 240:
-            continue
-        null_source.append(
-            {
-                "observation_id": _as_str(row.get("observation_id")),
-                "band": _as_str(row.get("band")),
-                "null_type": _as_str(row.get("null_type")),
-                "endpoint_name": ENDPOINT_ZLPI,
-                "observed_endpoint_index": _as_float(row.get("observed_endpoint_index")),
-                "null_mean": _as_float(row.get("null_mean")),
-                "empirical_p": _as_float(row.get("empirical_p")),
-                "effect_size_surrogate_z": _as_float(row.get("effect_size_surrogate_z")),
-            }
-        )
-    if null_source:
-        observed = np.asarray(
-            [r["observed_endpoint_index"] for r in null_source], dtype=float
-        )
-        null_mean = np.asarray([r["null_mean"] for r in null_source], dtype=float)
-        ax_a.scatter(
-            null_mean,
-            observed,
-            s=SCATTER_SIZE,
-            alpha=0.75,
-            color=_band_color("theta"),
-            marker="o",
-            edgecolors=PALETTE["dark_gray"],
-            linewidths=0.6,
-            zorder=2,
-        )
-        lims = [
-            np.nanmin([null_mean.min(), observed.min()]),
-            np.nanmax([null_mean.max(), observed.max()]),
-        ]
-        ax_a.plot(lims, lims, color=REF_LINE_COLOR, ls="--", lw=1.0, zorder=1)
-    else:
-        _mark_empty_panel(
-            ax_a,
-            MSG_NOT_INCLUDED,
-            xlabel=f"Null mean endpoint ({ZLPI_METRIC})",
-            ylabel=f"Observed {_endpoint_display(ENDPOINT_ZLPI)} ({ZLPI_METRIC})",
-            xlim=(-0.5, 0.5),
-            ylim=(-0.5, 0.5),
-        )
-    ax_a.set_xlabel(f"Null mean endpoint ({ZLPI_METRIC})", fontsize=FS_AXIS, labelpad=8)
-    ax_a.set_ylabel(
-        f"Observed {_endpoint_display(ENDPOINT_ZLPI)} ({ZLPI_METRIC})",
-        fontsize=FS_AXIS,
-        labelpad=10,
+    primary_analysis = analyze_null_slice_full(
+        null_rows,
+        band=PRIMARY_BAND,
+        null_type=PRIMARY_NULL_TYPE,
+        is_primary_slice=True,
     )
-    _style_axes(ax_a)
-    _set_panel_title(ax_a, f"Observed vs surrogate nulls ({_endpoint_display(ENDPOINT_ZLPI)})")
-    _add_panel_label(ax_a, "A")
-    null_csv = source_dir / "figure3_panel_a_nulls.csv"
+    primary_participants = primary_analysis.participants
+    primary_inference = (
+        primary_analysis.dataset_inferences[0]
+        if len(primary_analysis.dataset_inferences) == 1
+        else primary_analysis.pooled_inference
+    )
+    primary_matched = primary_analysis.matched
+    _plot_dataset_null_forest(
+        ax_a,
+        primary_analysis.dataset_inferences,
+        title=(
+            "Dataset Δ vs circular-shift null\n"
+            f"(theta {_endpoint_display(ENDPOINT_ZLPI)}, D{PRIMARY_DURATION_S})"
+        ),
+        panel_label="A",
+    )
+
+    delta_rows = [
+        {
+            "dataset_id": p.dataset_id,
+            "participant_id": p.participant_id,
+            "subject_id": p.participant_id,
+            "participant_unit_id": p.participant_unit_id,
+            "display_label": p.display_label,
+            "band": p.band,
+            "null_type": p.null_type,
+            "power_representation": PRIMARY_REPRESENTATION,
+            "duration_s": PRIMARY_DURATION_S,
+            "endpoint_name": ENDPOINT_ZLPI,
+            "n_observations": p.n_observations,
+            "n_conditions": p.n_conditions,
+            "n_sessions": p.n_sessions,
+            "mean_observed": p.mean_observed,
+            "mean_null": p.mean_null,
+            "delta_p": p.delta_p,
+            "n_surrogates_requested_min": p.n_surrogates_requested_min,
+            "n_surrogates_requested_max": p.n_surrogates_requested_max,
+        }
+        for p in primary_participants
+    ]
+    delta_csv = source_dir / "figure3_panel_a_participant_deltas.csv"
     write_source_csv(
-        null_csv,
-        null_source,
+        delta_csv,
+        delta_rows,
         (
-            "observation_id",
+            "dataset_id",
+            "participant_id",
+            "subject_id",
+            "participant_unit_id",
+            "display_label",
             "band",
             "null_type",
+            "power_representation",
+            "duration_s",
+            "endpoint_name",
+            "n_observations",
+            "n_conditions",
+            "n_sessions",
+            "mean_observed",
+            "mean_null",
+            "delta_p",
+            "n_surrogates_requested_min",
+            "n_surrogates_requested_max",
+        ),
+    )
+    source_paths.append(delta_csv)
+
+    condition_rows = [
+        {
+            "dataset_id": c.dataset_id,
+            "participant_id": c.participant_id,
+            "participant_unit_id": c.participant_unit_id,
+            "session_id": c.session_id,
+            "condition": c.condition,
+            "display_label": c.display_label,
+            "band": c.band,
+            "null_type": c.null_type,
+            "n_observations": c.n_observations,
+            "mean_observed": c.mean_observed,
+            "mean_null": c.mean_null,
+            "delta_pc": c.delta_pc,
+            "n_surrogates_requested_min": c.n_surrogates_requested_min,
+            "n_surrogates_requested_max": c.n_surrogates_requested_max,
+        }
+        for c in primary_analysis.condition_deltas
+    ]
+    condition_csv = source_dir / "figure3_panel_a_participant_condition_deltas.csv"
+    write_source_csv(
+        condition_csv,
+        condition_rows,
+        (
+            "dataset_id",
+            "participant_id",
+            "participant_unit_id",
+            "session_id",
+            "condition",
+            "display_label",
+            "band",
+            "null_type",
+            "n_observations",
+            "mean_observed",
+            "mean_null",
+            "delta_pc",
+            "n_surrogates_requested_min",
+            "n_surrogates_requested_max",
+        ),
+    )
+    source_paths.append(condition_csv)
+
+    dataset_inference_rows = [inf.as_dict() for inf in primary_analysis.dataset_inferences]
+    dataset_csv = source_dir / "figure3_panel_a_dataset_inference.csv"
+    write_source_csv(
+        dataset_csv,
+        dataset_inference_rows,
+        tuple(dataset_inference_rows[0].keys())
+        if dataset_inference_rows
+        else ("dataset_id", "n_participants", "mean_delta"),
+    )
+    source_paths.append(dataset_csv)
+
+    count_rows = []
+    for inf in primary_analysis.dataset_inferences:
+        count_rows.append(
+            {
+                "dataset_id": inf.dataset_id,
+                "n_biological_participants": inf.n_participants,
+                "n_participant_conditions": inf.n_participant_conditions,
+                "n_observations": inf.n_observations,
+                "sample_size_label": inf.sample_size_label,
+                "pooled_estimate_plotted": False,
+            }
+        )
+    for p in primary_participants:
+        count_rows.append(
+            {
+                "dataset_id": p.dataset_id,
+                "participant_id": p.participant_id,
+                "participant_unit_id": p.participant_unit_id,
+                "display_label": p.display_label,
+                "n_biological_participants": 1,
+                "n_participant_conditions": p.n_conditions,
+                "n_observations": p.n_observations,
+                "n_sessions": p.n_sessions,
+                "sample_size_label": "",
+                "pooled_estimate_plotted": False,
+            }
+        )
+    counts_csv = source_dir / "figure3_panel_a_unit_counts.csv"
+    write_source_csv(
+        counts_csv,
+        count_rows,
+        (
+            "dataset_id",
+            "participant_id",
+            "participant_unit_id",
+            "display_label",
+            "n_biological_participants",
+            "n_participant_conditions",
+            "n_observations",
+            "n_sessions",
+            "sample_size_label",
+            "pooled_estimate_plotted",
+        ),
+    )
+    source_paths.append(counts_csv)
+
+    unit_verdict_csv = source_dir / "figure3_panel_a_independent_unit_verdict.csv"
+    write_source_csv(
+        unit_verdict_csv,
+        independent_unit_verdict_rows(),
+        ("dataset_id", "independent_unit", "example_raw_subject_ids", "verdict"),
+    )
+    source_paths.append(unit_verdict_csv)
+
+    inference_row = {
+        **primary_inference.as_dict(),
+        "pooled_estimate_plotted": False,
+        "alternative_claim": (
+            "Does observed theta ZLPI systematically exceed the circular-shift "
+            "null at the biological-participant level within each dataset?"
+        ),
+    }
+    inference_csv = source_dir / "figure3_panel_a_inference.csv"
+    write_source_csv(
+        inference_csv,
+        [inference_row],
+        tuple(inference_row.keys()),
+    )
+    source_paths.append(inference_csv)
+
+    loo_rows = leave_one_participant_out(
+        primary_participants,
+        band=PRIMARY_BAND,
+        null_type=PRIMARY_NULL_TYPE,
+    )
+    loo_csv = source_dir / "figure3_panel_a_leave_one_out.csv"
+    write_source_csv(
+        loo_csv,
+        loo_rows,
+        (
+            "omitted_participant_unit_id",
+            "omitted_dataset_id",
+            "omitted_participant_id",
+            "omitted_subject_id",
+            "omitted_display_label",
+            "omitted_delta_p",
+            "n_participants_remaining",
+            "mean_delta",
+            "ci_low",
+            "ci_high",
+            "p_value_two_sided",
+            "interpretation",
+            "sample_size_label",
+        ),
+    )
+    source_paths.append(loo_csv)
+
+    secondary_records = secondary_band_null_fdr_table(null_rows)
+    secondary_csv = source_dir / "figure3_secondary_nulls_fdr.csv"
+    write_source_csv(
+        secondary_csv,
+        secondary_records,
+        tuple(secondary_records[0].keys()) if secondary_records else ("band", "null_type"),
+    )
+    source_paths.append(secondary_csv)
+
+    # Observation-level matched rows for the primary slice (audit trail).
+    matched_csv = source_dir / "figure3_panel_a_matched_observations.csv"
+    write_source_csv(
+        matched_csv,
+        [
+            {
+                "dataset_id": m.dataset_id,
+                "subject_id": m.subject_id,
+                "participant_id": m.participant_id,
+                "participant_unit_id": m.participant_unit_id,
+                "session_id": m.session_id,
+                "observation_id": m.observation_id,
+                "condition": m.condition,
+                "modality": m.modality,
+                "band": m.band,
+                "null_type": m.null_type,
+                "power_representation": m.power_representation,
+                "duration_s": m.duration_s,
+                "endpoint_name": m.endpoint_name,
+                "observed_endpoint_index": m.observed_endpoint_index,
+                "null_mean": m.null_mean,
+                "delta_obs_minus_null": m.delta_obs_minus_null,
+                "n_surrogates_requested": m.n_surrogates_requested,
+                "rng_seed_u64": m.rng_seed_u64,
+            }
+            for m in primary_matched
+        ],
+        (
+            "dataset_id",
+            "subject_id",
+            "participant_id",
+            "participant_unit_id",
+            "session_id",
+            "observation_id",
+            "condition",
+            "modality",
+            "band",
+            "null_type",
+            "power_representation",
+            "duration_s",
             "endpoint_name",
             "observed_endpoint_index",
             "null_mean",
-            "empirical_p",
-            "effect_size_surrogate_z",
+            "delta_obs_minus_null",
+            "n_surrogates_requested",
+            "rng_seed_u64",
         ),
     )
-    source_paths.append(null_csv)
+    source_paths.append(matched_csv)
+
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure3",
-            panel_id="null_scatter",
-            title="Observed vs null endpoint indices",
+            panel_id="null_dataset_forest",
+            title="Dataset-level observed − circular-shift null Δ",
             endpoint_name=ENDPOINT_ZLPI,
-            duration_s=240,
+            duration_s=PRIMARY_DURATION_S,
             input_tables=[str(inputs.get("null_subject") or "")],
-            source_data_csv=str(null_csv),
-            analysis_keys=["endpoint=zlpi", "duration=240"],
-            notes="Diagonal = equivalence of observed and null mean.",
+            source_data_csv=str(dataset_csv),
+            analysis_keys=[
+                "endpoint=zlpi",
+                f"duration={PRIMARY_DURATION_S}",
+                f"representation={PRIMARY_REPRESENTATION}",
+                f"band={PRIMARY_BAND}",
+                f"null_type={PRIMARY_NULL_TYPE}",
+                "unit=biological_participant",
+                "aggregation=dataset_mean_of_participant_deltas",
+                "pooled_estimate_plotted=false",
+                f"run_class={primary_inference.run_class}",
+                f"interpretation={primary_inference.interpretation}",
+            ],
+            notes=(
+                "Primary confirmatory null panel. One row per dataset = "
+                "unweighted mean of biological-participant Δ_p with Student-t "
+                "95% CI (df=n_participants−1). Annotated n = unique biological "
+                "participants. Cross-dataset pooled estimate is not plotted "
+                "(no prespecified Panel A meta-analytic weighting). "
+                + INDEPENDENT_UNIT_VERDICT
+            ),
         )
     )
 
-    # Panel B: duration robustness with endpoint labels separated.
+    # Panel B: participant-level duration sensitivity (equal participant weight).
     ax_b = fig.add_subplot(gs[0, 1])
-    duration_source = []
     endpoint_styles = {
-        ENDPOINT_ZLPI: ("o", "-", PALETTE["blue"]),
-        ENDPOINT_MID_WINDOW_PROXIMAL_INDEX: ("s", "--", PALETTE["orange"]),
-        ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX: ("s", "-.", PALETTE["green"]),
+        ENDPOINT_ZLPI: ("o", "-"),
+        ENDPOINT_MID_WINDOW_PROXIMAL_INDEX: ("s", "--"),
+        ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX: ("^", "-."),
     }
-    plotted_duration = False
-    for row in duration:
-        endpoint = _as_str(row.get("endpoint_name"))
-        duration_s = _as_int(row.get("duration_s"))
-        effect = _as_float(row.get("effect_estimate"))
-        if not math.isfinite(effect):
-            continue
-        duration_source.append(
+    if paired_rows:
+        duration_source, participant_duration_rows = (
+            participant_duration_sensitivity_effects(paired_rows)
+        )
+    else:
+        # Fall back to contrast-cell table only if paired contrasts unavailable.
+        duration_source = [
             {
-                "duration_s": duration_s,
-                "endpoint_name": endpoint,
+                "duration_s": _as_int(row.get("duration_s")),
+                "endpoint_name": _as_str(row.get("endpoint_name")),
                 "band": _as_str(row.get("band")),
-                "effect_estimate": effect,
+                "dataset_id": _as_str(row.get("dataset_id")),
+                "contrast_id": _as_str(row.get("contrast_id")),
+                "effect_estimate": _as_float(row.get("effect_estimate")),
                 "ci_low": _as_float(row.get("ci_low")),
                 "ci_high": _as_float(row.get("ci_high")),
                 "n": _as_int(row.get("n")),
                 "is_primary_analysis": _as_str(row.get("is_primary_analysis")),
                 "can_rescue_primary": False,
+                "estimand": "contrast_cell_fallback",
+                "unit": "contrast_cell",
+                "notes": _as_str(row.get("notes")),
             }
-        )
-        marker, linestyle, color = endpoint_styles.get(endpoint, ("x", ":", "#999999"))
-        lo = _as_float(row.get("ci_low"))
-        hi = _as_float(row.get("ci_high"))
-        yerr = [[effect - lo], [hi - effect]] if math.isfinite(lo) and math.isfinite(hi) else None
-        ax_b.errorbar(
-            duration_s,
-            effect,
-            yerr=yerr,
-            fmt=marker,
-            color=color,
-            linestyle=linestyle,
-            markersize=MARKER_SIZE,
-            capsize=4,
-            elinewidth=LINE_WIDTH,
-            markeredgecolor=PALETTE["dark_gray"],
-            markeredgewidth=0.6,
-            alpha=0.9,
-        )
-        plotted_duration = True
+            for row in duration
+            if math.isfinite(_as_float(row.get("effect_estimate")))
+        ]
+        participant_duration_rows = []
+
+    plotted_duration = False
+    clipped_swpi = False
+    for band in BAND_ORDER:
+        band_rows = [
+            r for r in duration_source if _as_str(r.get("band")).casefold() == band
+        ]
+        if not band_rows:
+            continue
+        for row in band_rows:
+            endpoint = _as_str(row.get("endpoint_name"))
+            if endpoint == ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX and _as_int(
+                row.get("duration_s")
+            ) == 60:
+                lo = _as_float(row.get("ci_low"))
+                hi = _as_float(row.get("ci_high"))
+                if (math.isfinite(hi) and hi > 0.25) or (
+                    math.isfinite(lo) and lo < -0.25
+                ):
+                    clipped_swpi = True
+            if math.isfinite(_as_float(row.get("effect_estimate"))):
+                plotted_duration = True
+
     if plotted_duration:
+        ylim_rows = [
+            r
+            for r in duration_source
+            if not (
+                _as_str(r.get("endpoint_name")) == ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX
+                and _as_int(r.get("duration_s")) == 60
+            )
+        ]
+        span_vals: list[float] = []
+        for row in ylim_rows:
+            for key in ("effect_estimate", "ci_low", "ci_high"):
+                val = _as_float(row.get(key))
+                if math.isfinite(val):
+                    span_vals.append(abs(val))
+        y_span = max(span_vals) if span_vals else 0.15
+        y_span = max(y_span, 0.12)
+        y_lo, y_hi = -1.15 * y_span, 1.15 * y_span
+
+        for band in BAND_ORDER:
+            band_rows = [
+                r for r in duration_source if _as_str(r.get("band")).casefold() == band
+            ]
+            if not band_rows:
+                continue
+            band_rows = sorted(band_rows, key=lambda r: _as_int(r.get("duration_s")))
+            for row in band_rows:
+                endpoint = _as_str(row.get("endpoint_name"))
+                effect = _as_float(row.get("effect_estimate"))
+                if not math.isfinite(effect):
+                    continue
+                marker, _linestyle = endpoint_styles.get(endpoint, ("x", ":"))
+                color = _band_color(band)
+                lo = _as_float(row.get("ci_low"))
+                hi = _as_float(row.get("ci_high"))
+                x_plot = _band_duration_x(_as_int(row.get("duration_s")), band)
+                _clipped_vertical_errorbar(
+                    ax_b,
+                    x_plot,
+                    effect,
+                    lo,
+                    hi,
+                    y_lo=y_lo,
+                    y_hi=y_hi,
+                    fmt=marker,
+                    color=color,
+                    linestyle="none",
+                    markersize=MARKER_SIZE,
+                    capsize=3,
+                    elinewidth=1.4,
+                    markeredgecolor=PALETTE["dark_gray"],
+                    markeredgewidth=0.6,
+                    alpha=0.92,
+                )
+
         _ref_hline(ax_b, 0.0)
+        ax_b.set_xlim(*FIGURE3_DURATION_XLIM)
         ax_b.set_xticks([60, 120, 180, 240])
-        ax_b.set_xlabel("Duration (s)", fontsize=FS_AXIS)
+        ax_b.set_ylim(y_lo, y_hi)
+        ax_b.set_xlabel("Duration (s)", fontsize=FS_AXIS - 1)
         ax_b.set_ylabel(
-            f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
-            fontsize=FS_AXIS,
+            f"Participant mean Δ ({Z_YLABEL})",
+            fontsize=FS_AXIS - 1,
         )
         _style_axes(ax_b)
-        legend_handles = []
-        legend_labels = []
-        for endpoint, (marker, linestyle, color) in endpoint_styles.items():
+        band_handles = []
+        band_labels = []
+        for band in BAND_ORDER:
+            if not any(_as_str(r.get("band")).casefold() == band for r in duration_source):
+                continue
+            (handle,) = ax_b.plot(
+                [],
+                [],
+                marker="o",
+                color=_band_color(band),
+                ls="none",
+                markersize=MARKER_SIZE,
+                markeredgecolor=PALETTE["dark_gray"],
+                markeredgewidth=0.6,
+            )
+            band_handles.append(handle)
+            band_labels.append(_band_display(band))
+        index_handles = []
+        index_labels = []
+        for endpoint, (marker, _linestyle) in endpoint_styles.items():
+            if not any(
+                _as_str(r.get("endpoint_name")) == endpoint for r in duration_source
+            ):
+                continue
             (handle,) = ax_b.plot(
                 [],
                 [],
                 marker=marker,
-                color=color,
-                ls=linestyle,
+                color=PALETTE["dark_gray"],
+                ls="none",
                 markersize=MARKER_SIZE,
                 markeredgecolor=PALETTE["dark_gray"],
                 markeredgewidth=0.6,
-                lw=LINE_WIDTH,
             )
-            legend_handles.append(handle)
-            legend_labels.append(_endpoint_display(endpoint))
-        _legend_inside(ax_b, legend_handles, legend_labels, loc="upper right")
+            index_handles.append(handle)
+            index_labels.append(_endpoint_display(endpoint))
+        if band_handles and index_handles:
+            _legend_dual_encoding(
+                ax_b,
+                band_handles,
+                band_labels,
+                index_handles,
+                index_labels,
+                loc="upper right",
+            )
+        n_units = max((_as_int(r.get("n")) for r in duration_source), default=0)
+        panel_b_footnote = (
+            f"{FIGURE3_PANEL_B_FOOTNOTE_SHORT}\n"
+            f"n = {n_units} participants"
+            + (
+                "; † D60 SWPI CIs clipped (source data)"
+                if clipped_swpi
+                else ""
+            )
+        )
     else:
+        panel_b_footnote = ""
         _mark_empty_panel(
             ax_b,
             MSG_NOT_INCLUDED,
             xlabel="Duration (s)",
-            ylabel=f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
+            ylabel=f"Participant mean Δ ({Z_YLABEL}; Student-t 95% CI)",
         )
-    _set_panel_title(ax_b, "Duration sensitivity")
+    _set_panel_title(
+        ax_b,
+        "Duration sensitivity\n(participant-level; band × index)",
+        fontsize=FS_PANEL_TITLE - 2,
+        pad=10,
+    )
     _add_panel_label(ax_b, "B")
     duration_csv = source_dir / "figure3_panel_b_duration.csv"
     write_source_csv(
@@ -1756,26 +2905,104 @@ def render_figure3(
             "duration_s",
             "endpoint_name",
             "band",
+            "dataset_id",
+            "contrast_id",
             "effect_estimate",
             "ci_low",
             "ci_high",
             "n",
             "is_primary_analysis",
             "can_rescue_primary",
+            "estimand",
+            "unit",
+            "notes",
         ),
     )
     source_paths.append(duration_csv)
+    participant_csv = source_dir / "figure3_panel_b_participant_estimates.csv"
+    write_source_csv(
+        participant_csv,
+        participant_duration_rows,
+        (
+            "dataset_id",
+            "participant_id",
+            "participant_unit_id",
+            "band",
+            "duration_s",
+            "endpoint_name",
+            "power_representation",
+            "n_contrasts",
+            "mean_delta",
+            "is_primary_analysis",
+            "can_rescue_primary",
+            "control_id",
+        ),
+    )
+    source_paths.append(participant_csv)
+    # Retain contrast-cell duration_sensitivity as diagnostic export when present.
+    if duration:
+        cell_csv = source_dir / "figure3_panel_b_contrast_cells_diagnostic.csv"
+        write_source_csv(
+            cell_csv,
+            [
+                {
+                    "duration_s": _as_int(row.get("duration_s")),
+                    "endpoint_name": _as_str(row.get("endpoint_name")),
+                    "band": _as_str(row.get("band")),
+                    "dataset_id": _as_str(row.get("dataset_id")),
+                    "contrast_id": _as_str(row.get("contrast_id")),
+                    "effect_estimate": _as_float(row.get("effect_estimate")),
+                    "ci_low": _as_float(row.get("ci_low")),
+                    "ci_high": _as_float(row.get("ci_high")),
+                    "n": _as_int(row.get("n")),
+                    "diagnostic_label": "contrast-cell Student-t (not Panel B estimand)",
+                }
+                for row in duration
+                if math.isfinite(_as_float(row.get("effect_estimate")))
+            ],
+            (
+                "duration_s",
+                "endpoint_name",
+                "band",
+                "dataset_id",
+                "contrast_id",
+                "effect_estimate",
+                "ci_low",
+                "ci_high",
+                "n",
+                "diagnostic_label",
+            ),
+        )
+        source_paths.append(cell_csv)
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure3",
             panel_id="duration_sensitivity",
-            title="Duration robustness with separated endpoints",
+            title="Participant-level duration sensitivity",
             endpoint_name="mixed_labeled",
             duration_s=0,
-            input_tables=[str(inputs.get("duration_sensitivity") or "")],
+            input_tables=[
+                str(inputs.get("paired_contrasts") or ""),
+                str(inputs.get("duration_sensitivity") or ""),
+            ],
             source_data_csv=str(duration_csv),
-            analysis_keys=["zlpi", "mwpi", "swpi", "can_rescue_primary=false"],
-            notes="Markers encode endpoint family; primary D240 ZLPI is never replaced.",
+            analysis_keys=[
+                "zlpi",
+                "mwpi",
+                "swpi",
+                "can_rescue_primary=false",
+                "unit=participant",
+                "estimand=mean_of_participant_means",
+                "absolute_estimates_not_equivalence=true",
+            ],
+            notes=(
+                f"{FIGURE3_PANEL_B_ENCODING_NOTE}. "
+                "Points = unweighted mean of participant-level mean Δ at each "
+                "duration×band×endpoint cell (contrasts averaged within participant "
+                "first). Student-t CI uses n_participants. Absolute estimates only — "
+                "overlapping CIs do not imply equivalence. D120/D60 are MWPI/SWPI "
+                "(not ZLPI); cannot rescue primary D240 ZLPI."
+            ),
         )
     )
 
@@ -1809,7 +3036,7 @@ def render_figure3(
         ax_c.set_xlabel(f"ECG − PPG endpoint difference ({ZLPI_METRIC})", fontsize=FS_AXIS)
         ax_c.set_ylabel("Count", fontsize=FS_AXIS)
         _style_axes(ax_c)
-        _set_panel_title(ax_c, f"Matched ECG−PPG (n = {int(np.isfinite(vals).sum())})")
+        _set_panel_title(ax_c, f"Matched ECG−PPG (n = {int(np.isfinite(vals).sum())})", fontsize=FS_PANEL_TITLE - 2, pad=10)
         _add_panel_label(ax_c, "C")
     else:
         _mark_empty_panel(
@@ -1820,7 +3047,7 @@ def render_figure3(
             xlim=(-1.0, 1.0),
             ylim=(0.0, 1.0),
         )
-        _set_panel_title(ax_c, "Matched ECG−PPG")
+        _set_panel_title(ax_c, "Matched ECG−PPG", fontsize=FS_PANEL_TITLE - 2, pad=10)
         _add_panel_label(ax_c, "C")
     modality_csv = source_dir / "figure3_panel_c_modality.csv"
     write_source_csv(
@@ -1946,7 +3173,7 @@ def render_figure3(
             xlabel=f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
             ylabel="Spec.",
         )
-    _set_panel_title(ax_d, "Specification matrix")
+    _set_panel_title(ax_d, "Specification matrix", fontsize=FS_PANEL_TITLE - 2, pad=10)
     _add_panel_label(ax_d, "D")
     spec_csv = source_dir / "figure3_panel_d_specification.csv"
     write_source_csv(
@@ -1983,9 +3210,104 @@ def render_figure3(
         )
     )
 
-    fig.suptitle(FIGURE3_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.98)
-    fig.subplots_adjust(left=0.12, right=0.97, top=0.88, bottom=0.10, wspace=0.50, hspace=0.42)
+    fig.suptitle(FIGURE3_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.985)
+    fig.subplots_adjust(**FIGURE3_SUBPLOT_ADJUST)
+    if panel_b_footnote:
+        # Figure footer keeps the A/B–C/D gutter free of colliding annotations.
+        fig.text(
+            0.5,
+            0.035,
+            panel_b_footnote.split("\n")[0],
+            ha="center",
+            va="bottom",
+            fontsize=FS_TICK - 3,
+            color=PALETTE["dark_gray"],
+        )
+        extra = " · ".join(
+            line.strip()
+            for line in panel_b_footnote.split("\n")[1:]
+            if line.strip()
+        )
+        if extra:
+            fig.text(
+                0.5,
+                0.012,
+                extra,
+                ha="center",
+                va="bottom",
+                fontsize=FS_TICK - 3,
+                color=PALETTE["dark_gray"],
+            )
     pdf, svg, png = save_figure_trio(fig, output_dir, FIGURE3_STEM)
+
+    _supp_trio, supp_paths, supp_panels = _render_figure3_null_supplement(
+        null_rows,
+        output_dir,
+        secondary_records=secondary_records,
+    )
+    source_paths.extend(supp_paths)
+    panel_sources.extend(supp_panels)
+    for path in _supp_trio:
+        source_paths.append(path)
+
+    _part_trios, part_paths, part_panels = _render_figure3_participant_forest_supplement(
+        primary_analysis,
+        output_dir,
+    )
+    source_paths.extend(part_paths)
+    panel_sources.extend(part_panels)
+    for trio in _part_trios:
+        source_paths.extend(trio)
+
+    audit_note = source_dir / "figure3_panel_a_AUDIT_NOTE.md"
+    audit_note.write_text(
+        "\n".join(
+            [
+                "# Figure 3 Panel A — estimand note",
+                "",
+                "## Independent unit (final verdict)",
+                INDEPENDENT_UNIT_VERDICT,
+                "",
+                "See `figure3_panel_a_independent_unit_verdict.csv` for per-dataset notes.",
+                "",
+                "## Estimand",
+                "For the prespecified slice D240 / absolute_log10 / theta / "
+                "circular_shift / zlpi, each eligible matched observation "
+                "contributes δ = observed_endpoint_index − null_mean.",
+                "Condition-level Δ_{p,c} = mean(δ) within biological participant × condition.",
+                "Biological participant Δ_p = unweighted mean of that participant's Δ_{p,c}.",
+                "Main Panel A: one row per dataset = unweighted mean of Δ_p with "
+                "Student-t 95% CI (df = n_participants − 1).",
+                "",
+                "## Sample size wording",
+                f"- This render: **{primary_inference.sample_size_label}**",
+                "- Do not label n from protocol/session subject_ids (e.g. HIIT "
+                "`01_ph` / `01_ps`).",
+                "",
+                "## CI method",
+                "Unweighted mean of biological-participant Δ_p within dataset; "
+                "Student-t 95% CI, df = n_participants − 1.",
+                "No cross-dataset pooled estimate is plotted (no prespecified "
+                "Panel A meta-analytic weighting).",
+                "",
+                "## Interpretation (this render)",
+                f"- run_class: `{primary_inference.run_class}`",
+                f"- n_participants (biological): {primary_inference.n_participants}",
+                f"- n_participant_conditions: {primary_inference.n_participant_conditions}",
+                f"- mean Δ: {primary_inference.mean_delta}",
+                f"- 95% CI: [{primary_inference.ci_low}, {primary_inference.ci_high}]",
+                f"- category: **{primary_inference.interpretation}**",
+                "",
+                "## Supplements",
+                f"- Nested observed-vs-null scatter: `{FIGURE3_SUPPLEMENT_STEM}`",
+                f"- Participant forests by dataset: `{FIGURE3_PARTICIPANT_FOREST_STEM}_*`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source_paths.append(audit_note)
+
     return FigureArtifacts(
         figure_id="figure3",
         pdf=pdf,
@@ -2042,6 +3364,8 @@ __all__ = [
     "FIGURE1_STEM",
     "FIGURE2_STEM",
     "FIGURE3_STEM",
+    "FIGURE3_SUPPLEMENT_STEM",
+    "FIGURE3_PARTICIPANT_FOREST_STEM",
     "FIGURE_DPI",
     "FigureArtifacts",
     "FiguresResult",

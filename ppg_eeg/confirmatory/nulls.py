@@ -422,10 +422,17 @@ def block_shuffle_series(
     return np.asarray(out, dtype=float), order
 
 
-def complete_blocks(values: np.ndarray, *, block_length_s: int = BLOCK_LENGTH_S) -> np.ndarray:
+def complete_blocks(
+    values: np.ndarray,
+    *,
+    block_length_s: int = BLOCK_LENGTH_S,
+    fs_hz: float = FS_HZ,
+) -> np.ndarray:
     """Return complete non-overlapping blocks as a ``(n_blocks, block_len)`` array."""
     arr = np.asarray(values, dtype=float)
-    block_len = int(block_length_s)
+    block_len = int(round(float(block_length_s) * float(fs_hz)))
+    if block_len < 1:
+        raise ValueError("block_length_s must yield block_len >= 1.")
     n_complete = (int(arr.size) // block_len) * block_len
     if n_complete < block_len:
         return np.zeros((0, block_len), dtype=float)

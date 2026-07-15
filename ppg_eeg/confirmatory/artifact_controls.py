@@ -507,9 +507,14 @@ def _filter_paired_rows(
     power_representation: str | None = None,
     modality: str | None = None,
     band: str | None = None,
+    require_eligible: bool = True,
 ) -> list[Mapping[str, object]]:
     out: list[Mapping[str, object]] = []
     for row in paired_rows:
+        if require_eligible:
+            eligible = _as_bool(row.get("contrast_eligible"))
+            if eligible is False:
+                continue
         if endpoint_name is not None and _as_str(row.get("endpoint_name")).casefold() != endpoint_name.casefold():
             continue
         if duration_s is not None and _as_int(row.get("duration_s")) != int(duration_s):
@@ -528,6 +533,206 @@ def _filter_paired_rows(
             continue
         out.append(row)
     return out
+
+
+DURATION_ENDPOINT_SPECS: tuple[tuple[int, str, bool, str], ...] = (
+    (240, ENDPOINT_ZLPI, True, PRIMARY_CONTROL_ID),
+    (180, ENDPOINT_ZLPI, False, CONTROL_D180),
+    (120, ENDPOINT_MID_WINDOW_PROXIMAL_INDEX, False, CONTROL_D120),
+    (60, ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX, False, CONTROL_D60),
+)
+
+
+def participant_duration_sensitivity_effects(
+    paired_rows: Sequence[Mapping[str, object]],
+    *,
+    power_representation: str = PRIMARY_POWER_REPRESENTATION,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Participant-level duration sensitivity (equal participant weight).
+
+    For each duration×endpoint×band cell:
+    1. Keep eligible absolute-power paired Δ rows for that contract.
+    2. Average Δ within each dataset-scoped participant across contrasts.
+    3. Summarize participant means with Student-*t* (df = n_participants − 1).
+
+    Returns ``(summary_rows, participant_rows)``.
+    """
+    summary_rows: list[dict[str, object]] = []
+    participant_rows: list[dict[str, object]] = []
+    for duration_s, endpoint_name, is_primary, control_id in DURATION_ENDPOINT_SPECS:
+        filtered = _filter_paired_rows(
+            paired_rows,
+            endpoint_name=endpoint_name,
+            duration_s=duration_s,
+            power_representation=power_representation,
+            require_eligible=True,
+        )
+        buckets: dict[tuple[str, str, str], list[float]] = {}
+        for row in filtered:
+            dataset_id = _as_str(row.get("dataset_id")).casefold()
+            participant_id = _as_str(row.get("participant_id") or row.get("subject_id"))
+            band = _as_str(row.get("band")).casefold()
+            delta = _as_float(row.get("delta_endpoint_index"))
+            if not participant_id or not math.isfinite(delta):
+                continue
+            key = (dataset_id, participant_id, band)
+            buckets.setdefault(key, []).append(delta)
+
+        by_band: dict[str, list[float]] = {}
+        for (dataset_id, participant_id, band), values in sorted(buckets.items()):
+            mean_delta = float(np.mean(values))
+            by_band.setdefault(band, []).append(mean_delta)
+            participant_rows.append(
+                {
+                    "dataset_id": dataset_id,
+                    "participant_id": participant_id,
+                    "participant_unit_id": (
+                        f"{dataset_id}::{participant_id}" if dataset_id else participant_id
+                    ),
+                    "band": band,
+                    "duration_s": int(duration_s),
+                    "endpoint_name": endpoint_name,
+                    "power_representation": power_representation,
+                    "n_contrasts": len(values),
+                    "mean_delta": mean_delta,
+                    "is_primary_analysis": bool(is_primary),
+                    "can_rescue_primary": False,
+                    "control_id": control_id,
+                }
+            )
+
+        for band, values in sorted(by_band.items()):
+            summary = summarize_effect(values)
+            summary_rows.append(
+                {
+                    "duration_s": int(duration_s),
+                    "endpoint_name": endpoint_name,
+                    "is_standard_zlpi": endpoint_name == ENDPOINT_ZLPI
+                    and duration_s in {240, 180},
+                    "power_representation": power_representation,
+                    "band": band,
+                    "dataset_id": "",
+                    "contrast_id": "",
+                    "effect_estimate": summary["effect_estimate"],
+                    "ci_low": summary["ci_low"],
+                    "ci_high": summary["ci_high"],
+                    "n": summary["n"],
+                    "p_value": summary["p_value"],
+                    "is_primary_analysis": bool(is_primary),
+                    "can_rescue_primary": False,
+                    "status": (
+                        STATUS_PRIMARY
+                        if is_primary and summary["status"] == STATUS_OK
+                        else (
+                            STATUS_SENSITIVITY_ONLY
+                            if summary["status"] == STATUS_OK
+                            else summary["status"]
+                        )
+                    ),
+                    "notes": (
+                        "Participant-level mean of within-participant mean Δ; "
+                        "equal participant weight. "
+                        + (
+                            "Immutable primary D240 absolute-power ZLPI."
+                            if is_primary
+                            else "Sensitivity only; cannot rescue primary ZLPI."
+                        )
+                    ),
+                    "control_id": control_id,
+                    "estimand": "mean_of_participant_means",
+                    "unit": "participant",
+                }
+            )
+    return summary_rows, participant_rows
+
+
+def duration_sensitivity_effects(
+    paired_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Duration/endpoint sensitivity table with hard separation and no rescue.
+
+    Each row is one dataset×contrast×band cell (Student-*t* over participants
+    within that contrast). Prefer ``participant_duration_sensitivity_effects``
+    for confirmatory Panel B summaries that must use the participant as the
+    independent unit across the whole duration profile.
+    """
+    rows: list[dict[str, object]] = []
+    for duration_s, endpoint_name, is_primary, control_id in DURATION_ENDPOINT_SPECS:
+        filtered = _filter_paired_rows(
+            paired_rows,
+            endpoint_name=endpoint_name,
+            duration_s=duration_s,
+            power_representation=PRIMARY_POWER_REPRESENTATION,
+            require_eligible=True,
+        )
+        # Also accept absolute_log10 primary representation aliasing.
+        if not filtered and not is_primary:
+            filtered = _filter_paired_rows(
+                paired_rows,
+                endpoint_name=endpoint_name,
+                duration_s=duration_s,
+                require_eligible=True,
+            )
+        effect_rows = _effects_by_band_dataset(
+            filtered,
+            control_id=control_id,
+            analysis_role=("primary" if is_primary else "duration_sensitivity"),
+            is_primary=is_primary,
+            endpoint_name=endpoint_name,
+            duration_s=duration_s,
+            power_representation=PRIMARY_POWER_REPRESENTATION,
+            status=STATUS_PRIMARY if is_primary else STATUS_SENSITIVITY_ONLY,
+            notes=(
+                "Immutable primary D240 absolute-power ZLPI."
+                if is_primary
+                else "Sensitivity only; cannot rescue primary ZLPI."
+            ),
+        )
+        for row in effect_rows:
+            rows.append(
+                {
+                    "duration_s": row["duration_s"],
+                    "endpoint_name": row["endpoint_name"],
+                    "is_standard_zlpi": endpoint_name == ENDPOINT_ZLPI
+                    and duration_s in {240, 180},
+                    "power_representation": row["power_representation"],
+                    "band": row["band"],
+                    "dataset_id": row["dataset_id"],
+                    "contrast_id": row["contrast_id"],
+                    "effect_estimate": row["effect_estimate"],
+                    "ci_low": row["ci_low"],
+                    "ci_high": row["ci_high"],
+                    "n": row["n"],
+                    "p_value": row["p_value"],
+                    "is_primary_analysis": row["is_primary_analysis"],
+                    "can_rescue_primary": False,
+                    "status": row["status"],
+                    "notes": row["notes"],
+                }
+            )
+        if not effect_rows and not is_primary:
+            rows.append(
+                {
+                    "duration_s": duration_s,
+                    "endpoint_name": endpoint_name,
+                    "is_standard_zlpi": endpoint_name == ENDPOINT_ZLPI
+                    and duration_s in {240, 180},
+                    "power_representation": PRIMARY_POWER_REPRESENTATION,
+                    "band": "",
+                    "dataset_id": "",
+                    "contrast_id": "",
+                    "effect_estimate": float("nan"),
+                    "ci_low": float("nan"),
+                    "ci_high": float("nan"),
+                    "n": 0,
+                    "p_value": float("nan"),
+                    "is_primary_analysis": False,
+                    "can_rescue_primary": False,
+                    "status": STATUS_INSUFFICIENT,
+                    "notes": "No paired rows for this duration/endpoint.",
+                }
+            )
+    return rows
 
 
 def _effects_by_band_dataset(
@@ -783,93 +988,6 @@ def compare_matched_modalities(
                     "matched": False,
                     "status": STATUS_UNAVAILABLE,
                     "notes": "Unmatched modality; excluded from ECG−PPG comparison.",
-                }
-            )
-    return rows
-
-
-def duration_sensitivity_effects(
-    paired_rows: Sequence[Mapping[str, object]],
-) -> list[dict[str, object]]:
-    """Duration/endpoint sensitivity table with hard separation and no rescue."""
-    specs = (
-        (240, ENDPOINT_ZLPI, True, PRIMARY_CONTROL_ID),
-        (180, ENDPOINT_ZLPI, False, CONTROL_D180),
-        (120, ENDPOINT_MID_WINDOW_PROXIMAL_INDEX, False, CONTROL_D120),
-        (60, ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX, False, CONTROL_D60),
-    )
-    rows: list[dict[str, object]] = []
-    for duration_s, endpoint_name, is_primary, control_id in specs:
-        filtered = _filter_paired_rows(
-            paired_rows,
-            endpoint_name=endpoint_name,
-            duration_s=duration_s,
-            power_representation=PRIMARY_POWER_REPRESENTATION,
-        )
-        # Also accept absolute_log10 primary representation aliasing.
-        if not filtered and not is_primary:
-            filtered = _filter_paired_rows(
-                paired_rows,
-                endpoint_name=endpoint_name,
-                duration_s=duration_s,
-            )
-        effect_rows = _effects_by_band_dataset(
-            filtered,
-            control_id=control_id,
-            analysis_role=("primary" if is_primary else "duration_sensitivity"),
-            is_primary=is_primary,
-            endpoint_name=endpoint_name,
-            duration_s=duration_s,
-            power_representation=PRIMARY_POWER_REPRESENTATION,
-            status=STATUS_PRIMARY if is_primary else STATUS_SENSITIVITY_ONLY,
-            notes=(
-                "Immutable primary D240 absolute-power ZLPI."
-                if is_primary
-                else "Sensitivity only; cannot rescue primary ZLPI."
-            ),
-        )
-        for row in effect_rows:
-            rows.append(
-                {
-                    "duration_s": row["duration_s"],
-                    "endpoint_name": row["endpoint_name"],
-                    "is_standard_zlpi": endpoint_name == ENDPOINT_ZLPI
-                    and duration_s in {240, 180},
-                    "power_representation": row["power_representation"],
-                    "band": row["band"],
-                    "dataset_id": row["dataset_id"],
-                    "contrast_id": row["contrast_id"],
-                    "effect_estimate": row["effect_estimate"],
-                    "ci_low": row["ci_low"],
-                    "ci_high": row["ci_high"],
-                    "n": row["n"],
-                    "p_value": row["p_value"],
-                    "is_primary_analysis": row["is_primary_analysis"],
-                    "can_rescue_primary": False,
-                    "status": row["status"],
-                    "notes": row["notes"],
-                }
-            )
-        if not effect_rows and not is_primary:
-            rows.append(
-                {
-                    "duration_s": duration_s,
-                    "endpoint_name": endpoint_name,
-                    "is_standard_zlpi": endpoint_name == ENDPOINT_ZLPI
-                    and duration_s in {240, 180},
-                    "power_representation": PRIMARY_POWER_REPRESENTATION,
-                    "band": "",
-                    "dataset_id": "",
-                    "contrast_id": "",
-                    "effect_estimate": float("nan"),
-                    "ci_low": float("nan"),
-                    "ci_high": float("nan"),
-                    "n": 0,
-                    "p_value": float("nan"),
-                    "is_primary_analysis": False,
-                    "can_rescue_primary": False,
-                    "status": STATUS_INSUFFICIENT,
-                    "notes": "No paired rows for this duration/endpoint.",
                 }
             )
     return rows
@@ -1864,7 +1982,9 @@ __all__ = [
     "build_specification_matrix",
     "compare_matched_modalities",
     "control_availability",
+    "duration_sensitivity_effects",
     "is_primary_cell",
+    "participant_duration_sensitivity_effects",
     "qrs_interpolate_eeg",
     "residualize_series",
     "run_artifact_controls",
