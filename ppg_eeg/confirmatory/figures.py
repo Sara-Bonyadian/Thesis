@@ -1494,7 +1494,11 @@ def render_figure2(
             xlabel=f"Peak center μ (s; {CI_95_LABEL})",
             ylabel=EEG_BAND_YLABEL,
         )
-    _set_panel_title(ax_d, "Peak-center equivalence (±2 s)")
+    # Title: ±2 s is a prespecified TOST reference region; do not imply TOST passed.
+    _set_panel_title(
+        ax_d,
+        f"Peak-center μ vs ±{EXPECTED_PEAK_CENTER_EQUIVALENCE_S} s reference",
+    )
     _add_panel_label(ax_d, "D")
     eq_csv = source_dir / "figure2_panel_d_mu_equivalence.csv"
     write_source_csv(
@@ -1517,20 +1521,25 @@ def render_figure2(
         FigurePanelSource(
             figure_id="figure2",
             panel_id="mu_equivalence",
-            title="Peak-center TOST equivalence region",
+            title=(
+                f"Peak-center μ estimates with ±{EXPECTED_PEAK_CENTER_EQUIVALENCE_S} s "
+                "TOST reference region"
+            ),
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=240,
             input_tables=[str(inputs.get("peak_equivalence") or "")],
             source_data_csv=str(eq_csv),
             analysis_keys=[
                 "endpoint=zlpi",
-                f"equivalence_bounds=±{EXPECTED_PEAK_CENTER_EQUIVALENCE_S}s",
+                f"tost_bounds=±{EXPECTED_PEAK_CENTER_EQUIVALENCE_S}s",
                 "duration=240",
                 f"representation={PRIMARY_REPRESENTATION}",
             ],
             notes=(
-                "Primary D240 absolute_log10 ZLPI slice, sorted by dataset then band. "
-                f"Error bars are {CI_95_LABEL}."
+                "Primary D240 absolute_log10 ZLPI, low-demand identifiable peaks only. "
+                f"Square = mean μ; bars = Student-t {CI_95_LABEL}. "
+                "Orange band is the TOST reference region, not a claim that TOST passed. "
+                f"equivalent column is TOST at α={0.05}."
             ),
         )
     )
