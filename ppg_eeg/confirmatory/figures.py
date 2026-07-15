@@ -143,6 +143,13 @@ FIGURE3_TITLE = "Temporal specificity and artifact controls"
 FIGURE1_STEM = "figure1_lag_resolved_zero_lag"
 FIGURE2_STEM = "figure2_state_attenuation_replication"
 FIGURE3_STEM = "figure3_temporal_artifact_specificity"
+# Display-only: analysis remains on the 1-s lag grid; plotting uses every Nth lag.
+FIGURE1_DISPLAY_LAG_STEP_S = 2
+FIGURE1_DISPLAY_GRID_DISCLOSURE = (
+    "Correlations and all inferential analyses used the predefined 1-s lag grid; "
+    "for visual clarity, the displayed mean curve and pointwise confidence band "
+    "show every second lag value."
+)
 
 _STYLE_CONFIGURED = False
 
@@ -691,11 +698,24 @@ def mean_ci_by_lag(
     return rows
 
 
+def display_lag_mask(lags: np.ndarray, display_lag_step_s: int) -> np.ndarray:
+    """Boolean mask for display-only lag thinning (analysis values unchanged)."""
+    step = int(display_lag_step_s)
+    if step <= 1:
+        return np.ones(np.asarray(lags).shape, dtype=bool)
+    lags_i = np.rint(np.asarray(lags, dtype=float)).astype(int)
+    return (lags_i % step) == 0
+
+
 def render_figure1(
     inputs: Mapping[str, Path | None],
     output_dir: Path,
 ) -> FigureArtifacts:
-    """Figure 1: lag-resolved zero-lag structure (D240 ZLPI Fisher-z)."""
+    """Figure 1: lag-resolved zero-lag structure (D240 ZLPI Fisher-z).
+
+    Aggregation uses the full 1-s lag grid. Plotting may thin to every
+    ``FIGURE1_DISPLAY_LAG_STEP_S`` lag for readability (no interpolation/smoothing).
+    """
     _configure_publication_style()
     curves = read_csv_rows(inputs.get("curves_d240"))
     peak_rows = read_csv_rows(inputs.get("peak_params"))
@@ -730,6 +750,7 @@ def render_figure1(
             "ci_high",
         )
         csv_path = source_dir / f"figure1_panel_{band}_mean_ci.csv"
+        # Source CSV retains the full 1-s analysis grid.
         write_source_csv(csv_path, series, fields)
         source_paths.append(csv_path)
         color = _band_color(band)
@@ -739,11 +760,13 @@ def render_figure1(
             mean = np.asarray([r["mean_z"] for r in series], dtype=float)
             lo = np.asarray([r["ci_low"] for r in series], dtype=float)
             hi = np.asarray([r["ci_high"] for r in series], dtype=float)
+            mask = display_lag_mask(lags, FIGURE1_DISPLAY_LAG_STEP_S)
+            lags_d, mean_d, lo_d, hi_d = lags[mask], mean[mask], lo[mask], hi[mask]
             n = int(series[0]["n"]) if series else 0
             ax.fill_between(
-                lags,
-                lo,
-                hi,
+                lags_d,
+                lo_d,
+                hi_d,
                 color=color,
                 alpha=CI_ALPHA,
                 linewidth=0,
@@ -751,8 +774,8 @@ def render_figure1(
                 zorder=2,
             )
             ax.plot(
-                lags,
-                mean,
+                lags_d,
+                mean_d,
                 color=color,
                 lw=LINE_WIDTH,
                 ls=_band_linestyle(band),
@@ -849,7 +872,9 @@ def render_figure1(
                     f"local shoulders |τ|∈[{primary_contract.shoulders_inner_s},"
                     f"{primary_contract.shoulders_outer_s}] s; "
                     f"orange band = {EQUIVALENCE_REGION_LABEL} μ equivalence when "
-                    f"low-demand peaks exist. Ribbon is {CI_95_METHOD_NOTE}."
+                    f"low-demand peaks exist. Ribbon is {CI_95_METHOD_NOTE}. "
+                    f"Analysis lag step=1 s; display lag step={FIGURE1_DISPLAY_LAG_STEP_S} s "
+                    "(plot thinning only)."
                 ),
             )
         )
@@ -873,7 +898,7 @@ def render_figure1(
     fig.text(
         0.5,
         0.018,
-        f"{LAG_CONVENTION_NOTE}.  {CI_95_METHOD_NOTE}.",
+        f"{LAG_CONVENTION_NOTE}.  {CI_95_METHOD_NOTE}.  {FIGURE1_DISPLAY_GRID_DISCLOSURE}",
         ha="center",
         va="bottom",
         fontsize=FS_TICK - 2,
