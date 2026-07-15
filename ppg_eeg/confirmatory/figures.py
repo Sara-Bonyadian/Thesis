@@ -10,7 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -232,26 +232,44 @@ FIGURE2_STEM = "figure2_state_attenuation_replication"
 FIGURE3_STEM = "figure3_temporal_artifact_specificity"
 FIGURE3_SUPPLEMENT_STEM = "figure3_supplement_null_diagnostics"
 FIGURE3_SUPPLEMENT_LABEL = "Descriptive nested-observation diagnostic"
-FIGURE3_PARTICIPANT_FOREST_STEM = "figure3_supplement_participant_null_forests"
+# Dataset-specific participant forests are internal QC only (not manuscript/supplement).
+FIGURE3_QC_PARTICIPANT_FOREST_STEM = "figure3_qc_participant_null_forests"
+FIGURE3_PARTICIPANT_FOREST_STEM = FIGURE3_QC_PARTICIPANT_FOREST_STEM  # compat alias
+FIGURE3_INTERNAL_QC_SUBDIR = "internal_qc"
 FIGURE3_PARTICIPANT_FOREST_MAX_ROWS = 24
+FIGURE_EXPORT_CATEGORIES_FILENAME = "figure_export_categories.csv"
+EXPORT_CATEGORY_MANUSCRIPT = "manuscript"
+EXPORT_CATEGORY_SUPPLEMENTARY = "supplementary"
+EXPORT_CATEGORY_INTERNAL_QC = "internal_qc"
 FIGURE3_PANEL_B_ENCODING_NOTE = (
     "Color = EEG frequency band · Marker shape = endpoint index "
     "(ZLPI at 240/180 s; MWPI at 120 s; SWPI at 60 s)"
 )
 FIGURE3_PANEL_B_FOOTNOTE_SHORT = (
-    "Panel B encoding: color = band · shape = index "
-    "(ZLPI 240/180; MWPI 120; SWPI 60); Student-t 95% CIs; "
-    "absolute estimates (not equivalence)"
+    "B: color = band · shape = index (ZLPI 240/180; MWPI 120; SWPI 60)"
 )
-FIGURE3_FIGSIZE = (15.2, 12.6)
+FIGURE3_FIGSIZE = (15.5, 13.6)
 FIGURE3_SUBPLOT_ADJUST = {
-    "left": 0.08,
-    "right": 0.86,
-    "top": 0.91,
-    "bottom": 0.09,
-    "wspace": 0.45,
-    "hspace": 0.50,
+    "left": 0.12,
+    "right": 0.84,
+    "top": 0.925,
+    "bottom": 0.10,
+    "wspace": 0.36,
+    "hspace": 0.42,
 }
+FIGURE3_SUPPLEMENT_FIGSIZE = (14.5, 13.8)
+FIGURE3_SUPPLEMENT_SUBPLOT_ADJUST = {
+    "left": 0.15,
+    "right": 0.97,
+    "top": 0.915,
+    "bottom": 0.085,
+    "wspace": 0.34,
+    "hspace": 0.36,
+}
+FIGURE3_CI_LINEWIDTH = 1.6
+FIGURE3_MARKER_SIZE = 7.5
+FIGURE3_SCATTER_SIZE = 36.0
+FIGURE3_REF_LINEWIDTH = 1.0
 # Display-only: analysis remains on the 1-s lag grid; plotting uses every Nth lag.
 FIGURE1_DISPLAY_LAG_STEP_S = 2
 FIGURE1_DISPLAY_GRID_DISCLOSURE = (
@@ -333,11 +351,13 @@ def _style_axes(ax: plt.Axes, *, grid: bool = True) -> None:
 
 def _add_panel_label(ax: plt.Axes, letter: str) -> None:
     """Place a bold panel letter clearly left of the title (no overlap)."""
+    # Multi-character supplement labels (S1–S5) need a slightly larger left offset.
+    x_off = -40 if len(letter) > 1 else -32
     ax.annotate(
         letter,
         xy=(0.0, 1.0),
         xycoords="axes fraction",
-        xytext=(-32, 10),
+        xytext=(x_off, 10),
         textcoords="offset points",
         fontsize=FS_PANEL_LABEL,
         fontweight="bold",
@@ -502,11 +522,11 @@ def _legend_outside(
 
 
 def _ref_hline(ax: plt.Axes, y: float = 0.0) -> None:
-    ax.axhline(y, color=REF_LINE_COLOR, lw=1.0, ls="--", zorder=1)
+    ax.axhline(y, color=REF_LINE_COLOR, lw=FIGURE3_REF_LINEWIDTH, ls="--", zorder=1)
 
 
 def _ref_vline(ax: plt.Axes, x: float = 0.0) -> None:
-    ax.axvline(x, color=REF_LINE_COLOR, lw=1.0, ls="--", zorder=1)
+    ax.axvline(x, color=REF_LINE_COLOR, lw=FIGURE3_REF_LINEWIDTH, ls="--", zorder=1)
 
 
 def _spec_display(control_id: str) -> str:
@@ -551,6 +571,9 @@ class FiguresResult:
     figure1: FigureArtifacts
     figure2: FigureArtifacts
     figure3: FigureArtifacts
+    figure3_supplement: FigureArtifacts | None
+    figure3_internal_qc: tuple[Path, ...]
+    figure_export_categories: Path
     figure_source_manifest: Path
     panel_records: tuple[FigurePanelSource, ...]
 
@@ -1059,7 +1082,7 @@ def _plot_dataset_null_forest(
         )
         if panel_label:
             _add_panel_label(ax, panel_label)
-        _set_panel_title(ax, title)
+        _set_panel_title(ax, title, fontsize=FS_PANEL_TITLE - 2, pad=10)
         return
 
     y_pos = np.arange(len(rows), dtype=float)
@@ -1067,7 +1090,7 @@ def _plot_dataset_null_forest(
     for idx, row in enumerate(rows):
         dataset = _as_str(getattr(row, "dataset_id", ""))
         n_part = int(getattr(row, "n_participants", 0))
-        labels.append(f"{dataset}  (n={n_part})")
+        labels.append(f"{_dataset_display(dataset)} (n={n_part})")
         mean = float(getattr(row, "mean_delta"))
         ci_l = float(getattr(row, "ci_low"))
         ci_h = float(getattr(row, "ci_high"))
@@ -1079,56 +1102,46 @@ def _plot_dataset_null_forest(
                 xerr=[[mean - ci_l], [ci_h - mean]],
                 fmt="D",
                 color=PALETTE["orange"],
-                markersize=MARKER_SIZE + 1.0,
-                capsize=5,
-                elinewidth=LINE_WIDTH,
+                markersize=FIGURE3_MARKER_SIZE,
+                capsize=3.5,
+                elinewidth=FIGURE3_CI_LINEWIDTH,
                 markeredgecolor=PALETTE["dark_gray"],
-                markeredgewidth=0.7,
+                markeredgewidth=0.6,
                 zorder=4,
             )
         elif math.isfinite(mean):
             ax.scatter(
                 [mean],
                 [y],
-                s=SCATTER_SIZE + 16,
+                s=FIGURE3_SCATTER_SIZE + 10,
                 color=PALETTE["orange"],
                 marker="D",
                 edgecolors=PALETTE["dark_gray"],
-                linewidths=0.7,
+                linewidths=0.6,
                 zorder=4,
             )
     _ref_vline(ax, 0.0)
     ax.set_yticks(list(y_pos))
     ax.set_yticklabels(labels, fontsize=FS_TICK - 1)
-    ax.set_xlabel(
-        f"Participant mean Δ (observed − null; {ZLPI_METRIC})",
-        fontsize=FS_AXIS - 1,
-        labelpad=8,
-    )
-    ax.set_ylabel("Dataset", fontsize=FS_AXIS - 1, labelpad=6)
-    run_classes = {_as_str(getattr(r, "run_class", "")) for r in rows}
+    ax.set_xlabel(f"Participant mean Δ ({ZLPI_METRIC})", fontsize=FS_AXIS - 2, labelpad=6)
+    ax.set_ylabel("Dataset", fontsize=FS_AXIS - 2, labelpad=6)
+    # Keep in-panel text minimal; run-class / estimand notes go to caption.
     interps = {_as_str(getattr(r, "interpretation", "")) for r in rows}
-    run_class = next(iter(run_classes)) if len(run_classes) == 1 else "mixed"
-    badge = "SMOKE DIAGNOSTIC" if run_class == "smoke_diagnostic" else run_class
-    interp_text = next(iter(interps)) if len(interps) == 1 else "see source data"
-    ax.text(
-        0.02,
-        0.08,
-        f"{badge}\n{interp_text}\nNo pooled row",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=FS_TICK - 3,
-        color=PALETTE["dark_gray"],
-        linespacing=1.2,
-        bbox={
-            "facecolor": "white",
-            "edgecolor": "none",
-            "alpha": 0.88,
-            "pad": 1.5,
-        },
-        zorder=6,
-    )
+    interp_text = next(iter(interps)) if len(interps) == 1 else ""
+    if interp_text and "significantly" in interp_text.casefold():
+        # Compact category only (no smoke/run badges).
+        short = "exceeds null" if "exceeds" in interp_text.casefold() else interp_text
+        ax.text(
+            0.02,
+            0.06,
+            short,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=FS_TICK - 4,
+            color=PALETTE["dark_gray"],
+            zorder=6,
+        )
     _style_axes(ax)
     _set_panel_title(ax, title, fontsize=FS_PANEL_TITLE - 2, pad=10)
     if panel_label:
@@ -1143,6 +1156,7 @@ def _plot_participant_null_forest(
     title: str,
     panel_label: str | None = "A",
     ylabel: str = "Participant",
+    show_run_badge: bool = True,
 ) -> None:
     """Supplemental horizontal forest of biological-participant Δ_p ± mean CI."""
     rows = list(participant_rows)
@@ -1155,7 +1169,7 @@ def _plot_participant_null_forest(
         )
         if panel_label:
             _add_panel_label(ax, panel_label)
-        _set_panel_title(ax, title)
+        _set_panel_title(ax, title, fontsize=FS_PANEL_TITLE - 3, pad=8)
         return
 
     y_labels = _participant_forest_labels(rows)
@@ -1164,11 +1178,11 @@ def _plot_participant_null_forest(
     ax.scatter(
         deltas,
         y_pos,
-        s=SCATTER_SIZE,
+        s=FIGURE3_SCATTER_SIZE,
         color=PALETTE["blue"],
         marker="o",
         edgecolors=PALETTE["dark_gray"],
-        linewidths=0.6,
+        linewidths=0.5,
         zorder=3,
     )
     summary_y = float(len(rows))
@@ -1183,54 +1197,57 @@ def _plot_participant_null_forest(
                 xerr=[[mean - lo], [hi - mean]],
                 fmt="D",
                 color=PALETTE["orange"],
-                markersize=MARKER_SIZE + 1.5,
-                capsize=5,
-                elinewidth=LINE_WIDTH,
+                markersize=FIGURE3_MARKER_SIZE,
+                capsize=3.5,
+                elinewidth=FIGURE3_CI_LINEWIDTH,
                 markeredgecolor=PALETTE["dark_gray"],
-                markeredgewidth=0.7,
+                markeredgewidth=0.6,
                 zorder=4,
             )
         else:
             ax.scatter(
                 [mean],
                 [summary_y],
-                s=SCATTER_SIZE + 20,
+                s=FIGURE3_SCATTER_SIZE + 12,
                 color=PALETTE["orange"],
                 marker="D",
                 edgecolors=PALETTE["dark_gray"],
-                linewidths=0.7,
+                linewidths=0.6,
                 zorder=4,
             )
     _ref_vline(ax, 0.0)
     size_label = _as_str(getattr(inference, "sample_size_label", ""))
+    n_part = int(getattr(inference, "n_participants", 0) or 0)
     if not size_label:
-        size_label = f"n={int(getattr(inference, 'n_participants'))} participants"
+        mean_ytick = f"Mean (n={n_part})" if n_part else "Mean"
+    else:
+        # Prefer compact n_participants; avoid mangled "12 6 part." strings.
+        mean_ytick = f"Mean (n={n_part})" if n_part else "Mean"
     ax.set_yticks(list(y_pos) + [summary_y])
     ax.set_yticklabels(
-        y_labels + [f"Mean Δ ({size_label})"],
-        fontsize=FS_TICK - 1,
-    )
-    ax.set_xlabel(
-        f"Participant Δ = observed − null mean ({ZLPI_METRIC})",
-        fontsize=FS_AXIS,
-        labelpad=8,
-    )
-    ax.set_ylabel(ylabel, fontsize=FS_AXIS, labelpad=6)
-    run_class = _as_str(getattr(inference, "run_class", ""))
-    interp = _as_str(getattr(inference, "interpretation", ""))
-    badge = "SMOKE DIAGNOSTIC" if run_class == "smoke_diagnostic" else run_class
-    ax.text(
-        0.02,
-        0.98,
-        f"{badge}\n{interp}",
-        transform=ax.transAxes,
-        ha="left",
-        va="top",
+        y_labels + [mean_ytick],
         fontsize=FS_TICK - 2,
-        color=PALETTE["dark_gray"],
     )
+    ax.set_xlabel(f"Participant Δ ({ZLPI_METRIC})", fontsize=FS_AXIS - 2, labelpad=6)
+    ax.set_ylabel(ylabel, fontsize=FS_AXIS - 2, labelpad=4)
+    if show_run_badge:
+        run_class = _as_str(getattr(inference, "run_class", ""))
+        interp = _as_str(getattr(inference, "interpretation", ""))
+        badge = "Smoke" if run_class == "smoke_diagnostic" else run_class.replace("_", " ")
+        note = " · ".join(p for p in (badge, interp) if p)
+        if note:
+            ax.text(
+                0.02,
+                0.98,
+                note,
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=FS_TICK - 4,
+                color=PALETTE["dark_gray"],
+            )
     _style_axes(ax)
-    _set_panel_title(ax, title)
+    _set_panel_title(ax, title, fontsize=FS_PANEL_TITLE - 3, pad=8)
     if panel_label:
         _add_panel_label(ax, panel_label)
 
@@ -1241,15 +1258,35 @@ def _chunked(items: Sequence[object], size: int) -> list[list[object]]:
     return [list(items[i : i + size]) for i in range(0, len(items), size)]
 
 
-def _render_figure3_participant_forest_supplement(
+def _cleanup_legacy_figure3_qc_stems(figures_dir: Path) -> None:
+    """Remove legacy root-level QC stems that previously looked like supplements."""
+    legacy_prefixes = (
+        "figure3_supplement_participant_null_forests",
+        FIGURE3_QC_PARTICIPANT_FOREST_STEM,
+    )
+    for prefix in legacy_prefixes:
+        for path in figures_dir.glob(f"{prefix}*"):
+            if path.is_file() and path.parent == figures_dir:
+                path.unlink(missing_ok=True)
+
+
+def _render_figure3_participant_forest_qc(
     analysis: object,
     output_dir: Path,
+    *,
+    include_internal_qc: bool = True,
 ) -> tuple[list[tuple[Path, Path, Path]], list[Path], list[FigurePanelSource]]:
-    """Faceted / paginated biological-participant forests (supplement)."""
+    """Dataset-specific participant forests — internal QC only (not manuscript/supplement)."""
     source_dir = output_dir / "source_data"
     source_paths: list[Path] = []
     panel_sources: list[FigurePanelSource] = []
     trios: list[tuple[Path, Path, Path]] = []
+    _cleanup_legacy_figure3_qc_stems(output_dir)
+    if not include_internal_qc:
+        return trios, source_paths, panel_sources
+
+    qc_dir = output_dir / FIGURE3_INTERNAL_QC_SUBDIR
+    qc_dir.mkdir(parents=True, exist_ok=True)
 
     participants = list(getattr(analysis, "participants"))
     dataset_inferences = {
@@ -1303,7 +1340,7 @@ def _render_figure3_participant_forest_supplement(
             ylabel="Participant",
         )
         fig.suptitle(
-            "Figure 3 supplement — participant null forests",
+            "Figure 3 internal QC — participant null forests",
             fontsize=FS_SUPTITLE - 2,
             fontweight="bold",
             y=0.995,
@@ -1313,6 +1350,7 @@ def _render_figure3_participant_forest_supplement(
             0.01,
             (
                 f"{size_label}; each row = one unique biological participant. "
+                "Internal QC only — not a manuscript or supplementary figure. "
                 "Main Panel A aggregates to one row per dataset."
             ),
             ha="center",
@@ -1322,33 +1360,52 @@ def _render_figure3_participant_forest_supplement(
         )
         fig.subplots_adjust(left=0.18, right=0.96, top=0.88, bottom=0.10)
         stem = (
-            f"{FIGURE3_PARTICIPANT_FOREST_STEM}_{dataset_id}"
+            f"{FIGURE3_QC_PARTICIPANT_FOREST_STEM}_{dataset_id}"
             if len(page_payloads) == 1
-            else f"{FIGURE3_PARTICIPANT_FOREST_STEM}_{dataset_id}_p{page_idx:02d}"
+            else f"{FIGURE3_QC_PARTICIPANT_FOREST_STEM}_{dataset_id}_p{page_idx:02d}"
         )
-        trio = save_figure_trio(fig, output_dir, stem)
+        trio = save_figure_trio(fig, qc_dir, stem)
         trios.append(trio)
         plt.close(fig)
 
+    readme = qc_dir / "README.md"
+    readme.write_text(
+        (
+            "# Figure 3 internal QC artifacts\n\n"
+            "Dataset-specific participant null forests "
+            f"(`{FIGURE3_QC_PARTICIPANT_FOREST_STEM}_*`) are **internal QC** only.\n\n"
+            "- **Not** manuscript Figure 3 (`figure3_temporal_artifact_specificity`).\n"
+            "- **Not** supplementary material (`figure3_supplement_null_diagnostics`).\n"
+            "- Exclude from manuscript and supplementary exports unless explicitly requested.\n"
+        ),
+        encoding="utf-8",
+    )
+    source_paths.append(readme)
+
     panel_sources.append(
         FigurePanelSource(
-            figure_id="figure3_supplement",
+            figure_id="figure3_internal_qc",
             panel_id="participant_null_forests",
-            title="Biological-participant null forests by dataset",
+            title="Biological-participant null forests by dataset (internal QC)",
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=PRIMARY_DURATION_S,
             input_tables=[],
             source_data_csv=str(source_dir / "figure3_panel_a_participant_deltas.csv"),
             analysis_keys=[
-                "role=supplement",
+                f"export_category={EXPORT_CATEGORY_INTERNAL_QC}",
+                "role=internal_qc",
                 "unit=biological_participant",
                 f"max_rows_per_page={FIGURE3_PARTICIPANT_FOREST_MAX_ROWS}",
+                "include_in_manuscript_export=false",
+                "include_in_supplementary_export=false",
             ],
             notes=(
-                "Supplemental participant forests faceted by dataset and paginated "
+                "Internal QC participant forests faceted by dataset and paginated "
                 f"when n_participants > {FIGURE3_PARTICIPANT_FOREST_MAX_ROWS}. "
+                "Excluded from manuscript and supplementary exports by default. "
                 + INDEPENDENT_UNIT_VERDICT
             ),
+            export_category=EXPORT_CATEGORY_INTERNAL_QC,
         )
     )
     return trios, source_paths, panel_sources
@@ -1404,8 +1461,14 @@ def _render_figure3_null_supplement(
         )
 
     _configure_publication_style()
-    fig = plt.figure(figsize=(14.0, 14.0), constrained_layout=False)
-    gs = fig.add_gridspec(3, 2, hspace=0.45, wspace=0.40, height_ratios=[1.15, 1.0, 1.0])
+    fig = plt.figure(figsize=FIGURE3_SUPPLEMENT_FIGSIZE, constrained_layout=False)
+    gs = fig.add_gridspec(
+        3,
+        2,
+        height_ratios=[1.05, 1.0, 1.0],
+        hspace=FIGURE3_SUPPLEMENT_SUBPLOT_ADJUST["hspace"],
+        wspace=FIGURE3_SUPPLEMENT_SUBPLOT_ADJUST["wspace"],
+    )
 
     ax_scatter = fig.add_subplot(gs[0, :])
     if scatter_source:
@@ -1422,12 +1485,12 @@ def _render_figure3_null_supplement(
             ax_scatter.scatter(
                 null_mean[mask],
                 observed[mask],
-                s=SCATTER_SIZE,
-                alpha=0.65,
+                s=FIGURE3_SCATTER_SIZE,
+                alpha=0.55,
                 color=color,
                 marker=marker,
                 edgecolors=PALETTE["dark_gray"],
-                linewidths=0.5,
+                linewidths=0.4,
                 zorder=2,
                 label=null_type.replace("_", " "),
             )
@@ -1435,12 +1498,26 @@ def _render_figure3_null_supplement(
             float(np.nanmin([null_mean.min(), observed.min()])),
             float(np.nanmax([null_mean.max(), observed.max()])),
         ]
-        ax_scatter.plot(lims, lims, color=REF_LINE_COLOR, ls="--", lw=1.0, zorder=1)
+        ax_scatter.plot(
+            lims,
+            lims,
+            color=REF_LINE_COLOR,
+            ls="--",
+            lw=FIGURE3_REF_LINEWIDTH,
+            zorder=1,
+        )
         ax_scatter.legend(
             loc="lower right",
-            fontsize=FS_LEGEND - 2,
+            fontsize=FS_LEGEND - 3,
             frameon=True,
-            title="null type",
+            fancybox=False,
+            edgecolor=PALETTE["light_gray"],
+            framealpha=0.92,
+            title="Null type",
+            title_fontsize=FS_LEGEND - 2,
+            markerscale=0.9,
+            handlelength=1.2,
+            labelspacing=0.3,
         )
     else:
         _mark_empty_panel(
@@ -1449,29 +1526,26 @@ def _render_figure3_null_supplement(
             xlabel=f"Null mean endpoint ({ZLPI_METRIC})",
             ylabel=f"Observed {_endpoint_display(ENDPOINT_ZLPI)} ({ZLPI_METRIC})",
         )
-    ax_scatter.set_xlabel(f"Null mean endpoint ({ZLPI_METRIC})", fontsize=FS_AXIS)
+    ax_scatter.set_xlabel(f"Null mean ({ZLPI_METRIC})", fontsize=FS_AXIS - 2)
     ax_scatter.set_ylabel(
         f"Observed {_endpoint_display(ENDPOINT_ZLPI)} ({ZLPI_METRIC})",
-        fontsize=FS_AXIS,
+        fontsize=FS_AXIS - 2,
     )
     _style_axes(ax_scatter)
-    _set_panel_title(ax_scatter, FIGURE3_SUPPLEMENT_LABEL)
-    _add_panel_label(ax_scatter, "S1")
-    ax_scatter.text(
-        0.01,
-        0.98,
-        (
-            "Each point = observation × band × null type (nested).\n"
-            "Not independent; no inference from density / diagonal.\n"
-            "Confirmatory inference: participant-level Δ elsewhere."
-        ),
-        transform=ax_scatter.transAxes,
-        va="top",
-        ha="left",
-        fontsize=FS_TICK - 2,
-        color=PALETTE["dark_gray"],
+    _set_panel_title(
+        ax_scatter,
+        "Observed vs null mean (nested)",
+        fontsize=FS_PANEL_TITLE - 2,
+        pad=8,
     )
+    _add_panel_label(ax_scatter, "S1")
 
+    null_display = {
+        "phase_randomization": "Phase randomization",
+        "block_shuffle": "Block shuffle",
+        "cross_subject_mismatch": "Cross-subject",
+        "ar1_innovations": "AR(1) innovations",
+    }
     # Secondary null forests at theta (participant-level), excluding primary.
     for idx, null_type in enumerate(SECONDARY_NULL_TYPES):
         row = 1 + idx // 2
@@ -1483,22 +1557,54 @@ def _render_figure3_null_supplement(
             null_type=null_type,
             is_primary_slice=False,
         )
+        short = null_display.get(null_type, null_type.replace("_", " "))
         _plot_participant_null_forest(
             ax,
             participants,
             inference,
-            title=f"Secondary: {null_type.replace('_', ' ')} (theta)",
+            title=f"{short} (θ)",
             panel_label=f"S{idx + 2}",
+            show_run_badge=False,
         )
 
     fig.suptitle(
-        "Figure 3 supplement — null diagnostics (not confirmatory Panel A)",
+        "Figure 3 supplement — temporal null diagnostics",
         fontsize=FS_SUPTITLE - 2,
         fontweight="bold",
-        y=0.98,
+        y=0.978,
     )
-    fig.subplots_adjust(left=0.12, right=0.97, top=0.92, bottom=0.06, wspace=0.45, hspace=0.42)
+    fig.text(
+        0.5,
+        0.022,
+        (
+            "S1 nested (not independent). S2–S5: participant Δ vs secondary nulls (θ). "
+            "Main Panel A uses circular-shift only."
+        ),
+        ha="center",
+        va="bottom",
+        fontsize=FS_TICK - 5,
+        color=PALETTE["dark_gray"],
+    )
+    fig.subplots_adjust(**FIGURE3_SUPPLEMENT_SUBPLOT_ADJUST)
     trio = save_figure_trio(fig, output_dir, FIGURE3_SUPPLEMENT_STEM)
+
+    caption_path = output_dir / "figure3_supplement_caption.txt"
+    caption_path.write_text(
+        (
+            "Figure 3 supplement — temporal null diagnostics\n\n"
+            "S1: Nested observed-vs-null scatter (observation × band × null type). "
+            "Points are not independent; do not infer from point density or the "
+            "identity line.\n"
+            "S2–S5: Biological-participant Δ (observed − null mean) for secondary "
+            "C4 nulls at the theta spotlight slice, with orange diamonds showing "
+            "the participant-mean Δ and Student-t 95% CI.\n"
+            "Main Figure 3 Panel A reports the circular-shift confirmatory forest; "
+            "these panels are diagnostic only.\n"
+            "Source data: figures/source_data/figure3_supplement_nested_null_scatter.csv "
+            "and figure3_panel_a_participant_deltas.csv.\n"
+        ),
+        encoding="utf-8",
+    )
 
     scatter_csv = source_dir / "figure3_supplement_nested_null_scatter.csv"
     write_source_csv(
@@ -1533,18 +1639,23 @@ def _render_figure3_null_supplement(
             input_tables=[],
             source_data_csv=str(scatter_csv),
             analysis_keys=[
-                "role=supplement_diagnostic",
+                f"export_category={EXPORT_CATEGORY_SUPPLEMENTARY}",
+                "role=supplementary",
                 "endpoint=zlpi",
                 f"duration={PRIMARY_DURATION_S}",
                 f"representation={PRIMARY_REPRESENTATION}",
+                "include_in_manuscript_export=false",
+                "include_in_supplementary_export=true",
                 "not_for_confirmatory_inference=true",
             ],
             notes=(
-                "Descriptive nested-observation diagnostic. Each point is "
-                "observation×band×null type; points are not independent; no "
-                "inference from density or proportion above y=x. All statistical "
-                "inference comes from participant-level observed-minus-null Δ."
+                "Supplementary nested-observation diagnostic (S1–S5). Each S1 point "
+                "is observation×band×null type; points are not independent; no "
+                "inference from density or proportion above y=x. Statistical "
+                "inference uses participant-level observed-minus-null Δ. "
+                "Export category: supplementary (not manuscript main Figure 3)."
             ),
+            export_category=EXPORT_CATEGORY_SUPPLEMENTARY,
         )
     )
     # Retain secondary_records reference in notes via export already written by caller.
@@ -1552,10 +1663,22 @@ def _render_figure3_null_supplement(
     return trio, source_paths, panel_sources
 
 
+@dataclass(frozen=True)
+class Figure3RenderResult:
+    """Figure 3 render outputs classified by export category."""
+
+    manuscript: FigureArtifacts
+    supplement: FigureArtifacts | None
+    internal_qc_paths: tuple[Path, ...]
+    panels: tuple[FigurePanelSource, ...]
+
+
 def render_figure3(
     inputs: Mapping[str, Path | None],
     output_dir: Path,
-) -> FigureArtifacts:
+    *,
+    include_internal_qc: bool = True,
+) -> Figure3RenderResult:
     """Figure 3: nulls, duration robustness, broadband sensitivity, LOO."""
     null_rows = read_csv_rows(inputs.get("null_subject"))
     duration = read_csv_rows(inputs.get("duration_sensitivity"))
@@ -1565,7 +1688,11 @@ def render_figure3(
     loo = read_csv_rows(inputs.get("leave_one_out"))
     source_dir = output_dir / "source_data"
     panel_sources: list[FigurePanelSource] = []
-    source_paths: list[Path] = []
+    manuscript_source_paths: list[Path] = []
+    supplement_source_paths: list[Path] = []
+    qc_paths: list[Path] = []
+    # Alias used by the manuscript panel body below.
+    source_paths = manuscript_source_paths
 
     _configure_publication_style()
     fig = plt.figure(figsize=FIGURE3_FIGSIZE, constrained_layout=False)
@@ -1589,10 +1716,7 @@ def render_figure3(
     _plot_dataset_null_forest(
         ax_a,
         primary_analysis.dataset_inferences,
-        title=(
-            "Dataset Δ vs circular-shift null\n"
-            f"(theta {_endpoint_display(ENDPOINT_ZLPI)}, D{PRIMARY_DURATION_S})"
-        ),
+        title=f"Circular-shift null (θ {_endpoint_display(ENDPOINT_ZLPI)}, D{PRIMARY_DURATION_S})",
         panel_label="A",
     )
 
@@ -1991,22 +2115,22 @@ def render_figure3(
                     fmt=marker,
                     color=color,
                     linestyle="none",
-                    markersize=MARKER_SIZE,
-                    capsize=3,
-                    elinewidth=1.4,
+                    markersize=FIGURE3_MARKER_SIZE,
+                    capsize=2.5,
+                    elinewidth=FIGURE3_CI_LINEWIDTH,
                     markeredgecolor=PALETTE["dark_gray"],
-                    markeredgewidth=0.6,
-                    alpha=0.92,
+                    markeredgewidth=0.5,
+                    alpha=0.90,
                 )
 
         _ref_hline(ax_b, 0.0)
         ax_b.set_xlim(*FIGURE3_DURATION_XLIM)
         ax_b.set_xticks([60, 120, 180, 240])
         ax_b.set_ylim(y_lo, y_hi)
-        ax_b.set_xlabel("Duration (s)", fontsize=FS_AXIS - 1)
+        ax_b.set_xlabel("Duration (s)", fontsize=FS_AXIS - 2)
         ax_b.set_ylabel(
             f"Participant mean Δ ({Z_YLABEL})",
-            fontsize=FS_AXIS - 1,
+            fontsize=FS_AXIS - 2,
         )
         _style_axes(ax_b)
         band_handles = []
@@ -2020,9 +2144,9 @@ def render_figure3(
                 marker="o",
                 color=_band_color(band),
                 ls="none",
-                markersize=MARKER_SIZE,
+                markersize=FIGURE3_MARKER_SIZE,
                 markeredgecolor=PALETTE["dark_gray"],
-                markeredgewidth=0.6,
+                markeredgewidth=0.5,
             )
             band_handles.append(handle)
             band_labels.append(_band_display(band))
@@ -2039,9 +2163,9 @@ def render_figure3(
                 marker=marker,
                 color=PALETTE["dark_gray"],
                 ls="none",
-                markersize=MARKER_SIZE,
+                markersize=FIGURE3_MARKER_SIZE,
                 markeredgecolor=PALETTE["dark_gray"],
-                markeredgewidth=0.6,
+                markeredgewidth=0.5,
             )
             index_handles.append(handle)
             index_labels.append(_endpoint_display(endpoint))
@@ -2056,13 +2180,8 @@ def render_figure3(
             )
         n_units = max((_as_int(r.get("n")) for r in duration_source), default=0)
         panel_b_footnote = (
-            f"{FIGURE3_PANEL_B_FOOTNOTE_SHORT}\n"
-            f"n = {n_units} participants"
-            + (
-                "; † D60 SWPI CIs clipped (source data)"
-                if clipped_swpi
-                else ""
-            )
+            f"{FIGURE3_PANEL_B_FOOTNOTE_SHORT}; n={n_units}"
+            + ("; † D60 SWPI CIs clipped" if clipped_swpi else "")
         )
     else:
         panel_b_footnote = ""
@@ -2070,11 +2189,11 @@ def render_figure3(
             ax_b,
             MSG_NOT_INCLUDED,
             xlabel="Duration (s)",
-            ylabel=f"Participant mean Δ ({Z_YLABEL}; Student-t 95% CI)",
+            ylabel=f"Participant mean Δ ({Z_YLABEL})",
         )
     _set_panel_title(
         ax_b,
-        "Duration sensitivity\n(participant-level; band × index)",
+        "Duration sensitivity",
         fontsize=FS_PANEL_TITLE - 2,
         pad=10,
     )
@@ -2211,6 +2330,7 @@ def render_figure3(
                 "control_id": "broadband_residualized",
                 "dataset_id": _as_str(row.get("dataset_id"), "pooled"),
                 "band": _as_str(row.get("band"), "pooled"),
+                "contrast_id": _as_str(row.get("contrast_id")),
                 "endpoint_name": _as_str(row.get("endpoint_name"), ENDPOINT_ZLPI),
                 "duration_s": _as_int(row.get("duration_s"), 240),
                 "power_representation": _as_str(
@@ -2225,6 +2345,33 @@ def render_figure3(
             }
         )
     y_labels_c: list[str] = []
+
+    def _short_contrast(contrast_id: str) -> str:
+        text = _as_str(contrast_id)
+        if not text:
+            return ""
+        # Prefer session/state prefix (e.g. ph_post_rest__tetris → ph_post).
+        head = text.split("__", 1)[0]
+        parts = [p for p in head.split("_") if p]
+        if len(parts) >= 2:
+            return f"{parts[0]}_{parts[1]}"
+        return head[:18]
+
+    datasets_c = {_as_str(r["dataset_id"]) or "pooled" for r in broadband_source}
+    single_dataset_c = len(datasets_c) == 1
+    contrasts_c = {_as_str(r.get("contrast_id")) for r in broadband_source if _as_str(r.get("contrast_id"))}
+    multi_contrast_c = len(contrasts_c) > 1
+    # Stable visual order: contrast → band → dataset.
+    broadband_source = sorted(
+        broadband_source,
+        key=lambda r: (
+            _as_str(r.get("contrast_id")),
+            BAND_ORDER.index(_as_str(r.get("band")).casefold())
+            if _as_str(r.get("band")).casefold() in BAND_ORDER
+            else 99,
+            _as_str(r.get("dataset_id")),
+        ),
+    )
     for row in broadband_source:
         effect = _as_float(row["effect_estimate"])
         lo = _as_float(row["ci_low"])
@@ -2234,34 +2381,45 @@ def render_figure3(
             xerr = [[effect - lo], [hi - effect]]
         band = _as_str(row["band"]) or "pooled"
         dataset = _as_str(row["dataset_id"]) or "pooled"
-        label = band if dataset in {"", "pooled"} else f"{band} · {dataset}"
+        band_lab = _band_display(band) if band != "pooled" else band
+        parts: list[str] = [band_lab]
+        if multi_contrast_c:
+            short_c = _short_contrast(_as_str(row.get("contrast_id")))
+            if short_c:
+                parts.append(short_c)
+        if not single_dataset_c and dataset not in {"", "pooled"}:
+            parts.append(_dataset_display(dataset))
+        label = " · ".join(parts)
         ax_c.errorbar(
             effect,
             len(y_labels_c),
             xerr=xerr,
             fmt="o",
-            color=PALETTE["purple"],
-            markersize=MARKER_SIZE,
-            capsize=4,
-            elinewidth=LINE_WIDTH,
+            color=PALETTE["dark_gray"],
+            markersize=FIGURE3_MARKER_SIZE - 0.5,
+            capsize=3,
+            elinewidth=FIGURE3_CI_LINEWIDTH,
             markeredgecolor=PALETTE["dark_gray"],
-            markeredgewidth=0.6,
+            markeredgewidth=0.5,
         )
         y_labels_c.append(label)
     if y_labels_c:
         _ref_vline(ax_c, 0.0)
         ax_c.set_yticks(range(len(y_labels_c)))
-        ax_c.set_yticklabels(y_labels_c, fontsize=FS_TICK - 1)
-        ax_c.set_ylabel("Band / dataset", fontsize=FS_AXIS, labelpad=6)
-        ax_c.set_xlabel(
-            f"Broadband-residualized effect ({ZLPI_METRIC}; {CI_95_LABEL})",
-            fontsize=FS_AXIS,
-            labelpad=8,
-        )
+        tick_fs = FS_TICK - 3 if len(y_labels_c) > 10 else FS_TICK - 2
+        ax_c.set_yticklabels(y_labels_c, fontsize=tick_fs)
+        if multi_contrast_c and single_dataset_c:
+            ylabel_c = "Band · contrast"
+        elif single_dataset_c:
+            ylabel_c = "Band"
+        else:
+            ylabel_c = "Band · dataset"
+        ax_c.set_ylabel(ylabel_c, fontsize=FS_AXIS - 2, labelpad=4)
+        ax_c.set_xlabel(f"Effect ({ZLPI_METRIC})", fontsize=FS_AXIS - 2, labelpad=6)
         _style_axes(ax_c)
         _set_panel_title(
             ax_c,
-            f"Broadband residualization (n cells = {len(y_labels_c)})",
+            "Broadband residualization",
             fontsize=FS_PANEL_TITLE - 2,
             pad=10,
         )
@@ -2270,8 +2428,8 @@ def render_figure3(
         _mark_empty_panel(
             ax_c,
             MSG_NOT_INCLUDED,
-            xlabel=f"Broadband-residualized effect ({ZLPI_METRIC}; {CI_95_LABEL})",
-            ylabel="Band / dataset",
+            xlabel=f"Effect ({ZLPI_METRIC})",
+            ylabel="Band · dataset",
             xlim=(-1.0, 1.0),
             ylim=(0.0, 1.0),
         )
@@ -2285,6 +2443,7 @@ def render_figure3(
             "control_id",
             "dataset_id",
             "band",
+            "contrast_id",
             "endpoint_name",
             "duration_s",
             "power_representation",
@@ -2366,11 +2525,11 @@ def render_figure3(
             xerr=xerr,
             fmt=marker,
             color=color,
-            markersize=MARKER_SIZE,
-            capsize=4,
-            elinewidth=LINE_WIDTH,
+            markersize=FIGURE3_MARKER_SIZE - 0.5,
+            capsize=3,
+            elinewidth=FIGURE3_CI_LINEWIDTH,
             markeredgecolor=PALETTE["dark_gray"],
-            markeredgewidth=0.6,
+            markeredgewidth=0.5,
         )
         y_labels.append(_spec_display(str(row["control_id"])))
     if loo:
@@ -2403,20 +2562,16 @@ def render_figure3(
     if y_labels:
         _ref_vline(ax_d, 0.0)
         ax_d.set_yticks(range(len(y_labels)))
-        ax_d.set_yticklabels(y_labels, fontsize=FS_TICK - 1)
-        ax_d.set_ylabel("Spec.", fontsize=FS_AXIS, labelpad=6)
-        ax_d.set_xlabel(
-            f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
-            fontsize=FS_AXIS,
-            labelpad=8,
-        )
+        ax_d.set_yticklabels(y_labels, fontsize=FS_TICK - 2)
+        ax_d.set_ylabel("Specification", fontsize=FS_AXIS - 2, labelpad=4)
+        ax_d.set_xlabel(f"Effect ({ZLPI_METRIC})", fontsize=FS_AXIS - 2, labelpad=6)
         _style_axes(ax_d)
     else:
         _mark_empty_panel(
             ax_d,
             MSG_NOT_INCLUDED,
-            xlabel=f"Effect estimate ({ZLPI_METRIC}; {CI_95_LABEL})",
-            ylabel="Spec.",
+            xlabel=f"Effect ({ZLPI_METRIC})",
+            ylabel="Specification",
         )
     _set_panel_title(ax_d, "Specification matrix", fontsize=FS_PANEL_TITLE - 2, pad=10)
     _add_panel_label(ax_d, "D")
@@ -2455,34 +2610,38 @@ def render_figure3(
         )
     )
 
-    fig.suptitle(FIGURE3_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.985)
+    fig.suptitle(FIGURE3_TITLE, fontsize=FS_SUPTITLE - 1, fontweight="bold", y=0.978)
     fig.subplots_adjust(**FIGURE3_SUBPLOT_ADJUST)
     if panel_b_footnote:
-        # Figure footer keeps the A/B–C/D gutter free of colliding annotations.
         fig.text(
             0.5,
-            0.035,
-            panel_b_footnote.split("\n")[0],
+            0.022,
+            panel_b_footnote,
             ha="center",
             va="bottom",
-            fontsize=FS_TICK - 3,
+            fontsize=FS_TICK - 5,
             color=PALETTE["dark_gray"],
         )
-        extra = " · ".join(
-            line.strip()
-            for line in panel_b_footnote.split("\n")[1:]
-            if line.strip()
-        )
-        if extra:
-            fig.text(
-                0.5,
-                0.012,
-                extra,
-                ha="center",
-                va="bottom",
-                fontsize=FS_TICK - 3,
-                color=PALETTE["dark_gray"],
-            )
+    caption_path = output_dir / "figure3_caption.txt"
+    caption_path.write_text(
+        (
+            f"{FIGURE3_TITLE}\n\n"
+            "A: Dataset-level mean of biological-participant Δ (observed − circular-shift "
+            "null) for D240 absolute-log10 theta ZLPI, with Student-t 95% CIs. Secondary "
+            "nulls appear in the Figure 3 supplement.\n"
+            "B: Duration sensitivity (ZLPI at 240/180 s; MWPI at 120 s; SWPI at 60 s). "
+            "Color encodes EEG band; marker shape encodes endpoint index. Shorter "
+            "windows cannot rescue primary D240 ZLPI; overlapping CIs are not "
+            "equivalence.\n"
+            "C: Broadband-residualized sensitivity forest (default confirmatory "
+            "representation control).\n"
+            "D: Specification matrix of default sensitivity controls (optional "
+            "CFA/nuisance rows appear only when enabled). Dual ECG–PPG comparison is "
+            "not part of this figure.\n"
+            "Source data: figures/source_data/figure3_panel_*.csv.\n"
+        ),
+        encoding="utf-8",
+    )
     pdf, svg, png = save_figure_trio(fig, output_dir, FIGURE3_STEM)
 
     _supp_trio, supp_paths, supp_panels = _render_figure3_null_supplement(
@@ -2490,19 +2649,20 @@ def render_figure3(
         output_dir,
         secondary_records=secondary_records,
     )
-    source_paths.extend(supp_paths)
+    supplement_source_paths.extend(supp_paths)
     panel_sources.extend(supp_panels)
     for path in _supp_trio:
-        source_paths.append(path)
+        supplement_source_paths.append(path)
 
-    _part_trios, part_paths, part_panels = _render_figure3_participant_forest_supplement(
+    _part_trios, part_paths, part_panels = _render_figure3_participant_forest_qc(
         primary_analysis,
         output_dir,
+        include_internal_qc=include_internal_qc,
     )
-    source_paths.extend(part_paths)
+    qc_paths.extend(part_paths)
     panel_sources.extend(part_panels)
     for trio in _part_trios:
-        source_paths.extend(trio)
+        qc_paths.extend(trio)
 
     audit_note = source_dir / "figure3_panel_a_AUDIT_NOTE.md"
     audit_note.write_text(
@@ -2543,29 +2703,137 @@ def render_figure3(
                 f"- 95% CI: [{primary_inference.ci_low}, {primary_inference.ci_high}]",
                 f"- category: **{primary_inference.interpretation}**",
                 "",
-                "## Supplements",
-                f"- Nested observed-vs-null scatter: `{FIGURE3_SUPPLEMENT_STEM}`",
-                f"- Participant forests by dataset: `{FIGURE3_PARTICIPANT_FOREST_STEM}_*`",
+                "## Export categories",
+                f"- Manuscript main figure: `{FIGURE3_STEM}`",
+                f"- Supplementary: `{FIGURE3_SUPPLEMENT_STEM}`",
+                f"- Internal QC (excluded from manuscript/supplement exports): "
+                f"`{FIGURE3_INTERNAL_QC_SUBDIR}/{FIGURE3_QC_PARTICIPANT_FOREST_STEM}_*`",
                 "",
             ]
         ),
         encoding="utf-8",
     )
-    source_paths.append(audit_note)
+    manuscript_source_paths.append(audit_note)
 
-    return FigureArtifacts(
+    # Tag / order panels by export category.
+    ordered_panels: list[FigurePanelSource] = []
+    for panel in panel_sources:
+        if panel.figure_id == "figure3":
+            keys = list(panel.analysis_keys)
+            flag = f"export_category={EXPORT_CATEGORY_MANUSCRIPT}"
+            if flag not in keys:
+                keys.append(flag)
+            ordered_panels.append(
+                replace(
+                    panel,
+                    export_category=EXPORT_CATEGORY_MANUSCRIPT,
+                    analysis_keys=keys,
+                )
+            )
+        else:
+            ordered_panels.append(panel)
+
+    manuscript = FigureArtifacts(
         figure_id="figure3",
         pdf=pdf,
         svg=svg,
         png=png,
-        source_csvs=tuple(source_paths),
-        panels=tuple(panel_sources),
+        source_csvs=tuple(manuscript_source_paths),
+        panels=tuple(p for p in ordered_panels if p.export_category == EXPORT_CATEGORY_MANUSCRIPT),
     )
+    supplement = FigureArtifacts(
+        figure_id="figure3_supplement",
+        pdf=_supp_trio[0],
+        svg=_supp_trio[1],
+        png=_supp_trio[2],
+        source_csvs=tuple(supplement_source_paths),
+        panels=tuple(
+            p for p in ordered_panels if p.export_category == EXPORT_CATEGORY_SUPPLEMENTARY
+        ),
+    )
+    return Figure3RenderResult(
+        manuscript=manuscript,
+        supplement=supplement,
+        internal_qc_paths=tuple(qc_paths),
+        panels=tuple(ordered_panels),
+    )
+
+
+def write_figure_export_categories(output_dir: Path) -> Path:
+    """Write manuscript / supplementary / internal-QC figure export map."""
+    rows = [
+        {
+            "stem": FIGURE1_STEM,
+            "figure_id": "figure1",
+            "export_category": EXPORT_CATEGORY_MANUSCRIPT,
+            "include_in_manuscript_export": True,
+            "include_in_supplementary_export": False,
+            "relative_path_glob": f"{FIGURE1_STEM}.*",
+            "notes": "Main manuscript Figure 1",
+        },
+        {
+            "stem": FIGURE2_STEM,
+            "figure_id": "figure2",
+            "export_category": EXPORT_CATEGORY_MANUSCRIPT,
+            "include_in_manuscript_export": True,
+            "include_in_supplementary_export": False,
+            "relative_path_glob": f"{FIGURE2_STEM}.*",
+            "notes": "Main manuscript Figure 2",
+        },
+        {
+            "stem": FIGURE3_STEM,
+            "figure_id": "figure3",
+            "export_category": EXPORT_CATEGORY_MANUSCRIPT,
+            "include_in_manuscript_export": True,
+            "include_in_supplementary_export": False,
+            "relative_path_glob": f"{FIGURE3_STEM}.*",
+            "notes": "Only main manuscript Figure 3 (panels A–D)",
+        },
+        {
+            "stem": FIGURE3_SUPPLEMENT_STEM,
+            "figure_id": "figure3_supplement",
+            "export_category": EXPORT_CATEGORY_SUPPLEMENTARY,
+            "include_in_manuscript_export": False,
+            "include_in_supplementary_export": True,
+            "relative_path_glob": f"{FIGURE3_SUPPLEMENT_STEM}.*",
+            "notes": "Supplementary null diagnostics (S1–S5)",
+        },
+        {
+            "stem": FIGURE3_QC_PARTICIPANT_FOREST_STEM,
+            "figure_id": "figure3_internal_qc",
+            "export_category": EXPORT_CATEGORY_INTERNAL_QC,
+            "include_in_manuscript_export": False,
+            "include_in_supplementary_export": False,
+            "relative_path_glob": f"{FIGURE3_INTERNAL_QC_SUBDIR}/{FIGURE3_QC_PARTICIPANT_FOREST_STEM}_*",
+            "notes": (
+                "Dataset-specific participant null forests; internal QC only; "
+                "exclude from manuscript and supplementary exports unless "
+                "explicitly requested"
+            ),
+        },
+    ]
+    path = output_dir / FIGURE_EXPORT_CATEGORIES_FILENAME
+    write_source_csv(
+        path,
+        rows,
+        (
+            "stem",
+            "figure_id",
+            "export_category",
+            "include_in_manuscript_export",
+            "include_in_supplementary_export",
+            "relative_path_glob",
+            "notes",
+        ),
+    )
+    return path
 
 
 def generate_confirmatory_figures(
     confirmatory_root: str | Path,
     output_dir: str | Path,
+    *,
+    include_internal_qc: bool = True,
 ) -> FiguresResult:
     """Generate Figures 1–3 and the figure-source manifest from frozen outputs."""
     root = Path(confirmatory_root).expanduser().resolve()
@@ -2575,8 +2843,12 @@ def generate_confirmatory_figures(
 
     figure1 = render_figure1(inputs, out)
     figure2 = render_figure2(inputs, out)
-    figure3 = render_figure3(inputs, out)
-    panels = figure1.panels + figure2.panels + figure3.panels
+    figure3_bundle = render_figure3(
+        inputs, out, include_internal_qc=include_internal_qc
+    )
+    figure3 = figure3_bundle.manuscript
+    panels = figure1.panels + figure2.panels + figure3_bundle.panels
+    export_categories = write_figure_export_categories(out)
 
     # Hash the frozen inputs actually referenced by panels.
     input_hash_map: dict[str, str] = {}
@@ -2600,23 +2872,35 @@ def generate_confirmatory_figures(
         figure1=figure1,
         figure2=figure2,
         figure3=figure3,
+        figure3_supplement=figure3_bundle.supplement,
+        figure3_internal_qc=figure3_bundle.internal_qc_paths,
+        figure_export_categories=export_categories,
         figure_source_manifest=Path(manifest_payload["manifest_path"]),
         panel_records=panels,
     )
 
 
 __all__ = [
+    "EXPORT_CATEGORY_INTERNAL_QC",
+    "EXPORT_CATEGORY_MANUSCRIPT",
+    "EXPORT_CATEGORY_SUPPLEMENTARY",
     "FIGURE1_STEM",
     "FIGURE2_STEM",
     "FIGURE3_STEM",
     "FIGURE3_SUPPLEMENT_STEM",
+    "FIGURE3_QC_PARTICIPANT_FOREST_STEM",
     "FIGURE3_PARTICIPANT_FOREST_STEM",
+    "FIGURE3_INTERNAL_QC_SUBDIR",
+    "FIGURE_EXPORT_CATEGORIES_FILENAME",
     "FIGURE_DPI",
     "FigureArtifacts",
+    "Figure3RenderResult",
     "FiguresResult",
     "generate_confirmatory_figures",
     "mean_ci_by_lag",
     "render_figure1",
+    "render_figure3",
     "resolve_reporting_inputs",
     "save_figure_trio",
+    "write_figure_export_categories",
 ]

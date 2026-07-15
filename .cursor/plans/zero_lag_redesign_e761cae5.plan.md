@@ -447,7 +447,8 @@ Each dataset selects **one** primary cardiac modality (ECG or PPG) in `PROTOCOL_
 | **D** | Specification / control matrix of default sensitivities (+ LOO when present); optional CFA/nuisance rows only if `--optional-artifact-controls` was run | C6 `specification_matrix`, `leave_one_dataset_out` |
 
 **Supplements (not main panels):**
-- Full C4 battery diagnostics: nested observed-vs-null scatter and participant forests for **phase randomization**, **block shuffle**, **cross-subject mismatch**, and **AR(1) innovations** (`figure3_supplement_null_diagnostics`; secondary FDR table).
+- Full C4 battery diagnostics: nested observed-vs-null scatter and secondary-null participant forests for **phase randomization**, **block shuffle**, **cross-subject mismatch**, and **AR(1) innovations** (`figure3_supplement_null_diagnostics`; secondary FDR table) — **supplementary export**.
+- Dataset-specific circular-shift participant forests (`figures/internal_qc/figure3_qc_participant_null_forests_*`) are **internal QC only** and are excluded from manuscript and supplementary exports unless explicitly requested.
 - Per-dataset participant circular-shift forests when requested by the render path.
 
 **Not Figure 3 panels (Methods / optional / out of design):**

@@ -312,73 +312,106 @@ def build_visual_review_checklist() -> list[dict[str, object]]:
         {
             "item_id": "fig1_lag_sign",
             "figure_id": "figure1",
+            "export_category": "manuscript",
             "check": "Lag axis uses corr(HR(t), EEG(t+τ)); +τ = EEG follows HR",
             "status": "pending_review",
         },
         {
             "item_id": "fig1_flanks",
             "figure_id": "figure1",
+            "export_category": "manuscript",
             "check": "ZLPI flank shading matches 20–60 s windows",
             "status": "pending_review",
         },
         {
             "item_id": "fig1_ci",
             "figure_id": "figure1",
+            "export_category": "manuscript",
             "check": "Mean Fisher-z curves display 95% CI ribbons and participant n",
             "status": "pending_review",
         },
         {
             "item_id": "fig2_matched_curves",
             "figure_id": "figure2",
+            "export_category": "manuscript",
             "check": "Panels A/B use exact C5 pairs linked to C2 curves; wiring-gap if unmatched",
             "status": "pending_review",
         },
         {
             "item_id": "fig2_alpha_meta",
             "figure_id": "figure2",
+            "export_category": "manuscript",
             "check": "Panel C shows absolute PRIMARY_META α ΔZLPI (no percent attenuation)",
             "status": "pending_review",
         },
         {
             "item_id": "fig2_mixedlm_coefs",
             "figure_id": "figure2",
+            "export_category": "manuscript",
             "check": "Panel D shows absolute-model coefficients (not approximated marginal means)",
             "status": "pending_review",
         },
         {
             "item_id": "fig2_graded",
             "figure_id": "figure2",
+            "export_category": "manuscript",
             "check": "Panel F labeled as prespecified ds003690 graded contrasts only",
             "status": "pending_review",
         },
         {
             "item_id": "fig3_panel_a_nulls",
             "figure_id": "figure3",
-            "check": "Panel A circular-shift dataset null forest; secondary nulls in supplements",
+            "export_category": "manuscript",
+            "check": "Panel A circular-shift dataset null forest (main stem only)",
             "status": "pending_review",
         },
         {
             "item_id": "fig3_duration",
             "figure_id": "figure3",
+            "export_category": "manuscript",
             "check": "Panel B duration sensitivity labeled non-rescuing; ZLPI/MWPI/SWPI visually distinct",
             "status": "pending_review",
         },
         {
             "item_id": "fig3_broadband",
             "figure_id": "figure3",
+            "export_category": "manuscript",
             "check": "Panel C shows broadband residualization (core robustness), not optional CFA/nuisance",
             "status": "pending_review",
         },
         {
             "item_id": "fig3_specification",
             "figure_id": "figure3",
+            "export_category": "manuscript",
             "check": "Panel D specification matrix; no ECG–PPG modality panel; no six-panel redesign",
+            "status": "pending_review",
+        },
+        {
+            "item_id": "fig3_export_manuscript_only",
+            "figure_id": "figure3",
+            "export_category": "manuscript",
+            "check": "Manuscript export includes only figure3_temporal_artifact_specificity (A–D)",
+            "status": "pending_review",
+        },
+        {
+            "item_id": "fig3_export_supplement",
+            "figure_id": "figure3_supplement",
+            "export_category": "supplementary",
+            "check": "figure3_supplement_null_diagnostics exported as supplementary (S1–S5); not main Fig 3",
+            "status": "pending_review",
+        },
+        {
+            "item_id": "fig3_export_qc_excluded",
+            "figure_id": "figure3_internal_qc",
+            "export_category": "internal_qc",
+            "check": "Dataset participant null forests under figures/internal_qc/ are QC only; excluded from manuscript and supplementary exports unless explicitly requested",
             "status": "pending_review",
         },
         {
             "item_id": "traceability",
             "figure_id": "all",
-            "check": "Each panel listed in figure_source_manifest.json with input hashes",
+            "export_category": "all",
+            "check": "Each panel listed in figure_source_manifest.json with export_category + input hashes; see figure_export_categories.csv",
             "status": "pending_review",
         },
     ]
@@ -431,7 +464,7 @@ def generate_confirmatory_report(
     checklist_path = _write_csv(
         out / VISUAL_REVIEW_CHECKLIST_FILENAME,
         build_visual_review_checklist(),
-        ("item_id", "figure_id", "check", "status"),
+        ("item_id", "figure_id", "export_category", "check", "status"),
     )
     bundle_path = out / RESULTS_BUNDLE_FILENAME
     bundle_path.write_text(
@@ -493,9 +526,22 @@ def run_confirmatory_reporting(
         "figure2_pdf": figures.figure2.pdf,
         "figure2_svg": figures.figure2.svg,
         "figure2_png": figures.figure2.png,
+        # Manuscript Figure 3 only (not supplement or internal QC).
         "figure3_pdf": figures.figure3.pdf,
         "figure3_svg": figures.figure3.svg,
         "figure3_png": figures.figure3.png,
+        # Supplementary export (secondary null diagnostics).
+        "figure3_supplement_pdf": (
+            figures.figure3_supplement.pdf if figures.figure3_supplement else None
+        ),
+        "figure3_supplement_svg": (
+            figures.figure3_supplement.svg if figures.figure3_supplement else None
+        ),
+        "figure3_supplement_png": (
+            figures.figure3_supplement.png if figures.figure3_supplement else None
+        ),
+        # Classification map; internal QC paths are listed but not exported as MS/supp.
+        "figure_export_categories": figures.figure_export_categories,
         "figure_source_manifest": figures.figure_source_manifest,
         "methods_summary": report.methods_summary,
         "results_summary": report.results_summary,

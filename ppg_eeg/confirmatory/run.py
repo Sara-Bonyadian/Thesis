@@ -654,7 +654,7 @@ def run_c7(ctx: StageContext) -> dict[str, object]:
             "n_surrogates": ctx.n_surrogates,
         },
     )
-    return {key: str(value) for key, value in paths.items()}
+    return {key: str(value) for key, value in paths.items() if value is not None}
 
 
 STAGE_RUNNERS: dict[str, Callable[[StageContext], Mapping[str, object]]] = {

@@ -106,6 +106,16 @@ Main figure is **four panels (A–D)**, not a six-panel redesign:
 | C | Broadband residualization |
 | D | Specification matrix (+ optional controls only if enabled) |
 
+#### Figure 3 export categories
+
+| Category | Stem / location | Include in manuscript export? | Include in supplementary export? |
+|----------|-----------------|-------------------------------|----------------------------------|
+| **Manuscript** | `figure3_temporal_artifact_specificity` | Yes (only this stem) | No |
+| **Supplementary** | `figure3_supplement_null_diagnostics` | No | Yes |
+| **Internal QC** | `figures/internal_qc/figure3_qc_participant_null_forests_*` | No | No (unless explicitly requested) |
+
+Dataset-specific participant null forests are **internal QC artifacts**, not manuscript or supplementary figures. See `figures/figure_export_categories.csv` and the C7 visual review checklist.
+
 Manuscript-facing text: `derivatives/confirmatory_temporal_coupling/review/figure3_manuscript_alignment/FIGURE3_MANUSCRIPT_SPEC.md`.
 
 ## Status

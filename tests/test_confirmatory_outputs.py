@@ -662,6 +662,21 @@ class TestFigures(unittest.TestCase):
                 self.assertTrue(artifacts.svg.is_file())
                 self.assertTrue(artifacts.png.is_file())
                 self.assertTrue(artifacts.source_csvs)
+            self.assertIsNotNone(result.figure3_supplement)
+            assert result.figure3_supplement is not None
+            self.assertTrue(result.figure3_supplement.png.is_file())
+            self.assertTrue(result.figure_export_categories.is_file())
+            with result.figure_export_categories.open(encoding="utf-8") as handle:
+                export_rows = list(csv.DictReader(handle))
+            by_stem = {r["stem"]: r for r in export_rows}
+            self.assertEqual(by_stem["figure3_temporal_artifact_specificity"]["export_category"], "manuscript")
+            self.assertEqual(by_stem["figure3_supplement_null_diagnostics"]["export_category"], "supplementary")
+            self.assertEqual(by_stem["figure3_qc_participant_null_forests"]["export_category"], "internal_qc")
+            self.assertEqual(
+                by_stem["figure3_qc_participant_null_forests"]["include_in_supplementary_export"].lower(),
+                "false",
+            )
+            self.assertTrue((out / "internal_qc").is_dir())
             self.assertEqual(result.figure_source_manifest.name, FIGURE_SOURCE_MANIFEST_FILENAME)
             payload = json.loads(result.figure_source_manifest.read_text(encoding="utf-8"))
             self.assertGreaterEqual(len(payload["panels"]), 8)

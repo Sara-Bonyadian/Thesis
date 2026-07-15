@@ -43,6 +43,8 @@ class FigurePanelSource:
     source_data_csv: str
     analysis_keys: list[str] = field(default_factory=list)
     notes: str = ""
+    # manuscript | supplementary | internal_qc
+    export_category: str = "manuscript"
 
 
 def sha256_file(path: str | Path) -> str:

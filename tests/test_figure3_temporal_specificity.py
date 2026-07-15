@@ -374,6 +374,9 @@ class TestFigure3PanelAForest(unittest.TestCase):
             _write_null_csv(null_path, rows)
             out = root / "figures"
             artifacts = render_figure3({"null_subject": null_path}, out)
+            self.assertEqual(artifacts.manuscript.figure_id, "figure3")
+            self.assertIsNotNone(artifacts.supplement)
+            self.assertTrue(artifacts.manuscript.png.is_file())
 
             self.assertTrue((out / f"{FIGURE3_STEM}.png").is_file())
             self.assertTrue((out / f"{FIGURE3_SUPPLEMENT_STEM}.png").is_file())
@@ -420,9 +423,20 @@ class TestFigure3PanelAForest(unittest.TestCase):
             # 3 participants × 2 conditions
             self.assertEqual(len(condition_rows), 6)
 
-            # Supplemental participant forest rendered separately from main figure.
-            part_forest = list(out.glob(f"{FIGURE3_PARTICIPANT_FOREST_STEM}*.png"))
+            # Internal QC participant forests (not manuscript/supplement).
+            part_forest = list(
+                (out / "internal_qc").glob(f"{FIGURE3_PARTICIPANT_FOREST_STEM}*.png")
+            )
             self.assertGreaterEqual(len(part_forest), 1)
+            # Must not land in the manuscript/supplement figures root.
+            self.assertEqual(
+                list(out.glob("figure3_supplement_participant_null_forests*.png")),
+                [],
+            )
+            self.assertEqual(
+                list(out.glob(f"{FIGURE3_PARTICIPANT_FOREST_STEM}*.png")),
+                [],
+            )
 
             with inference_csv.open(encoding="utf-8") as handle:
                 inference = list(csv.DictReader(handle))[0]

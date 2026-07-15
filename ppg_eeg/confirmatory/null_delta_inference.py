@@ -26,8 +26,9 @@ Group (dataset) inference uses the unweighted mean of {Δ_p} with a Student-*t*
 interval (df = n_participants − 1). Participants with more conditions or
 observations do **not** receive greater weight.
 
-Main Figure 3 Panel A plots **one row per dataset**. Participant forests are
-supplemental and faceted / paginated by dataset.
+Main Figure 3 Panel A plots **one row per dataset**. Dataset-specific participant
+forests are **internal QC** artifacts (under ``figures/internal_qc/``), not
+manuscript or supplementary exports unless explicitly requested.
 """
 
 from __future__ import annotations
