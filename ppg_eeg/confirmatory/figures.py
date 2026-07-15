@@ -1230,13 +1230,17 @@ def render_figure2(
         )
     )
 
-    # Panel C: D180 ZLPI sensitivity (never labeled as primary rescue).
+    # Panel C: absolute D180 ZLPI state-contrast effects (sensitivity only).
+    # This is NOT the D180−D240 difference. Restrict to absolute_log10 so the
+    # band means are not contaminated by relative / broadband-residualized rows.
     ax_c = fig.add_subplot(gs[1, 0])
     d180 = [
         r
         for r in effects
         if _as_int(r.get("duration_s"), 0) == 180
         and _as_str(r.get("endpoint_name"), ENDPOINT_ZLPI) == ENDPOINT_ZLPI
+        and _as_str(r.get("power_representation"), PRIMARY_REPRESENTATION).casefold()
+        == PRIMARY_REPRESENTATION
     ]
     if not d180:
         d180 = [
@@ -1244,6 +1248,8 @@ def render_figure2(
             for r in paired
             if _as_int(r.get("duration_s"), 0) == 180
             and _as_str(r.get("endpoint_name"), ENDPOINT_ZLPI) == ENDPOINT_ZLPI
+            and _as_str(r.get("power_representation"), PRIMARY_REPRESENTATION).casefold()
+            == PRIMARY_REPRESENTATION
         ]
     d180_source = []
     by_band: dict[str, list[float]] = {}
@@ -1256,8 +1262,10 @@ def render_figure2(
                 {
                     "band": band,
                     "dataset_id": _as_str(row.get("dataset_id")),
+                    "contrast_id": _as_str(row.get("contrast_id")),
                     "endpoint_name": ENDPOINT_ZLPI,
                     "duration_s": 180,
+                    "power_representation": PRIMARY_REPRESENTATION,
                     "effect": value,
                     "is_primary_analysis": False,
                     "can_rescue_primary": False,
@@ -1289,8 +1297,8 @@ def render_figure2(
         ax_c.set_yticklabels([_band_display(b) for b in plotted_bands])
         ax_c.set_ylabel(EEG_BAND_YLABEL, fontsize=FS_AXIS, labelpad=10)
         ax_c.set_xlabel(
-            f"D180 {_endpoint_display(ENDPOINT_ZLPI)} effects "
-            f"({ZLPI_METRIC}; {CI_95_LABEL}; sensitivity only)",
+            f"180 s Δ {_endpoint_display(ENDPOINT_ZLPI)} "
+            f"(task − low; {ZLPI_METRIC}; {CI_95_LABEL}; not D180−D240)",
             fontsize=FS_AXIS,
             labelpad=8,
         )
@@ -1300,12 +1308,15 @@ def render_figure2(
             ax_c,
             MSG_NOT_INCLUDED,
             xlabel=(
-                f"D180 {_endpoint_display(ENDPOINT_ZLPI)} effects "
-                f"({ZLPI_METRIC}; {CI_95_LABEL}; sensitivity only)"
+                f"180 s Δ {_endpoint_display(ENDPOINT_ZLPI)} "
+                f"(task − low; {ZLPI_METRIC}; {CI_95_LABEL}; not D180−D240)"
             ),
             ylabel=EEG_BAND_YLABEL,
         )
-    _set_panel_title(ax_c, f"180 s {_endpoint_display(ENDPOINT_ZLPI)} sensitivity")
+    _set_panel_title(
+        ax_c,
+        f"180 s {_endpoint_display(ENDPOINT_ZLPI)} sensitivity (absolute effects)",
+    )
     _add_panel_label(ax_c, "C")
     d180_csv = source_dir / "figure2_panel_c_d180_sensitivity.csv"
     write_source_csv(
@@ -1314,8 +1325,10 @@ def render_figure2(
         (
             "band",
             "dataset_id",
+            "contrast_id",
             "endpoint_name",
             "duration_s",
+            "power_representation",
             "effect",
             "is_primary_analysis",
             "can_rescue_primary",
@@ -1326,13 +1339,21 @@ def render_figure2(
         FigurePanelSource(
             figure_id="figure2",
             panel_id="d180_sensitivity",
-            title="D180 ZLPI sensitivity",
+            title="D180 ZLPI sensitivity (absolute_log10 state-contrast effects)",
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=180,
             input_tables=[str(inputs.get("dataset_effects") or ""), str(inputs.get("paired_contrasts") or "")],
             source_data_csv=str(d180_csv),
-            analysis_keys=["endpoint=zlpi", "duration=180", "can_rescue_primary=false"],
-            notes="Displayed separately from primary D240; not a rescue pathway.",
+            analysis_keys=[
+                "endpoint=zlpi",
+                "duration=180",
+                f"representation={PRIMARY_REPRESENTATION}",
+                "can_rescue_primary=false",
+            ],
+            notes=(
+                "Absolute D180 state-contrast ΔZLPI (not D180−D240). "
+                "Displayed separately from primary D240; not a rescue pathway."
+            ),
         )
     )
 
