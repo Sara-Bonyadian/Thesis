@@ -53,27 +53,35 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
 def _seed_frozen_outputs(root: Path) -> None:
     lags = list(range(-60, 61))
     curve_rows = []
+    # Matched low (rest) and effort (memory / verbalwm) curves for PRIMARY_META pairs.
     for band_i, band in enumerate(("theta", "alpha", "beta", "low_gamma")):
-        for obs in range(3):
-            for lag in lags:
-                # Smooth zero-centered bump in Fisher-r space.
-                r = 0.2 * math.exp(-0.5 * ((lag - 0) / 12.0) ** 2) + 0.01 * band_i
-                curve_rows.append(
-                    {
-                        "dataset_id": "ds003838",
-                        "subject_id": f"sub-{obs}",
-                        "task": "rest",
-                        "condition": "rest",
-                        "observation_id": f"obs-{obs}",
-                        "duration_s": 240,
-                        "endpoint_name": ENDPOINT_ZLPI,
-                        "band": band,
-                        "power_representation": "absolute_log10",
-                        "lag_s": lag,
-                        "r": r,
-                        "n_overlap": 120,
-                    }
-                )
+        for ds, low_cond, effort_cond in (
+            ("ds003838", "rest", "memory"),
+            ("ds006848", "rest", "verbalwm"),
+        ):
+            for obs in range(6):
+                for state, cond in (("low", low_cond), ("effort", effort_cond)):
+                    amp = 0.22 if state == "low" else 0.10
+                    oid = f"{ds}-p{obs}-{cond}"
+                    for lag in lags:
+                        r = amp * math.exp(-0.5 * ((lag - 0) / 12.0) ** 2) + 0.01 * band_i
+                        curve_rows.append(
+                            {
+                                "dataset_id": ds,
+                                "subject_id": f"p{obs}",
+                                "participant_id": f"p{obs}",
+                                "task": cond,
+                                "condition": cond,
+                                "observation_id": oid,
+                                "duration_s": 240,
+                                "endpoint_name": ENDPOINT_ZLPI,
+                                "band": band,
+                                "power_representation": "absolute_log10",
+                                "lag_s": lag,
+                                "r": r,
+                                "n_overlap": 120,
+                            }
+                        )
     _write_csv(root / "confirmatory_cross_correlation_curves_D240.csv", curve_rows)
 
     paired = []
@@ -82,23 +90,34 @@ def _seed_frozen_outputs(root: Path) -> None:
         ("ds003838", "rest__memory", "rest", "memory"),
         ("ds006848", "rest__verbalwm", "rest", "verbalwm"),
     ):
+        for band in ("theta", "alpha", "beta", "low_gamma"):
+            for i in range(6):
+                paired.append(
+                    {
+                        "dataset_id": ds,
+                        "contrast_id": contrast,
+                        "participant_id": f"p{i}",
+                        "session_id": "single",
+                        "duration_s": 240,
+                        "endpoint_name": ENDPOINT_ZLPI,
+                        "band": band,
+                        "power_representation": "absolute_log10",
+                        "low_endpoint_index": 0.4,
+                        "effort_endpoint_index": 0.15,
+                        "delta_endpoint_index": -0.25 + 0.01 * i,
+                        "is_standard_zlpi": True,
+                        "contrast_eligible": True,
+                        "low_observation_ids": f"{ds}-p{i}-{low}",
+                        "effort_observation_ids": f"{ds}-p{i}-{effort}",
+                        "low_has_identifiable_peak": True,
+                        "effort_has_identifiable_peak": i % 5 != 0,
+                        "low_peak_center_mu_s": 0.4,
+                        "effort_peak_center_mu_s": 0.6 if i % 5 != 0 else "",
+                        "low_fwhm_s": 12.0,
+                        "effort_fwhm_s": 14.0 if i % 5 != 0 else "",
+                    }
+                )
         for i in range(6):
-            paired.append(
-                {
-                    "dataset_id": ds,
-                    "contrast_id": contrast,
-                    "participant_id": f"p{i}",
-                    "session_id": "single",
-                    "duration_s": 240,
-                    "endpoint_name": ENDPOINT_ZLPI,
-                    "band": "theta",
-                    "power_representation": "absolute_log10",
-                    "low_endpoint_index": 0.4,
-                    "effort_endpoint_index": 0.15,
-                    "delta_endpoint_index": -0.25 + 0.01 * i,
-                    "is_standard_zlpi": True,
-                }
-            )
             paired.append(
                 {
                     "dataset_id": ds,
@@ -219,6 +238,25 @@ def _seed_frozen_outputs(root: Path) -> None:
             "enters_meta": True,
         },
     ]
+    for band in ("theta", "alpha", "beta", "low_gamma"):
+        for contrast, effect in (("passive__simplert", -0.08), ("passive__gonogo", -0.16)):
+            effects.append(
+                {
+                    "dataset_id": "ds003690",
+                    "contrast_id": contrast,
+                    "duration_s": 240,
+                    "endpoint_name": ENDPOINT_ZLPI,
+                    "band": band,
+                    "power_representation": "absolute_log10",
+                    "is_primary_analysis": True,
+                    "n_pairs": 5,
+                    "effect_mean": effect,
+                    "ci_low": effect - 0.05,
+                    "ci_high": effect + 0.05,
+                    "p_value": 0.04,
+                    "enters_meta": contrast == "passive__gonogo" and band == "alpha",
+                }
+            )
     _write_csv(root / "dataset_effects.csv", effects)
 
     meta = [
@@ -242,6 +280,34 @@ def _seed_frozen_outputs(root: Path) -> None:
         for band in ("theta", "alpha", "beta", "low_gamma")
     ]
     _write_csv(root / "meta_analysis_results.csv", meta)
+
+    mixed_rows = [
+        {
+            "endpoint_name": ENDPOINT_ZLPI,
+            "duration_s": 240,
+            "power_representation": "absolute_log10",
+            "is_primary_analysis": True,
+            "model_backend": "ols_cluster_participant",
+            "converged": True,
+            "term": term,
+            "coef": coef,
+            "stderr": 0.05,
+            "z_or_t": coef / 0.05,
+            "p_value": 0.1,
+            "ci_low": coef - 0.1,
+            "ci_high": coef + 0.1,
+            "n_obs": 48,
+            "n_groups": 12,
+            "notes": "seed",
+        }
+        for term, coef in (
+            ("Intercept", 0.05),
+            ("C(state)[T.low_demand]", 0.10),
+            ("C(band)[T.theta]", 0.02),
+            ("C(state)[T.low_demand]:C(band)[T.theta]", 0.03),
+        )
+    ]
+    _write_csv(root / "mixed_model_results.csv", mixed_rows)
 
     equivalence = [
         {
@@ -287,6 +353,7 @@ def _seed_frozen_outputs(root: Path) -> None:
         },
     ]
     _write_csv(root / "peak_fit_params.csv", peak_params)
+
 
     # Expand subject-level with all bands for heatmap cells.
     subjects_heatmap = list(subjects)
@@ -621,6 +688,56 @@ class TestFigures(unittest.TestCase):
                 forest_rows = list(csv.DictReader(handle))
             self.assertTrue(any(row.get("band") == "alpha" for row in forest_rows))
             self.assertTrue(any(row.get("dataset_id") == "POOLED" for row in forest_rows))
+            # Figure 2 six-panel sources.
+            for name in (
+                "figure2_panel_a_matched_lag_curves.csv",
+                "figure2_panel_a_wiring_gaps.csv",
+                "figure2_panel_b_lag_difference_curves.csv",
+                "figure2_panel_c_alpha_meta_forest.csv",
+                "figure2_panel_d_mixedlm_coefficients.csv",
+                "figure2_panel_e_paired_peaks.csv",
+                "figure2_panel_f_graded_ds003690.csv",
+            ):
+                self.assertTrue((out / "source_data" / name).is_file())
+            f2_a = out / "source_data" / "figure2_panel_a_matched_lag_curves.csv"
+            with f2_a.open(encoding="utf-8", newline="") as handle:
+                f2_a_rows = list(csv.DictReader(handle))
+            self.assertTrue(f2_a_rows)
+            self.assertEqual(
+                f2_a_rows[0]["ci_method"],
+                "paired_participant_within_dataset_bootstrap",
+            )
+            with (out / "source_data" / "figure2_panel_a_wiring_gaps.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                gap_rows = list(csv.DictReader(handle))
+            self.assertEqual(gap_rows, [])
+            with (out / "source_data" / "figure2_panel_c_alpha_meta_forest.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                f2_c = list(csv.DictReader(handle))
+            self.assertTrue(any(row.get("band") == "alpha" for row in f2_c))
+            self.assertTrue(any(row.get("dataset_id") == "POOLED" for row in f2_c))
+            caption2 = (out / "figure2_caption.txt").read_text(encoding="utf-8").casefold()
+            self.assertIn("no percent attenuation", caption2)
+            self.assertIn("no cluster-permutation", caption2)
+            self.assertNotIn("% attenuation", caption2)
+            with (out / "source_data" / "figure2_panel_d_mixedlm_coefficients.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                f2_d = list(csv.DictReader(handle))
+            self.assertTrue(any("state" in row["term"].casefold() for row in f2_d))
+            with (out / "source_data" / "figure2_panel_f_graded_ds003690.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                f2_f = list(csv.DictReader(handle))
+            self.assertTrue(
+                {row["contrast_id"] for row in f2_f}
+                <= {"passive__simplert", "passive__gonogo"}
+            )
+            self.assertTrue(all(row["dataset_id"] == "ds003690" for row in f2_f))
+            self.assertIsNotNone(resolved["mixed_model"])
+
             # Endpoint separation present in figure3 duration source.
             duration_csv = out / "source_data" / "figure3_panel_b_duration.csv"
             with duration_csv.open(encoding="utf-8", newline="") as handle:
@@ -637,15 +754,10 @@ class TestFigures(unittest.TestCase):
             self.assertFalse((out / "source_data" / "figure3_panel_c_modality.csv").exists())
             self.assertEqual(FIGURE_DPI, 300)
 
-            eq_csv = out / "source_data" / "figure2_panel_d_mu_equivalence.csv"
-            with eq_csv.open(encoding="utf-8", newline="") as handle:
-                eq_rows = list(csv.DictReader(handle))
-            self.assertTrue(eq_rows)
-            bands = [row["band"] for row in eq_rows]
-            self.assertEqual(bands, sorted(bands, key=lambda b: ("theta", "alpha", "beta", "low_gamma").index(b) if b in ("theta", "alpha", "beta", "low_gamma") else 99))
-
-            meta_panel = next(p for p in payload["panels"] if p["panel_id"] == "meta_forest")
-            self.assertEqual(meta_panel["title"].casefold(), "random-effects meta-analysis")
+            meta_panel = next(
+                p for p in payload["panels"] if p["panel_id"] == "alpha_primary_meta_forest"
+            )
+            self.assertIn("absolute", meta_panel["title"].casefold())
 
             from ppg_eeg.confirmatory.figures import (
                 FIGURE1_TITLE,
@@ -669,7 +781,7 @@ class TestFigures(unittest.TestCase):
                 FIGURE1_TITLE,
                 "Confirmatory EEG–cardiac coupling: structure, replication, and peaks",
             )
-            self.assertEqual(FIGURE2_TITLE, "State-dependent attenuation of coupling")
+            self.assertIn("State-dependent attenuation", FIGURE2_TITLE)
 
 
 class TestFigure1Bootstrap(unittest.TestCase):
@@ -688,7 +800,7 @@ class TestFigure1Bootstrap(unittest.TestCase):
             )
             self.assertGreater(len(series), 50)
             self.assertEqual(series[0]["ci_method"], "participant_within_dataset_bootstrap")
-            self.assertEqual(int(series[0]["n"]), 3)
+            self.assertEqual(int(series[0]["n"]), 12)
             self.assertTrue(math.isfinite(float(series[0]["ci_low"])))
             self.assertTrue(math.isfinite(float(series[0]["ci_high"])))
             self.assertLessEqual(float(series[0]["ci_low"]), float(series[0]["mean_z"]))

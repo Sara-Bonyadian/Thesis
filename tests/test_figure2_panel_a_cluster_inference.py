@@ -209,29 +209,26 @@ class ClusterAwareInferenceTests(unittest.TestCase):
 
 
 class Figure2PanelARenderTests(unittest.TestCase):
-    def test_render_exports_unit_inference_and_correct_annotation_counts(self) -> None:
-        paired = []
-        for pid, deltas in {
-            "01": (0.2, 0.1, -0.05, 0.0),
-            "02": (-0.1, 0.05, 0.0, 0.1),
-            "03": (0.0, -0.2, 0.15, 0.05),
-        }.items():
-            for i, delta in enumerate(deltas):
-                paired.append(
-                    {
-                        "dataset_id": "hiit",
-                        "participant_id": pid,
-                        "session_id": "s1",
-                        "contrast_id": f"contrast_{i}",
-                        "band": "theta",
-                        "duration_s": 240,
-                        "endpoint_name": ENDPOINT_ZLPI,
-                        "power_representation": PRIMARY_REPRESENTATION,
-                        "low_endpoint_index": 0.0,
-                        "effort_endpoint_index": float(delta),
-                        "delta_endpoint_index": float(delta),
-                    }
-                )
+    def test_render_reports_wiring_gap_without_unpaired_fallback(self) -> None:
+        """PRIMARY_META pairs without matching C2 curves yield gaps, not unpaired curves."""
+        paired = [
+            {
+                "dataset_id": "ds003838",
+                "participant_id": "01",
+                "session_id": "single",
+                "contrast_id": "rest__memory",
+                "band": "theta",
+                "duration_s": 240,
+                "endpoint_name": ENDPOINT_ZLPI,
+                "power_representation": PRIMARY_REPRESENTATION,
+                "contrast_eligible": True,
+                "low_observation_ids": "missing-low-id",
+                "effort_observation_ids": "missing-effort-id",
+                "low_endpoint_index": 0.4,
+                "effort_endpoint_index": 0.1,
+                "delta_endpoint_index": -0.3,
+            }
+        ]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paired_path = root / "paired.csv"
@@ -245,25 +242,23 @@ class Figure2PanelARenderTests(unittest.TestCase):
                 {
                     "subject_level": None,
                     "paired_contrasts": paired_path,
+                    "curves_d240": None,
                     "dataset_effects": None,
                     "meta_analysis": None,
                     "peak_equivalence": None,
+                    "mixed_model": None,
+                    "protocol_audit": None,
                 },
                 out,
             )
-            points = read_csv_rows(out / "source_data" / "figure2_panel_a_paired_deltas.csv")
-            units = read_csv_rows(out / "source_data" / "figure2_panel_a_unit_summaries.csv")
-            inference = read_csv_rows(out / "source_data" / "figure2_panel_a_inference.csv")
-            self.assertEqual(len(points), 12)
-            self.assertEqual(len(units), 3)
-            self.assertEqual(len(inference), 1)
-            self.assertEqual(int(float(inference[0]["n_observations"])), 12)
-            self.assertEqual(int(float(inference[0]["n_units"])), 3)
-            self.assertEqual(str(inference[0]["nested_repeated_measures"]).lower(), "true")
-            self.assertEqual(inference[0]["ci_method"], "student_t_on_independent_unit_means")
-            # SE based on 3 units, not 12 rows.
-            self.assertEqual(int(float(inference[0]["df"])), 2)
-            self.assertEqual(points[0]["sampling_unit"], "participant_x_contrast")
+            gaps = read_csv_rows(out / "source_data" / "figure2_panel_a_wiring_gaps.csv")
+            curves = read_csv_rows(out / "source_data" / "figure2_panel_a_matched_lag_curves.csv")
+            self.assertTrue(gaps)
+            self.assertEqual(curves, [])
+            self.assertEqual(gaps[0]["reason"], "observation_ids_missing_from_curves")
+            self.assertFalse(
+                (out / "source_data" / "figure2_panel_a_paired_deltas.csv").exists()
+            )
 
 
 if __name__ == "__main__":

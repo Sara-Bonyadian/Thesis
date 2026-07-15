@@ -637,6 +637,11 @@ def run_c7(ctx: StageContext) -> dict[str, object]:
         shutil.copy2(path, publish / path.name)
     for path in ctx.stage_dir("C2").glob("*.csv"):
         shutil.copy2(path, publish / path.name)
+    # Figure 1 Panel C requires observation-level endpoint metrics (C3).
+    for path in ctx.stage_dir("C3").glob("confirmatory_endpoint_metrics_D*.csv"):
+        shutil.copy2(path, publish / path.name)
+    for path in ctx.stage_dir("C3").glob("confirmatory_endpoint_qc_D*.csv"):
+        shutil.copy2(path, publish / path.name)
 
     report_dir = ctx.stage_dir("C7")
     paths = run_confirmatory_reporting(

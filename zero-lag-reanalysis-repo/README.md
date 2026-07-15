@@ -95,6 +95,19 @@ Optional controls: cardiac-field/QRS, motion/EOG/EMG, respiration, mean HR, beat
 
 Each dataset config / `PROTOCOL_SPECS` chooses **one** primary cardiac source (ECG or PPG) for instantaneous HR derivation. Dual-modality comparison tables are not part of the confirmatory design.
 
+### Figure 3 (manuscript layout — finalized)
+
+Main figure is **four panels (A–D)**, not a six-panel redesign:
+
+| Panel | Content |
+|-------|---------|
+| A | Circular-shift null Δ forest (θ spotlight); other C4 nulls in supplements |
+| B | Nested duration sensitivity (ZLPI / MWPI / SWPI; non-rescuing) |
+| C | Broadband residualization |
+| D | Specification matrix (+ optional controls only if enabled) |
+
+Manuscript-facing text: `derivatives/confirmatory_temporal_coupling/review/figure3_manuscript_alignment/FIGURE3_MANUSCRIPT_SPEC.md`.
+
 ## Status
 
 See `.cursor/plans/zero_lag_redesign_e761cae5.plan.md`.

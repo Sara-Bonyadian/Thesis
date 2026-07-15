@@ -13,7 +13,9 @@ from ppg_eeg.confirmatory.production import (
     STAGE_EXECUTION_LOG_FILENAME,
     STAGE_ORDER,
     build_synthetic_aligned_tables,
+    flatten_production_publish,
     primary_blockers_summary,
+    production_publish_source_dirs,
     run_production,
     validate_csv_schema,
 )
@@ -132,6 +134,29 @@ class TestProductionPreflightAndSmoke(unittest.TestCase):
             ok, message = validate_csv_schema(path, ("a", "c"))
             self.assertFalse(ok)
             self.assertIn("missing columns", message)
+
+    def test_publish_flatten_includes_endpoint_metrics(self) -> None:
+        """M12 publish must flatten m6_endpoints without manual copying."""
+        with TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            dirs = production_publish_source_dirs(work)
+            self.assertTrue(any(path.name == "m6_endpoints" for path in dirs))
+            (work / "m6_endpoints").mkdir(parents=True)
+            metrics = work / "m6_endpoints" / "confirmatory_endpoint_metrics_D240.csv"
+            metrics.write_text(
+                "dataset_id,endpoint_name,duration_s,band,z0\nds003838,zlpi,240,theta,0.1\n",
+                encoding="utf-8",
+            )
+            (work / "m5_curves").mkdir(parents=True)
+            (work / "m5_curves" / "confirmatory_cross_correlation_curves_D240.csv").write_text(
+                "lag_s,r\n0,0.1\n",
+                encoding="utf-8",
+            )
+            publish = flatten_production_publish(work)
+            self.assertTrue((publish / metrics.name).is_file())
+            self.assertTrue(
+                (publish / "confirmatory_cross_correlation_curves_D240.csv").is_file()
+            )
 
 
 if __name__ == "__main__":

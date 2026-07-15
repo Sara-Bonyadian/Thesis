@@ -1024,6 +1024,48 @@ def run_safe_protocol_audit(
     }
 
 
+def production_publish_source_dirs(work_root: Path) -> tuple[Path, ...]:
+    """Stage product directories flattened into ``publish/`` for M12 reporting.
+
+    Must include ``m6_endpoints`` so ``confirmatory_endpoint_metrics_D*.csv``
+    reach Figure 1 Panel C without manual copying.
+    """
+    root = Path(work_root)
+    return (
+        root / "m5_curves",
+        root / "m6_endpoints",
+        root / "m7_peaks",
+        root / "m8_group",
+        root / "m9_nulls",
+        root / "m1_audit",
+        root / "m10_inference",
+        root / "m11_artifacts",
+    )
+
+
+def flatten_production_publish(
+    work_root: str | Path,
+    publish_root: str | Path | None = None,
+) -> Path:
+    """Copy stage CSVs/JSON into a flat ``publish/`` directory for figures."""
+    work = Path(work_root).expanduser().resolve()
+    out = (
+        Path(publish_root).expanduser().resolve()
+        if publish_root is not None
+        else work / "publish"
+    )
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True, exist_ok=True)
+    for source in production_publish_source_dirs(work):
+        if not source.is_dir():
+            continue
+        for path in source.iterdir():
+            if path.is_file():
+                shutil.copy2(path, out / path.name)
+    return out
+
+
 def execute_smoke_pipeline(
     *,
     master: ConfirmatoryMasterConfig,
@@ -1391,24 +1433,8 @@ def execute_smoke_pipeline(
     }
 
     # M12 — publish reports from group/inference trees assembled under work_root.
-    # Figures expect curves + group tables under a single confirmatory root.
-    publish_root = work_root / "publish"
-    if publish_root.exists():
-        shutil.rmtree(publish_root)
-    publish_root.mkdir(parents=True, exist_ok=True)
-    for source in (
-        curves_dir,
-        peaks_dir,
-        group_dir,
-        nulls_dir,
-        audit_dir,
-        inference_dir,
-        artifacts_dir,
-    ):
-        if source.is_dir():
-            for path in source.iterdir():
-                if path.is_file():
-                    shutil.copy2(path, publish_root / path.name)
+    # Figures expect curves, endpoint metrics, and group tables under one root.
+    publish_root = flatten_production_publish(work_root)
 
     started = time.perf_counter()
     command = f"run_confirmatory_reporting({publish_root}, {report_dir})"
@@ -1747,11 +1773,13 @@ __all__ = [
     "default_production_root",
     "discover_config_dir",
     "execute_smoke_pipeline",
+    "flatten_production_publish",
     "iter_dataset_config_paths",
     "iter_smoke_config_paths",
     "main",
     "master_config_path",
     "primary_blockers_summary",
+    "production_publish_source_dirs",
     "resolve_dataset_configs_for_mode",
     "run_production",
     "run_production_preflight",

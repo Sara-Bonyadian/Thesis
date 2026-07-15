@@ -79,7 +79,7 @@ isProject: false
 | Pairing audit | **Done** | P1/P4/P5 Implemented; P2 Accepted (Methods); **P3 Implemented** — primary meta gated to one prespecified contrast per primary dataset; HIIT/mindfulness/ds004582/ds003816 excluded; within-dataset IVW removed |
 | Statistical Analysis audit | **Done** | S1–S4 Implemented; **S5/S6 not confirmatory requirements** — Methods = temporal surrogate nulls + equal four-band FDR; `PRIMARY_BAND=theta` display-only (no C6 dependency) |
 | Robustness design | **Finalized** | Default = C4 temporal nulls + broadband + duration; optional CFA/nuisance via `--optional-artifact-controls` (off by default); single cardiac modality per dataset for HR |
-| M13c–d | **Blocked** | Primary raw still incomplete for full-cohort lock |
+| M13c–d | **Blocked** | Primary raw still incomplete for full-cohort lock (ds003838, ds006848, ds003690 missing). Figure 1 layout frozen; C7 publish now includes endpoint metrics — see `derivatives/confirmatory_temporal_coupling/review/figure1_publication_audit/FIGURE1_AUDIT.md`. |
 
 **Duration contracts (frozen):** D240/D180 → ZLPI (±60); D120 → MWPI; D60 → SWPI; never pool MWPI/SWPI with ZLPI. Primary = D240 absolute-power ZLPI.
 
@@ -425,18 +425,38 @@ Each dataset selects **one** primary cardiac modality (ECG or PPG) in `PROTOCOL_
 - **F:** Participant identifiable μ/FWHM + dataset summaries + existing μ TOST (±2 s); FWHM descriptive only (no hierarchical FWHM inference).
 - Outputs: PDF/SVG/PNG + `source_data/figure1_panel_*`.
 
-### Figure 2 — state attenuation and replication
+### Figure 2 — state attenuation and replication (six-panel, presentation only)
 
-- Inputs: `subject_level_metrics.csv`, `paired_contrasts.csv`, dataset effects, meta-analysis.
-- Panels: paired ZLPI distributions for ds003838, ds006848, ds003690 contrasts, ds004587, plus forest/meta and D180 sensitivity.
-- New: participant-linked paired plots, forest plot, dataset weights/heterogeneity annotations.
+- **A/B:** Exact C5 paired-intersection participants → C2 lag curves via `low_observation_ids` / `effort_observation_ids`; paired participant-within-dataset bootstrap (preserve both states). No unpaired fallback; wiring-gap note if IDs missing. B = matched Δ*z*(τ) display only (no cluster permutation).
+- **C:** Alpha PRIMARY_META absolute ΔZLPI forest + PI + *n* + modality tags; **no** % attenuation.
+- **D:** Frozen MixedLM **coefficient** forest (absolute pooled state model); no approximated marginal means (no stored VCOV).
+- **E:** Paired low/effort μ and FWHM; one contrast/dataset (PRIMARY_META); suppress non-identifiable peaks; FWHM descriptive.
+- **F:** Prespecified graded ds003690 contrasts only (`passive__simplert`, `passive__gonogo` from `dataset_effects`); not dose-response/behavioral; empty if absent.
+- C0–C6 frozen. Detail: [figure_2_six-panel_1934e276.plan.md](/Users/sarabonyadian/.cursor/plans/figure_2_six-panel_1934e276.plan.md).
 
-### Figure 3 — temporal specificity and core robustness
+### Figure 3 — temporal specificity and core robustness (four-panel, finalized)
 
-- Inputs: observed/null ZLPI (C4), duration sensitivity and broadband residualization (default C6), specification matrix / LOO.
-- Panels: null forests, duration robustness, broadband residualization, specification matrix / LOO summary.
-- Optional CFA/nuisance/respiration controls are omitted from default Figure 3; they appear only if a run opted into `--optional-artifact-controls` with available signals.
-- Reuse: bootstrap/CI utilities only; statistical content is new.
+**Layout:** 2×2 main figure (`figure3_temporal_artifact_specificity`); **not** a six-panel redesign.
+**Title:** Temporal specificity and core robustness.
+
+| Panel | Content | Inputs |
+|-------|---------|--------|
+| **A** | Dataset forest of biological-participant mean Δ vs **circular-shift** null (spotlight: D240 × absolute_log10 × theta × ZLPI) | C4 `null_subject_results.csv` |
+| **B** | Duration sensitivity (D240/D180 ZLPI; D120 MWPI; D60 SWPI); band×endpoint encoding; **cannot rescue** primary; not cross-duration equivalence | C5 `paired_contrasts` (+ `duration_sensitivity` diagnostic) |
+| **C** | Broadband residualization sensitivity forest (default core robustness) | C6 `sensitivity_results` / `specification_matrix` (`broadband_residualized`) |
+| **D** | Specification / control matrix of default sensitivities (+ LOO when present); optional CFA/nuisance rows only if `--optional-artifact-controls` was run | C6 `specification_matrix`, `leave_one_dataset_out` |
+
+**Supplements (not main panels):**
+- Full C4 battery diagnostics: nested observed-vs-null scatter and participant forests for **phase randomization**, **block shuffle**, **cross-subject mismatch**, and **AR(1) innovations** (`figure3_supplement_null_diagnostics`; secondary FDR table).
+- Per-dataset participant circular-shift forests when requested by the render path.
+
+**Not Figure 3 panels (Methods / optional / out of design):**
+- Cardiac-field/QRS, motion/EOG/EMG, respiration, and other nuisance controls → optional `--optional-artifact-controls` only; document in Methods or supplementary material.
+- ECG–vs–PPG comparison tables/figures → **removed** (single primary modality per dataset).
+- Cluster-permutation testing, topography maps, gamma-specific artifact panels, max-\|r\| / argmax-lag, exploratory analyses outside the confirmatory design.
+- Obsolete six-panel manuscript layouts (temporal nulls / cross-subject / duration / CFA / nuisance / topography) → **do not implement**; manuscript text must match this four-panel map.
+
+**Manuscript alignment:** see [`derivatives/confirmatory_temporal_coupling/review/figure3_manuscript_alignment/FIGURE3_MANUSCRIPT_SPEC.md`](derivatives/confirmatory_temporal_coupling/review/figure3_manuscript_alignment/FIGURE3_MANUSCRIPT_SPEC.md).
 
 Generate vector PDF/SVG plus 300-dpi PNG and a `figure_source_manifest.json` listing exact input hashes and analysis keys.
 
@@ -740,7 +760,7 @@ This order keeps each commit independently testable, delays expensive raw-data c
 | **(2) Optional artifact controls** | CFA/QRS; motion/EOG/EMG; respiration; mean HR; beat count/density; eye state | `--optional-artifact-controls` + required signals available; **off by default** |
 | Cardiac modality | One primary ECG **or** PPG per dataset for instantaneous HR | PROTOCOL_SPECS / dataset YAML selection only |
 
-**Methods wording (frozen):** distinguish default confirmatory robustness from optional dataset-conditional artifact controls; do not describe dual-modality comparison tables as part of the confirmatory paper.
+**Methods wording (frozen):** distinguish default confirmatory robustness from optional dataset-conditional artifact controls; do not describe dual-modality comparison tables as part of the confirmatory paper. **Figure 3 manuscript layout (frozen):** four panels A–D as in §7 (circular-shift spotlight; duration; broadband; specification); C4 secondary nulls including cross-subject mismatch and AR(1) innovations as **supplements**; optional CFA/nuisance in Methods/Supplement only; no ECG−PPG, cluster-permutation, topography, or gamma-artifact panels.
 
 ### 15.4 Coupling Analysis / duration endpoints (C1–C5 audit)
 
