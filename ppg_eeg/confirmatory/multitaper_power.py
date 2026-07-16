@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import csv
+import hashlib
+import json
 import math
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 import mne
 import numpy as np
@@ -15,6 +18,19 @@ from scipy.signal.windows import dpss
 
 from ..core_eeg_ppg.eeg import preprocess_eeg
 from ..core_eeg_ppg.features_core import _read_raw
+from ..core_eeg_ppg.output_layout import safe_subject_dir_name
+from ..datasets import CanonicalObservation
+from .parallel_util import (
+    atomic_write_csv_rows,
+    atomic_write_json,
+    configure_blas_threads,
+    estimate_c1a_mem_per_worker_gb,
+    file_identity,
+    prepare_obs_checkpoint_dir,
+    report_progress,
+    resolve_c1a_n_jobs,
+    total_ram_bytes,
+)
 
 FEATURES_FILENAME = "features_multitaper_power.csv"
 QC_FILENAME = "multitaper_qc.csv"
@@ -23,6 +39,12 @@ STEP_S = 1.0
 TIME_BANDWIDTH = 3.0
 N_TAPERS = 5
 ROBUST_MEDIAN_CHANNEL = "__robust_median__"
+CHECKPOINT_SCHEMA_VERSION = "c1a_checkpoint_v1"
+CHECKPOINT_DIRNAME = "_obs_checkpoints"
+COMPLETE_MARKER_FILENAME = "C1a_COMPLETE.json"
+
+# Process-local DPSS cache: identical tapers reused across equal window lengths.
+_DPSS_CACHE: dict[tuple[int, float, int], tuple[np.ndarray, np.ndarray]] = {}
 
 BANDS_HZ: dict[str, tuple[float, float]] = {
     "theta": (4.0, 7.0),
@@ -245,22 +267,53 @@ def _integrate_band(
     return np.trapezoid(selected, x=selected_freqs, axis=1)
 
 
+def _dpss_tapers(
+    n_samples: int,
+    *,
+    time_bandwidth: float,
+    n_tapers: int,
+    cache: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return DPSS tapers/ratios, optionally cached for bit-identical reuse."""
+    key = (int(n_samples), float(time_bandwidth), int(n_tapers))
+    if cache and key in _DPSS_CACHE:
+        return _DPSS_CACHE[key]
+    tapers, ratios = dpss(
+        int(n_samples),
+        NW=float(time_bandwidth),
+        Kmax=int(n_tapers),
+        sym=False,
+        norm=2,
+        return_ratios=True,
+    )
+    if cache:
+        _DPSS_CACHE[key] = (tapers, ratios)
+    return tapers, ratios
+
+
+def clear_dpss_cache() -> None:
+    """Clear the process-local DPSS cache (tests / isolation)."""
+    _DPSS_CACHE.clear()
+
+
 def _multitaper_psd(
     window: np.ndarray,
     *,
     sfreq: float,
     time_bandwidth: float,
     n_tapers: int,
+    tapers: np.ndarray | None = None,
+    ratios: np.ndarray | None = None,
+    cache_dpss: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     n_samples = window.shape[1]
-    tapers, ratios = dpss(
-        n_samples,
-        NW=time_bandwidth,
-        Kmax=n_tapers,
-        sym=False,
-        norm=2,
-        return_ratios=True,
-    )
+    if tapers is None or ratios is None:
+        tapers, ratios = _dpss_tapers(
+            n_samples,
+            time_bandwidth=time_bandwidth,
+            n_tapers=n_tapers,
+            cache=cache_dpss,
+        )
     centered = window - np.mean(window, axis=1, keepdims=True)
     tapered = centered[:, np.newaxis, :] * tapers[np.newaxis, :, :]
     spectra = np.fft.rfft(tapered, axis=2)
@@ -290,6 +343,7 @@ def compute_multitaper_power(
     step_s: float = STEP_S,
     time_bandwidth: float = TIME_BANDWIDTH,
     n_tapers: int = N_TAPERS,
+    cache_dpss: bool = True,
 ) -> MultitaperResult:
     """Compute channel and robust-median log10 absolute band power."""
     if data.ndim != 2:
@@ -365,6 +419,16 @@ def compute_multitaper_power(
         for band, (low_hz, high_hz) in BANDS_HZ.items()
     }
 
+    tapers: np.ndarray | None = None
+    ratios: np.ndarray | None = None
+    if starts:
+        tapers, ratios = _dpss_tapers(
+            window_samples,
+            time_bandwidth=time_bandwidth,
+            n_tapers=n_tapers,
+            cache=cache_dpss,
+        )
+
     features: list[MultitaperFeature] = []
     epsilon = np.finfo(float).tiny
     for window_index, start in enumerate(starts):
@@ -374,6 +438,9 @@ def compute_multitaper_power(
             sfreq=sfreq_hz,
             time_bandwidth=time_bandwidth,
             n_tapers=n_tapers,
+            tapers=tapers,
+            ratios=ratios,
+            cache_dpss=cache_dpss,
         )
         start_s = start / sfreq_hz
         end_s = stop / sfreq_hz
@@ -483,6 +550,7 @@ def extract_multitaper_from_raw(
     h_freq: float = 60.0,
     bad_channel_variance_z: float = 3.0,
     reference: str = "average",
+    cache_dpss: bool = True,
 ) -> MultitaperResult:
     """Reuse repository EEG preprocessing, then compute confirmatory power."""
     nyquist = float(raw.info["sfreq"]) / 2.0
@@ -511,18 +579,8 @@ def extract_multitaper_from_raw(
         apply_line_notch=True,
         identity=identity,
         eeg_file=eeg_file,
+        cache_dpss=cache_dpss,
     )
-
-
-def _write_rows(
-    path: Path,
-    rows: Iterable[Mapping[str, object]],
-    fieldnames: list[str],
-) -> None:
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def write_multitaper_outputs(
@@ -552,14 +610,14 @@ def write_multitaper_outputs(
         ).to_row()
     )
     features_path = output_path / FEATURES_FILENAME
-    _write_rows(
+    atomic_write_csv_rows(
         features_path,
-        (feature.to_row() for feature in result.features),
+        [feature.to_row() for feature in result.features],
         feature_fields,
     )
     qc_path = output_path / QC_FILENAME
     qc_row = result.qc.to_row()
-    _write_rows(qc_path, [qc_row], list(qc_row))
+    atomic_write_csv_rows(qc_path, [qc_row], list(qc_row))
     return features_path, qc_path
 
 
@@ -575,26 +633,451 @@ def extract_multitaper_file(
     h_freq: float = 60.0,
     bad_channel_variance_z: float = 3.0,
     reference: str = "average",
+    cache_dpss: bool = True,
 ) -> tuple[Path, Path]:
-    """Read EEG through the existing loader and write M3 outputs."""
-    resolved_path = Path(eeg_path).expanduser().resolve()
-    raw = _read_raw(resolved_path, eeg_format)
+    """Read EEG through the existing loader and write M3 outputs.
+
+    Use ``Path.absolute()`` rather than ``resolve()`` so git-annex symlinks
+    (OpenNeuro BrainVision .vhdr/.vmrk/.eeg triples) are not followed. Resolving
+    the symlink makes MNE look for companion files beside the content-hashed
+    annex object name, which fails even when all three files are present.
+    """
+    # absolute() keeps BIDS/annex symlink paths intact; resolve() does not.
+    load_path = Path(eeg_path).expanduser().absolute()
+    raw = _read_raw(load_path, eeg_format)
     result = extract_multitaper_from_raw(
         raw,
         clean_channels=clean_channels,
         identity=identity,
-        eeg_file=str(resolved_path),
+        eeg_file=str(load_path),
         line_frequency_hz=line_frequency_hz,
         l_freq=l_freq,
         h_freq=h_freq,
         bad_channel_variance_z=bad_channel_variance_z,
         reference=reference,
+        cache_dpss=cache_dpss,
     )
     return write_multitaper_outputs(result, output_dir)
 
 
+def _c1a_param_fingerprint(
+    *,
+    line_frequency_hz: float | None,
+    l_freq: float,
+    h_freq: float,
+    bad_channel_variance_z: float,
+    reference: str,
+    window_s: float,
+    step_s: float,
+    time_bandwidth: float,
+    n_tapers: int,
+    cache_dpss: bool,
+) -> dict[str, object]:
+    return {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "line_frequency_hz": line_frequency_hz,
+        "l_freq": float(l_freq),
+        "h_freq": float(h_freq),
+        "bad_channel_variance_z": float(bad_channel_variance_z),
+        "reference": str(reference),
+        "window_s": float(window_s),
+        "step_s": float(step_s),
+        "time_bandwidth": float(time_bandwidth),
+        "n_tapers": int(n_tapers),
+        "bands_hz": {name: list(bounds) for name, bounds in BANDS_HZ.items()},
+        "cache_dpss": bool(cache_dpss),
+        "features_filename": FEATURES_FILENAME,
+        "qc_filename": QC_FILENAME,
+    }
+
+
+def _c1a_obs_fingerprint(
+    obs: CanonicalObservation,
+    *,
+    params: Mapping[str, object],
+) -> dict[str, object]:
+    eeg_path = Path(obs.eeg_path).expanduser().absolute()
+    return {
+        **dict(params),
+        "observation_id": obs.observation_id,
+        "eeg_format": obs.eeg_format,
+        "eeg_file": file_identity(eeg_path),
+    }
+
+
+def _checkpoint_path(checkpoint_dir: Path, observation_id: str) -> Path:
+    digest = hashlib.sha256(observation_id.encode("utf-8")).hexdigest()[:32]
+    return checkpoint_dir / f"obs_{digest}.json"
+
+
+def _required_c1a_outputs(obs_dir: Path) -> tuple[Path, Path]:
+    return obs_dir / FEATURES_FILENAME, obs_dir / QC_FILENAME
+
+
+def _c1a_outputs_complete(obs_dir: Path) -> bool:
+    features, qc = _required_c1a_outputs(obs_dir)
+    return (
+        features.is_file()
+        and qc.is_file()
+        and features.stat().st_size > 0
+        and qc.stat().st_size > 0
+    )
+
+
+def _load_c1a_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    observation_id: str,
+    fingerprint: Mapping[str, object],
+    obs_dir: Path,
+) -> bool:
+    path = _checkpoint_path(checkpoint_dir, observation_id)
+    if not path.is_file() or not _c1a_outputs_complete(obs_dir):
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        return False
+    if payload.get("fingerprint") != dict(fingerprint):
+        return False
+    if payload.get("status") != "ok":
+        return False
+    return True
+
+
+def _write_c1a_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    observation_id: str,
+    fingerprint: Mapping[str, object],
+    obs_dir: Path,
+) -> None:
+    features, qc = _required_c1a_outputs(obs_dir)
+    payload = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "observation_id": observation_id,
+        "status": "ok",
+        "fingerprint": dict(fingerprint),
+        "outputs": {
+            "features": str(features),
+            "qc": str(qc),
+            "features_size": int(features.stat().st_size),
+            "qc_size": int(qc.stat().st_size),
+        },
+    }
+    atomic_write_json(_checkpoint_path(checkpoint_dir, observation_id), payload)
+
+
+def _process_one_c1a_observation(
+    obs: CanonicalObservation,
+    obs_dir: Path,
+    *,
+    line_frequency_hz: float | None,
+    l_freq: float,
+    h_freq: float,
+    bad_channel_variance_z: float,
+    reference: str,
+    cache_dpss: bool,
+) -> str:
+    configure_blas_threads(1)
+    obs_dir.mkdir(parents=True, exist_ok=True)
+    extract_multitaper_file(
+        obs.eeg_path,
+        obs.eeg_format,
+        obs_dir,
+        identity={
+            "dataset_id": obs.dataset_id,
+            "subject_id": obs.subject_id,
+            "task": obs.task_label,
+            "condition": obs.condition_label,
+            "observation_id": obs.observation_id,
+        },
+        line_frequency_hz=line_frequency_hz,
+        l_freq=l_freq,
+        h_freq=h_freq,
+        bad_channel_variance_z=bad_channel_variance_z,
+        reference=reference,
+        cache_dpss=cache_dpss,
+    )
+    return obs.observation_id
+
+
+def _worker_c1a(
+    payload: tuple[
+        int,
+        CanonicalObservation,
+        str,
+        float | None,
+        float,
+        float,
+        float,
+        str,
+        bool,
+    ],
+) -> tuple[int, str | None, str | None]:
+    (
+        index,
+        obs,
+        obs_dir_s,
+        line_frequency_hz,
+        l_freq,
+        h_freq,
+        bad_channel_variance_z,
+        reference,
+        cache_dpss,
+    ) = payload
+    try:
+        _process_one_c1a_observation(
+            obs,
+            Path(obs_dir_s),
+            line_frequency_hz=line_frequency_hz,
+            l_freq=l_freq,
+            h_freq=h_freq,
+            bad_channel_variance_z=bad_channel_variance_z,
+            reference=reference,
+            cache_dpss=cache_dpss,
+        )
+        return index, obs.observation_id, None
+    except Exception as exc:  # noqa: BLE001
+        return index, None, f"{obs.observation_id}: {type(exc).__name__}: {exc}"
+
+
+def run_confirmatory_multitaper(
+    observations: Sequence[CanonicalObservation],
+    stage_root: str | Path,
+    *,
+    line_frequency_hz: float | None = None,
+    l_freq: float = 1.0,
+    h_freq: float = 60.0,
+    bad_channel_variance_z: float = 3.0,
+    reference: str = "average",
+    n_jobs: int | None = -1,
+    progress: bool = True,
+    cache_dpss: bool = True,
+) -> dict[str, object]:
+    """Extract multitaper features for all observations (serial or parallel)."""
+    output_path = Path(stage_root).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    complete_marker = output_path / COMPLETE_MARKER_FILENAME
+    if complete_marker.is_file():
+        try:
+            complete_marker.unlink()
+        except OSError:
+            pass
+
+    obs_list = sorted(observations, key=lambda o: o.observation_id)
+    params = _c1a_param_fingerprint(
+        line_frequency_hz=line_frequency_hz,
+        l_freq=l_freq,
+        h_freq=h_freq,
+        bad_channel_variance_z=bad_channel_variance_z,
+        reference=reference,
+        window_s=WINDOW_S,
+        step_s=STEP_S,
+        time_bandwidth=TIME_BANDWIDTH,
+        n_tapers=N_TAPERS,
+        cache_dpss=cache_dpss,
+    )
+    fingerprints = [
+        _c1a_obs_fingerprint(obs, params=params) for obs in obs_list
+    ]
+    obs_dirs = [
+        output_path / safe_subject_dir_name(obs.observation_id) for obs in obs_list
+    ]
+    unit_keys = [obs.observation_id for obs in obs_list]
+    ckpt_dir = prepare_obs_checkpoint_dir(
+        output_path / CHECKPOINT_DIRNAME,
+        manifest={
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "stage": "C1a",
+            "unit_keys": unit_keys,
+            "n_observations": len(unit_keys),
+            "params": params,
+        },
+    )
+
+    workers = resolve_c1a_n_jobs(
+        n_jobs,
+        eeg_paths=[obs.eeg_path for obs in obs_list],
+    )
+    mem_est = estimate_c1a_mem_per_worker_gb([obs.eeg_path for obs in obs_list])
+    total_ram = total_ram_bytes()
+    pending: list[int] = []
+    written: list[str] = []
+    errors: list[str] = []
+    for index, obs in enumerate(obs_list):
+        if _load_c1a_checkpoint(
+            ckpt_dir,
+            observation_id=obs.observation_id,
+            fingerprint=fingerprints[index],
+            obs_dir=obs_dirs[index],
+        ):
+            written.append(obs.observation_id)
+        else:
+            pending.append(index)
+
+    total = len(obs_list)
+    done = total - len(pending)
+    start_time = time.perf_counter()
+    last_report = 0.0
+    if progress:
+        ram_gb = None if total_ram is None else total_ram / float(1024**3)
+        print(
+            f"[confirmatory] C1a multitaper: {total} observations "
+            f"(n_jobs={workers}, pending={len(pending)}, resumed={done}, "
+            f"est_mem/worker≈{mem_est:.1f} GB"
+            + (f", host_RAM≈{ram_gb:.1f} GB" if ram_gb is not None else "")
+            + ")...",
+            flush=True,
+        )
+        if workers == 1 and mem_est >= 4.0:
+            print(
+                "[confirmatory] C1a: large EEG payloads detected — forcing serial "
+                "workers to avoid out-of-memory crashes. Use --n-jobs 1 explicitly "
+                "on laptops; raise n_jobs only if you have ample free RAM.",
+                flush=True,
+            )
+        if done:
+            last_report = report_progress(
+                label="C1a",
+                done=done,
+                total=total,
+                start_time=start_time,
+                last_report=last_report,
+                force=True,
+            )
+
+    def _mark_ok(index: int) -> None:
+        nonlocal done, last_report
+        obs = obs_list[index]
+        _write_c1a_checkpoint(
+            ckpt_dir,
+            observation_id=obs.observation_id,
+            fingerprint=fingerprints[index],
+            obs_dir=obs_dirs[index],
+        )
+        written.append(obs.observation_id)
+        done += 1
+        if progress:
+            last_report = report_progress(
+                label="C1a",
+                done=done,
+                total=total,
+                start_time=start_time,
+                last_report=last_report,
+                force=(done == total),
+            )
+
+    if pending:
+        if workers == 1 or len(pending) == 1:
+            configure_blas_threads(1)
+            for index in pending:
+                try:
+                    _process_one_c1a_observation(
+                        obs_list[index],
+                        obs_dirs[index],
+                        line_frequency_hz=line_frequency_hz,
+                        l_freq=l_freq,
+                        h_freq=h_freq,
+                        bad_channel_variance_z=bad_channel_variance_z,
+                        reference=reference,
+                        cache_dpss=cache_dpss,
+                    )
+                    _mark_ok(index)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(
+                        f"{obs_list[index].observation_id}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    done += 1
+                    if progress:
+                        last_report = report_progress(
+                            label="C1a",
+                            done=done,
+                            total=total,
+                            start_time=start_time,
+                            last_report=last_report,
+                            force=(done == total),
+                        )
+        else:
+            payloads = [
+                (
+                    index,
+                    obs_list[index],
+                    str(obs_dirs[index]),
+                    line_frequency_hz,
+                    float(l_freq),
+                    float(h_freq),
+                    float(bad_channel_variance_z),
+                    str(reference),
+                    bool(cache_dpss),
+                )
+                for index in pending
+            ]
+            max_workers = min(workers, len(pending))
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=configure_blas_threads,
+                initargs=(1,),
+            ) as executor:
+                futures = {
+                    executor.submit(_worker_c1a, payload): payload[0]
+                    for payload in payloads
+                }
+                for future in as_completed(futures):
+                    index, _ok_id, err = future.result()
+                    if err is None:
+                        _mark_ok(index)
+                    else:
+                        errors.append(err)
+                        done += 1
+                        if progress:
+                            last_report = report_progress(
+                                label="C1a",
+                                done=done,
+                                total=total,
+                                start_time=start_time,
+                                last_report=last_report,
+                                force=(done == total),
+                            )
+
+    written_sorted = sorted(set(written))
+    if not written_sorted:
+        raise RuntimeError(f"C1a wrote no observations. Errors: {errors[:5]}")
+
+    wall_time_s = time.perf_counter() - start_time
+    if len(written_sorted) == total and not errors:
+        atomic_write_json(
+            complete_marker,
+            {
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "stage": "C1a",
+                "n_observations": total,
+                "observation_ids": written_sorted,
+                "n_jobs": workers,
+                "wall_time_s": wall_time_s,
+            },
+        )
+
+    return {
+        "n_ok": len(written_sorted),
+        "n_error": len(errors),
+        "errors": errors[:20],
+        "n_jobs": workers,
+        "wall_time_s": wall_time_s,
+        "complete": complete_marker.is_file(),
+    }
+
+
 __all__ = [
     "BANDS_HZ",
+    "CHECKPOINT_DIRNAME",
+    "CHECKPOINT_SCHEMA_VERSION",
+    "COMPLETE_MARKER_FILENAME",
     "FEATURES_FILENAME",
     "N_TAPERS",
     "QC_FILENAME",
@@ -605,8 +1088,10 @@ __all__ = [
     "MultitaperFeature",
     "MultitaperQC",
     "MultitaperResult",
+    "clear_dpss_cache",
     "compute_multitaper_power",
     "extract_multitaper_file",
     "extract_multitaper_from_raw",
+    "run_confirmatory_multitaper",
     "write_multitaper_outputs",
 ]

@@ -430,17 +430,6 @@ def read_detected_peaks(path: str | Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _write_rows(
-    path: Path,
-    rows: Iterable[Mapping[str, object]],
-    fieldnames: list[str],
-) -> None:
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def reconstruct_instant_hr_file(
     peaks_path: str | Path,
     output_dir: str | Path,
@@ -448,6 +437,8 @@ def reconstruct_instant_hr_file(
     max_beat_gap_s: float = MAX_BEAT_GAP_S,
 ) -> tuple[Path, Path]:
     """Read one detected-peaks file and write feature/QC outputs."""
+    from .parallel_util import atomic_write_csv_rows
+
     resolved_peaks = Path(peaks_path).expanduser().resolve()
     result = reconstruct_instant_hr(
         read_detected_peaks(resolved_peaks),
@@ -475,15 +466,15 @@ def reconstruct_instant_hr_file(
         ).to_row()
     )
     features_path = output_path / FEATURES_FILENAME
-    _write_rows(
+    atomic_write_csv_rows(
         features_path,
-        (feature.to_row() for feature in result.features),
+        [feature.to_row() for feature in result.features],
         feature_fields,
     )
 
     qc_path = output_path / QC_FILENAME
     qc_row = result.qc.to_row()
-    _write_rows(qc_path, [qc_row], list(qc_row))
+    atomic_write_csv_rows(qc_path, [qc_row], list(qc_row))
     return features_path, qc_path
 
 

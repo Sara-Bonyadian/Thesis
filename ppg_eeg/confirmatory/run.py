@@ -44,12 +44,9 @@ from .harmonize import (
 )
 from .inference import run_confirmatory_inference_from_dir
 from .instant_hr import FEATURES_FILENAME as INSTANT_HR_FEATURES
-from .instant_hr import reconstruct_instant_hr_file
-from .peak_detection import PEAKS_FILENAME, run_confirmatory_peak_detection
 from .multitaper_power import (
     FEATURES_FILENAME as MULTITAPER_FEATURES,
     ROBUST_MEDIAN_CHANNEL,
-    extract_multitaper_file,
 )
 from .nulls import DEFAULT_N_SURROGATES, SMOKE_N_SURROGATES, run_confirmatory_nulls
 from .peak_model import run_confirmatory_peak_fits
@@ -263,82 +260,57 @@ def run_c0(ctx: StageContext) -> dict[str, Path]:
 
 
 def run_c1a(ctx: StageContext) -> dict[str, object]:
+    from .multitaper_power import run_confirmatory_multitaper
+
     observations = _load_observations(ctx)
     out_root = ctx.stage_dir("C1a")
-    out_root.mkdir(parents=True, exist_ok=True)
-    written: list[str] = []
-    errors: list[str] = []
-    for obs in observations:
-        obs_out = _obs_dir(out_root, obs.observation_id)
-        try:
-            extract_multitaper_file(
-                obs.eeg_path,
-                obs.eeg_format,
-                obs_out,
-                identity={
-                    "dataset_id": obs.dataset_id,
-                    "subject_id": obs.subject_id,
-                    "task": obs.task_label,
-                    "condition": obs.condition_label,
-                    "observation_id": obs.observation_id,
-                },
-                line_frequency_hz=ctx.dataset.eeg.line_frequency_hz,
-            )
-            written.append(obs.observation_id)
-        except Exception as exc:  # noqa: BLE001 — continue other observations
-            errors.append(f"{obs.observation_id}: {type(exc).__name__}: {exc}")
-    if not written:
-        raise StageError(f"C1a wrote no observations. Errors: {errors[:5]}")
-    return {"n_ok": len(written), "n_error": len(errors), "errors": errors[:20]}
+    result = run_confirmatory_multitaper(
+        observations,
+        out_root,
+        line_frequency_hz=ctx.dataset.eeg.line_frequency_hz,
+        n_jobs=ctx.n_jobs,
+        progress=True,
+    )
+    if int(result.get("n_ok", 0)) <= 0:
+        raise StageError(
+            f"C1a wrote no observations. Errors: {result.get('errors', [])[:5]}"
+        )
+    return {
+        "n_ok": result["n_ok"],
+        "n_error": result["n_error"],
+        "errors": result["errors"],
+        "n_jobs": result["n_jobs"],
+        "complete": result["complete"],
+    }
 
 
 def run_c1b(ctx: StageContext) -> dict[str, object]:
     """Detect peaks, write QC, and reconstruct instantaneous HR under C1b/."""
+    from .peak_detection import run_confirmatory_c1b
+
     observations = _load_observations(ctx)
     out_root = ctx.stage_dir("C1b")
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    peaks_paths, peak_qc, detect_errors = run_confirmatory_peak_detection(
+    result = run_confirmatory_c1b(
         observations,
         ctx.dataset,
         ctx.master,
         out_root,
+        n_jobs=ctx.n_jobs,
+        progress=True,
     )
-    if not peaks_paths:
+    if int(result.get("n_ok", 0)) <= 0:
         raise StageError(
             "C1b peak detection wrote no detected_peaks.csv. "
-            f"Errors: {detect_errors[:5]}"
-        )
-
-    written: list[str] = []
-    errors: list[str] = list(detect_errors)
-    by_obs = {
-        path.parent.name: path for path in peaks_paths
-    }
-    for obs in observations:
-        safe = safe_subject_dir_name(obs.observation_id)
-        peaks = by_obs.get(safe) or (out_root / safe / PEAKS_FILENAME)
-        if not Path(peaks).is_file():
-            errors.append(f"{obs.observation_id}: detected_peaks.csv missing after detection")
-            continue
-        obs_out = _obs_dir(out_root, obs.observation_id)
-        try:
-            reconstruct_instant_hr_file(peaks, obs_out)
-            written.append(obs.observation_id)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{obs.observation_id}: {type(exc).__name__}: {exc}")
-
-    if not written:
-        raise StageError(
-            "C1b reconstructed no instantaneous-HR features. "
-            f"Errors: {errors[:5]}"
+            f"Errors: {result.get('errors', [])[:5]}"
         )
     return {
-        "n_ok": len(written),
-        "n_peaks": len(peaks_paths),
-        "n_peak_qc": len(peak_qc),
-        "n_error": len(errors),
-        "errors": errors[:20],
+        "n_ok": result["n_ok"],
+        "n_peaks": result["n_peaks"],
+        "n_peak_qc": result["n_peak_qc"],
+        "n_error": result["n_error"],
+        "errors": result["errors"],
+        "n_jobs": result["n_jobs"],
+        "complete": result["complete"],
     }
 
 
@@ -787,8 +759,9 @@ def build_stage_parser() -> argparse.ArgumentParser:
         type=int,
         default=-1,
         help=(
-            "Process-pool workers for C4 null battery. "
-            "-1 uses all CPUs; 1 forces serial execution."
+            "Process-pool workers for C1a, C1b, and C4. "
+            "-1 uses all CPUs; 1 forces serial execution. "
+            "C1a also applies a RAM-aware cap (~1.5 GB/worker)."
         ),
     )
     parser.add_argument(

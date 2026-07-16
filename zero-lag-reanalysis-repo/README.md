@@ -63,7 +63,7 @@ From the repo root:
   --config zero-lag-reanalysis-repo/datasets/hiit.yaml \
   --stage all
 
-# Same pipeline, force serial C4 (other stages ignore --n-jobs)
+# Same pipeline, force serial C1a/C1b/C4
 .venv/bin/python -m ppg_eeg.confirmatory \
   --config zero-lag-reanalysis-repo/datasets/hiit.yaml \
   --stage all \
@@ -83,11 +83,15 @@ Notes:
   `1/501 ≈ 0.0020` (was `1/1001 ≈ 0.0010`); Monte Carlo SE scales up by ≈√2.
   Seed generation is unchanged; only the draw count changes. Override only if
   intentional: `--n-surrogates 20` (smoke-like; not for manuscript production).
-- C4 parallelizes over analysis units. `--n-jobs` applies with `--stage C4` **or**
-  `--stage all` (only C4 uses it; other stages ignore it). Default `-1` = all CPUs;
-  `--n-jobs 1` = serial. Observed endpoint is cached across the five null types;
-  unit checkpoints under `C4/_unit_checkpoints/` plus `C4_COMPLETE.json` support
-  safe resume after interrupt.
+- `--n-jobs` parallelizes **C1a**, **C1b**, and **C4** (default `-1` = all CPUs;
+  `--n-jobs 1` = serial). C1a also applies a **file-size-aware RAM cap** (large
+  OpenNeuro EEG can force serial on a 16 GB laptop). Prefer `--n-jobs 1` for C1a
+  on laptops when recordings are multi-GB. C1a caches DPSS tapers per window
+  length; C1b honors `cardiac.debug_plot` (no preview PNGs when false).
+  Per-observation checkpoints live under `C1a/_obs_checkpoints/` /
+  `C1b/_obs_checkpoints/` / `C4/_unit_checkpoints/`, with `C1a_COMPLETE.json` /
+  `C1b_COMPLETE.json` / `C4_COMPLETE.json` written only after a fully successful
+  stage.
 - Optional artifact controls (CFA/QRS, motion/EOG/EMG, …) stay off unless you add
   `--optional-artifact-controls` (typically on C6 / `all`).
 - Full HIIT is a **sensitivity** dataset in `master.yaml` (not a primary meta cohort).
