@@ -14,22 +14,39 @@ distributions are never pooled across endpoint types.
 
 Surrogate counts
 ----------------
-- Production / confirmatory default: ``DEFAULT_N_SURROGATES`` (1000)
+- Production / confirmatory default: ``DEFAULT_N_SURROGATES`` (500)
 - Smoke tests: ``SMOKE_N_SURROGATES`` (20), typically via dataset YAML
   ``n_surrogates: 20``
+
+Statistical contract note (500 vs prior 1000)
+---------------------------------------------
+``DEFAULT_N_SURROGATES`` was reduced from 1000 to 500 as an explicit
+Monte Carlo contract change (not a bit-identical optimization). With the
+add-one empirical p-value, the finest attainable p is ``1/(n+1)``:
+``1/501 ≈ 0.001996`` at n=500 (was ``1/1001 ≈ 0.000999`` at n=1000).
+Monte Carlo SE for a given p scales roughly as ``sqrt(p(1-p)/n)``, so
+uncertainty increases by about ``sqrt(2) ≈ 1.41×`` relative to n=1000.
+Results at 500 surrogates are not identical to results at 1000.
 
 Reproducibility
 ---------------
 Each subject×null-type row records ``rng_seed_u64``: the uint64 seed passed
 to ``numpy.random.default_rng`` for that unit. Seeds are derived from SHA-256
 of ``observation_id``, analysis key, and null type (not Python ``hash()``).
+The seed-generation method is unchanged when ``n_surrogates`` changes; only
+the number of draws from that RNG stream changes.
 """
 
 from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import math
+import os
+import shutil
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -78,9 +95,14 @@ WITHIN_SERIES_NULL_TYPES: tuple[str, ...] = (
 )
 
 SMOKE_N_SURROGATES = 20
-DEFAULT_N_SURROGATES = 1000
+DEFAULT_N_SURROGATES = 500
 MIN_CIRCULAR_SHIFT_S = 60
 BLOCK_LENGTH_S = 30
+
+CHECKPOINT_SCHEMA_VERSION = "c4_checkpoint_v1"
+CHECKPOINT_DIRNAME = "_unit_checkpoints"
+RUN_MANIFEST_FILENAME = "run_manifest.json"
+COMPLETE_MARKER_FILENAME = "C4_COMPLETE.json"
 
 SUBJECT_RESULT_FIELDS = (
     "dataset_id",
@@ -593,6 +615,8 @@ def _null_statistics_for_unit(
     null_type: str,
     n_surrogates: int,
     partner_eeg_by_surrogate: Sequence[np.ndarray] | None = None,
+    observed_stat: float | None = None,
+    observed_eligible: bool | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     contract = contract_for_duration(unit.duration_s)
     key = analysis_key(
@@ -612,19 +636,23 @@ def _null_statistics_for_unit(
         "condition": unit.condition,
         "observation_id": unit.observation_id,
     }
-    observed = compute_endpoint_index_from_series(
-        unit.hr_z,
-        unit.eeg_z,
-        duration_s=unit.duration_s,
-        identity=identity,
-        band=unit.band,
-        power_representation=unit.power_representation,
-        duration_role=unit.duration_role,
-        is_primary_representation=unit.is_primary_representation,
-        pair=unit.pair,
-    )
-    observed_stat = _as_float(observed.get("endpoint_index"))
-    observed_eligible = bool(observed.get("eligible"))
+    if observed_stat is None or observed_eligible is None:
+        observed = compute_endpoint_index_from_series(
+            unit.hr_z,
+            unit.eeg_z,
+            duration_s=unit.duration_s,
+            identity=identity,
+            band=unit.band,
+            power_representation=unit.power_representation,
+            duration_role=unit.duration_role,
+            is_primary_representation=unit.is_primary_representation,
+            pair=unit.pair,
+        )
+        observed_stat = _as_float(observed.get("endpoint_index"))
+        observed_eligible = bool(observed.get("eligible"))
+    else:
+        observed_stat = float(observed_stat)
+        observed_eligible = bool(observed_eligible)
 
     null_vals: list[float] = []
     notes = ""
@@ -821,27 +849,45 @@ def _observation_key(unit: SeriesUnit) -> str:
     return unit.observation_id
 
 
-def run_null_battery(
+def unit_analysis_key(unit: SeriesUnit) -> str:
+    """Stable unit identity for checkpoints and manifests."""
+    return "|".join(
+        [
+            _as_str(unit.observation_id),
+            str(int(unit.duration_s)),
+            _as_str(unit.band).casefold(),
+            _as_str(unit.power_representation).casefold(),
+            _as_str(unit.modality, "default").casefold(),
+        ]
+    )
+
+
+def resolve_n_jobs(n_jobs: int | None) -> int:
+    """Resolve worker count: ``None``/``-1`` → all CPUs; ``>=1`` → that many."""
+    if n_jobs is None or int(n_jobs) == -1:
+        return max(1, int(os.cpu_count() or 1))
+    resolved = int(n_jobs)
+    if resolved < 1:
+        raise ValueError("n_jobs must be >= 1 or -1 (all CPUs).")
+    return resolved
+
+
+def _format_hms(seconds: float) -> str:
+    total = int(max(0.0, float(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
+def _build_pool_derangements(
     units: Sequence[SeriesUnit],
     *,
-    n_surrogates: int = DEFAULT_N_SURROGATES,
-    null_types: Sequence[str] = NULL_TYPES,
-) -> NullBatteryResult:
-    """Run the confirmatory null battery for analysis units."""
-    if n_surrogates < 1:
-        raise ValueError("n_surrogates must be >= 1.")
-    unknown = [name for name in null_types if name not in NULL_TYPES]
-    if unknown:
-        raise ValueError(f"Unknown null types: {unknown}.")
-
-    subject_rows: list[dict[str, object]] = []
-    qc_rows: list[dict[str, object]] = []
-
+    n_surrogates: int,
+) -> dict[tuple[str, ...], list[dict[str, str]]]:
     pools: dict[tuple[str, ...], list[SeriesUnit]] = {}
     for unit in units:
         pools.setdefault(_pool_key(unit), []).append(unit)
 
-    # One seeded derangement per surrogate within each pool.
     pool_derangements: dict[tuple[str, ...], list[dict[str, str]]] = {}
     for pool, pool_units in pools.items():
         obs_ids = sorted({_observation_key(unit) for unit in pool_units})
@@ -861,7 +907,12 @@ def run_null_battery(
                 {obs_ids[i]: obs_ids[int(perm[i])] for i in range(len(obs_ids))}
             )
         pool_derangements[pool] = mappings
+    return pool_derangements
 
+
+def _by_obs_band_index(
+    units: Sequence[SeriesUnit],
+) -> dict[tuple[str, str, str, int], SeriesUnit]:
     by_obs_band: dict[tuple[str, str, str, int], SeriesUnit] = {}
     for unit in units:
         by_obs_band[
@@ -872,63 +923,452 @@ def run_null_battery(
                 int(unit.duration_s),
             )
         ] = unit
+    return by_obs_band
 
-    for unit in units:
-        for null_type in null_types:
-            partner_eeg_by_surrogate: list[np.ndarray] | None = None
-            if null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH:
-                mappings = pool_derangements.get(_pool_key(unit), [])
-                if not mappings:
-                    subject_row, qc_row = _null_statistics_for_unit(
-                        unit,
-                        null_type=null_type,
-                        n_surrogates=n_surrogates,
-                        partner_eeg_by_surrogate=[],
-                    )
-                    subject_rows.append(subject_row)
-                    qc_rows.append(qc_row)
-                    continue
-                partners: list[np.ndarray] = []
-                missing = False
-                for mapping in mappings:
-                    partner_id = mapping[unit.observation_id]
-                    partner_unit = by_obs_band.get(
-                        (
-                            partner_id,
-                            unit.band,
-                            unit.power_representation,
-                            int(unit.duration_s),
-                        )
-                    )
-                    if partner_unit is None:
-                        missing = True
-                        break
-                    partners.append(partner_unit.eeg_z)
-                if missing:
-                    subject_row, qc_row = _null_statistics_for_unit(
-                        unit,
-                        null_type=null_type,
-                        n_surrogates=n_surrogates,
-                        partner_eeg_by_surrogate=[],
-                    )
-                    qc_row = {
-                        **qc_row,
-                        "status": "missing_partner_series",
-                        "notes": "Partner observation lacks matching band/representation.",
-                    }
-                    subject_rows.append(subject_row)
-                    qc_rows.append(qc_row)
-                    continue
-                partner_eeg_by_surrogate = partners
 
-            subject_row, qc_row = _null_statistics_for_unit(
-                unit,
-                null_type=null_type,
-                n_surrogates=n_surrogates,
-                partner_eeg_by_surrogate=partner_eeg_by_surrogate,
+def _resolve_cross_subject_partners(
+    unit: SeriesUnit,
+    *,
+    pool_derangements: Mapping[tuple[str, ...], list[dict[str, str]]],
+    by_obs_band: Mapping[tuple[str, str, str, int], SeriesUnit],
+) -> tuple[list[np.ndarray], bool]:
+    """Return ``(partners, missing_partner)``.
+
+    Empty ``partners`` with ``missing_partner=False`` means derangement impossible
+    (same as legacy empty-list path). ``missing_partner=True`` forces the
+    ``missing_partner_series`` QC override after statistics are computed.
+    """
+    mappings = pool_derangements.get(_pool_key(unit), [])
+    if not mappings:
+        return [], False
+    partners: list[np.ndarray] = []
+    for mapping in mappings:
+        partner_id = mapping[unit.observation_id]
+        partner_unit = by_obs_band.get(
+            (
+                partner_id,
+                unit.band,
+                unit.power_representation,
+                int(unit.duration_s),
             )
-            subject_rows.append(subject_row)
-            qc_rows.append(qc_row)
+        )
+        if partner_unit is None:
+            return [], True
+        partners.append(partner_unit.eeg_z)
+    return partners, False
+
+
+def _compute_observed_for_unit(unit: SeriesUnit) -> tuple[float, bool]:
+    identity = {
+        "dataset_id": unit.dataset_id,
+        "subject_id": unit.subject_id,
+        "task": unit.task,
+        "condition": unit.condition,
+        "observation_id": unit.observation_id,
+    }
+    observed = compute_endpoint_index_from_series(
+        unit.hr_z,
+        unit.eeg_z,
+        duration_s=unit.duration_s,
+        identity=identity,
+        band=unit.band,
+        power_representation=unit.power_representation,
+        duration_role=unit.duration_role,
+        is_primary_representation=unit.is_primary_representation,
+        pair=unit.pair,
+    )
+    return _as_float(observed.get("endpoint_index")), bool(observed.get("eligible"))
+
+
+def process_one_unit(
+    unit: SeriesUnit,
+    *,
+    null_types: Sequence[str],
+    n_surrogates: int,
+    pool_derangements: Mapping[tuple[str, ...], list[dict[str, str]]],
+    by_obs_band: Mapping[tuple[str, str, str, int], SeriesUnit],
+    cache_observed: bool = True,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Run all null types for one analysis unit (observed optionally cached)."""
+    observed_stat: float | None = None
+    observed_eligible: bool | None = None
+    if cache_observed:
+        observed_stat, observed_eligible = _compute_observed_for_unit(unit)
+
+    subject_rows: list[dict[str, object]] = []
+    qc_rows: list[dict[str, object]] = []
+    for null_type in null_types:
+        partner_eeg_by_surrogate: list[np.ndarray] | None = None
+        missing_partner = False
+        if null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH:
+            partner_eeg_by_surrogate, missing_partner = _resolve_cross_subject_partners(
+                unit,
+                pool_derangements=pool_derangements,
+                by_obs_band=by_obs_band,
+            )
+
+        subject_row, qc_row = _null_statistics_for_unit(
+            unit,
+            null_type=null_type,
+            n_surrogates=n_surrogates,
+            partner_eeg_by_surrogate=partner_eeg_by_surrogate,
+            observed_stat=observed_stat,
+            observed_eligible=observed_eligible,
+        )
+        if missing_partner:
+            qc_row = {
+                **qc_row,
+                "status": "missing_partner_series",
+                "notes": "Partner observation lacks matching band/representation.",
+            }
+        subject_rows.append(subject_row)
+        qc_rows.append(qc_row)
+    return subject_rows, qc_rows
+
+
+def _worker_process_unit(
+    payload: tuple[
+        int,
+        SeriesUnit,
+        tuple[str, ...],
+        int,
+        dict[tuple[str, ...], list[dict[str, str]]],
+        dict[tuple[str, str, str, int], SeriesUnit],
+        bool,
+    ],
+) -> tuple[int, list[dict[str, object]], list[dict[str, object]]]:
+    (
+        unit_index,
+        unit,
+        null_types,
+        n_surrogates,
+        pool_derangements,
+        by_obs_band,
+        cache_observed,
+    ) = payload
+    subject_rows, qc_rows = process_one_unit(
+        unit,
+        null_types=null_types,
+        n_surrogates=n_surrogates,
+        pool_derangements=pool_derangements,
+        by_obs_band=by_obs_band,
+        cache_observed=cache_observed,
+    )
+    return unit_index, subject_rows, qc_rows
+
+
+def _checkpoint_path(checkpoint_dir: Path, unit_key: str) -> Path:
+    digest = hashlib.sha256(unit_key.encode("utf-8")).hexdigest()[:32]
+    return checkpoint_dir / f"unit_{digest}.json"
+
+
+def _run_manifest_payload(
+    *,
+    n_surrogates: int,
+    null_types: Sequence[str],
+    unit_keys: Sequence[str],
+) -> dict[str, object]:
+    return {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "n_surrogates": int(n_surrogates),
+        "null_types": [str(name) for name in null_types],
+        "unit_keys": list(unit_keys),
+        "n_units": len(unit_keys),
+    }
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _validate_checkpoint_payload(
+    payload: Mapping[str, object],
+    *,
+    unit_key: str,
+    n_surrogates: int,
+    null_types: Sequence[str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+    if _as_str(payload.get("schema_version")) != CHECKPOINT_SCHEMA_VERSION:
+        return None
+    if _as_str(payload.get("unit_key")) != unit_key:
+        return None
+    if int(payload.get("n_surrogates", -1)) != int(n_surrogates):
+        return None
+    stored_types = [_as_str(v) for v in list(payload.get("null_types") or [])]
+    if stored_types != [str(v) for v in null_types]:
+        return None
+    subject_rows = list(payload.get("subject_rows") or [])
+    qc_rows = list(payload.get("qc_rows") or [])
+    if len(subject_rows) != len(null_types) or len(qc_rows) != len(null_types):
+        return None
+    for row in subject_rows:
+        if "rng_seed_u64" not in row or "n_surrogates_requested" not in row:
+            return None
+        if int(row.get("n_surrogates_requested", -1)) != int(n_surrogates):
+            return None
+    return subject_rows, qc_rows
+
+
+def _load_unit_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    unit_key: str,
+    n_surrogates: int,
+    null_types: Sequence[str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+    path = _checkpoint_path(checkpoint_dir, unit_key)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _validate_checkpoint_payload(
+        payload,
+        unit_key=unit_key,
+        n_surrogates=n_surrogates,
+        null_types=null_types,
+    )
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, (np.integer, int)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return None
+    return str(value)
+
+
+def _json_safe_row(row: Mapping[str, object]) -> dict[str, object]:
+    return {str(key): _json_safe(val) for key, val in row.items()}
+
+
+def _write_unit_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    unit_key: str,
+    n_surrogates: int,
+    null_types: Sequence[str],
+    subject_rows: Sequence[Mapping[str, object]],
+    qc_rows: Sequence[Mapping[str, object]],
+) -> None:
+    payload = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "unit_key": unit_key,
+        "n_surrogates": int(n_surrogates),
+        "null_types": [str(name) for name in null_types],
+        "subject_rows": [_json_safe_row(row) for row in subject_rows],
+        "qc_rows": [_json_safe_row(row) for row in qc_rows],
+    }
+    _atomic_write_json(_checkpoint_path(checkpoint_dir, unit_key), payload)
+
+
+def _prepare_checkpoint_dir(
+    checkpoint_dir: Path | None,
+    *,
+    n_surrogates: int,
+    null_types: Sequence[str],
+    unit_keys: Sequence[str],
+) -> Path | None:
+    if checkpoint_dir is None:
+        return None
+    path = Path(checkpoint_dir).expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    for tmp in path.glob("*.tmp"):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    manifest_path = path / RUN_MANIFEST_FILENAME
+    expected = _run_manifest_payload(
+        n_surrogates=n_surrogates,
+        null_types=null_types,
+        unit_keys=unit_keys,
+    )
+    if manifest_path.is_file():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if existing != expected:
+            shutil.rmtree(path)
+            path.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(manifest_path, expected)
+    return path
+
+
+def _report_progress(
+    *,
+    done: int,
+    total: int,
+    start_time: float,
+    last_report: float,
+    force: bool = False,
+) -> float:
+    now = time.perf_counter()
+    if not force and done not in (1, total) and (now - last_report) < 1.0:
+        return last_report
+    elapsed = now - start_time
+    rate = elapsed / done if done else 0.0
+    remaining = rate * (total - done) if done else 0.0
+    print(
+        f"[confirmatory] C4 progress: {done}/{total} units | "
+        f"elapsed={_format_hms(elapsed)} | ETA={_format_hms(remaining)}",
+        flush=True,
+    )
+    return now
+
+
+def run_null_battery(
+    units: Sequence[SeriesUnit],
+    *,
+    n_surrogates: int = DEFAULT_N_SURROGATES,
+    null_types: Sequence[str] = NULL_TYPES,
+    n_jobs: int | None = 1,
+    checkpoint_dir: str | Path | None = None,
+    progress: bool = False,
+    cache_observed: bool = True,
+) -> NullBatteryResult:
+    """Run the confirmatory null battery for analysis units.
+
+    Parameters
+    ----------
+    n_jobs:
+        ``1`` = serial; ``-1``/``None`` = all CPUs; ``>1`` = that many workers.
+    checkpoint_dir:
+        When set, write/resume atomic per-unit checkpoints under this directory.
+    cache_observed:
+        Compute the observed endpoint once per unit and reuse across null types
+        (bit-identical to recomputing for each null type).
+    """
+    if n_surrogates < 1:
+        raise ValueError("n_surrogates must be >= 1.")
+    unknown = [name for name in null_types if name not in NULL_TYPES]
+    if unknown:
+        raise ValueError(f"Unknown null types: {unknown}.")
+
+    unit_list = list(units)
+    null_type_tuple = tuple(null_types)
+    unit_keys = [unit_analysis_key(unit) for unit in unit_list]
+    workers = resolve_n_jobs(n_jobs)
+
+    ckpt_dir = _prepare_checkpoint_dir(
+        Path(checkpoint_dir) if checkpoint_dir is not None else None,
+        n_surrogates=n_surrogates,
+        null_types=null_type_tuple,
+        unit_keys=unit_keys,
+    )
+
+    pool_derangements = _build_pool_derangements(unit_list, n_surrogates=n_surrogates)
+    by_obs_band = _by_obs_band_index(unit_list)
+
+    results_by_index: dict[int, tuple[list[dict[str, object]], list[dict[str, object]]]] = {}
+    pending_indices: list[int] = []
+    for index, unit in enumerate(unit_list):
+        if ckpt_dir is not None:
+            loaded = _load_unit_checkpoint(
+                ckpt_dir,
+                unit_key=unit_keys[index],
+                n_surrogates=n_surrogates,
+                null_types=null_type_tuple,
+            )
+            if loaded is not None:
+                results_by_index[index] = loaded
+                continue
+        pending_indices.append(index)
+
+    total = len(unit_list)
+    done = total - len(pending_indices)
+    start_time = time.perf_counter()
+    last_report = 0.0
+    if progress and done:
+        last_report = _report_progress(
+            done=done, total=total, start_time=start_time, last_report=last_report, force=True
+        )
+
+    def _store_result(
+        index: int,
+        subject_rows: list[dict[str, object]],
+        qc_rows: list[dict[str, object]],
+    ) -> None:
+        nonlocal done, last_report
+        results_by_index[index] = (subject_rows, qc_rows)
+        if ckpt_dir is not None:
+            _write_unit_checkpoint(
+                ckpt_dir,
+                unit_key=unit_keys[index],
+                n_surrogates=n_surrogates,
+                null_types=null_type_tuple,
+                subject_rows=subject_rows,
+                qc_rows=qc_rows,
+            )
+        done += 1
+        if progress:
+            last_report = _report_progress(
+                done=done,
+                total=total,
+                start_time=start_time,
+                last_report=last_report,
+                force=(done == total),
+            )
+
+    if not pending_indices:
+        if progress and total:
+            _report_progress(
+                done=total, total=total, start_time=start_time, last_report=last_report, force=True
+            )
+    elif workers == 1 or len(pending_indices) == 1:
+        for index in pending_indices:
+            subject_rows, qc_rows = process_one_unit(
+                unit_list[index],
+                null_types=null_type_tuple,
+                n_surrogates=n_surrogates,
+                pool_derangements=pool_derangements,
+                by_obs_band=by_obs_band,
+                cache_observed=cache_observed,
+            )
+            _store_result(index, subject_rows, qc_rows)
+    else:
+        max_workers = min(workers, len(pending_indices))
+        payloads = [
+            (
+                index,
+                unit_list[index],
+                null_type_tuple,
+                int(n_surrogates),
+                pool_derangements,
+                by_obs_band,
+                bool(cache_observed),
+            )
+            for index in pending_indices
+        ]
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_worker_process_unit, payload): payload[0]
+                for payload in payloads
+            }
+            for future in as_completed(futures):
+                index, subject_rows, qc_rows = future.result()
+                _store_result(index, subject_rows, qc_rows)
+
+    subject_rows: list[dict[str, object]] = []
+    qc_rows: list[dict[str, object]] = []
+    for index in range(total):
+        unit_subject, unit_qc = results_by_index[index]
+        subject_rows.extend(unit_subject)
+        qc_rows.extend(unit_qc)
 
     summary_rows = summarize_null_subject_results(subject_rows)
     return NullBatteryResult(
@@ -1013,22 +1453,125 @@ def _write_csv(
             writer.writerow(payload)
 
 
+def _read_null_result_csvs(output_path: Path) -> NullBatteryResult | None:
+    subject_path = output_path / NULL_SUBJECT_RESULTS_FILENAME
+    summary_path = output_path / NULL_SUMMARY_FILENAME
+    qc_path = output_path / NULL_QC_FILENAME
+    if not (subject_path.is_file() and summary_path.is_file() and qc_path.is_file()):
+        return None
+    with subject_path.open(encoding="utf-8", newline="") as handle:
+        subject_rows = list(csv.DictReader(handle))
+    with summary_path.open(encoding="utf-8", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    with qc_path.open(encoding="utf-8", newline="") as handle:
+        qc_rows = list(csv.DictReader(handle))
+    return NullBatteryResult(
+        subject_rows=tuple(subject_rows),
+        summary_rows=tuple(summary_rows),
+        qc_rows=tuple(qc_rows),
+    )
+
+
+def _validate_complete_marker(
+    output_path: Path,
+    *,
+    n_surrogates: int,
+    n_units: int,
+    null_types: Sequence[str],
+) -> bool:
+    marker = output_path / COMPLETE_MARKER_FILENAME
+    if not marker.is_file():
+        return False
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if int(payload.get("n_surrogates", -1)) != int(n_surrogates):
+        return False
+    if int(payload.get("n_units", -1)) != int(n_units):
+        return False
+    stored_types = [_as_str(v) for v in list(payload.get("null_types") or [])]
+    if stored_types != [str(v) for v in null_types]:
+        return False
+    return True
+
+
+def _delete_final_outputs(output_path: Path) -> None:
+    for name in (
+        NULL_SUBJECT_RESULTS_FILENAME,
+        NULL_SUMMARY_FILENAME,
+        NULL_QC_FILENAME,
+        COMPLETE_MARKER_FILENAME,
+    ):
+        path = output_path / name
+        if path.is_file():
+            path.unlink()
+        tmp = output_path / f"{name}.tmp"
+        if tmp.is_file():
+            tmp.unlink()
+
+
 def write_null_outputs(
     result: NullBatteryResult,
     output_dir: str | Path,
+    *,
+    n_surrogates: int | None = None,
+    n_units: int | None = None,
+    null_types: Sequence[str] = NULL_TYPES,
+    wall_time_s: float | None = None,
 ) -> dict[str, Path]:
+    """Write null CSVs atomically, then the ``C4_COMPLETE.json`` marker."""
     output_path = Path(output_dir).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
     subject_path = output_path / NULL_SUBJECT_RESULTS_FILENAME
     summary_path = output_path / NULL_SUMMARY_FILENAME
     qc_path = output_path / NULL_QC_FILENAME
-    _write_csv(subject_path, result.subject_rows, SUBJECT_RESULT_FIELDS)
-    _write_csv(summary_path, result.summary_rows, SUMMARY_FIELDS)
-    _write_csv(qc_path, result.qc_rows, QC_FIELDS)
+
+    subject_tmp = output_path / f"{NULL_SUBJECT_RESULTS_FILENAME}.tmp"
+    summary_tmp = output_path / f"{NULL_SUMMARY_FILENAME}.tmp"
+    qc_tmp = output_path / f"{NULL_QC_FILENAME}.tmp"
+    _write_csv(subject_tmp, result.subject_rows, SUBJECT_RESULT_FIELDS)
+    _write_csv(summary_tmp, result.summary_rows, SUMMARY_FIELDS)
+    _write_csv(qc_tmp, result.qc_rows, QC_FIELDS)
+    os.replace(subject_tmp, subject_path)
+    os.replace(summary_tmp, summary_path)
+    os.replace(qc_tmp, qc_path)
+
+    resolved_n_surr = (
+        int(n_surrogates)
+        if n_surrogates is not None
+        else (
+            int(result.subject_rows[0]["n_surrogates_requested"])
+            if result.subject_rows
+            else DEFAULT_N_SURROGATES
+        )
+    )
+    resolved_n_units = (
+        int(n_units)
+        if n_units is not None
+        else (
+            len(result.subject_rows) // max(1, len(null_types))
+            if result.subject_rows
+            else 0
+        )
+    )
+    marker_payload = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "n_surrogates": resolved_n_surr,
+        "n_units": resolved_n_units,
+        "null_types": [str(name) for name in null_types],
+        "n_subject_rows": len(result.subject_rows),
+        "n_qc_rows": len(result.qc_rows),
+        "wall_time_s": None if wall_time_s is None else float(wall_time_s),
+    }
+    _atomic_write_json(output_path / COMPLETE_MARKER_FILENAME, marker_payload)
     return {
         "null_subject_results": subject_path,
         "null_summary": summary_path,
         "null_qc": qc_path,
+        "complete_marker": output_path / COMPLETE_MARKER_FILENAME,
     }
 
 
@@ -1039,25 +1582,84 @@ def run_confirmatory_nulls(
     n_surrogates: int = DEFAULT_N_SURROGATES,
     durations: Sequence[int] = EXPECTED_DURATIONS_S,
     null_types: Sequence[str] = NULL_TYPES,
+    n_jobs: int | None = -1,
+    progress: bool = True,
+    cache_observed: bool = True,
 ) -> NullBatteryResult:
     """Load aligned M4 tables, run nulls, and write result CSVs."""
     root = Path(aligned_dir).expanduser().resolve()
+    output_path = Path(output_dir).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    null_type_tuple = tuple(null_types)
+
     tables = discover_aligned_duration_tables(root, durations=durations)
     units: list[SeriesUnit] = []
     for duration_s, path in sorted(tables.items()):
         rows = read_aligned_features_csv(path)
         units.extend(series_units_from_aligned_rows(rows, duration_s=duration_s))
+
+    if _validate_complete_marker(
+        output_path,
+        n_surrogates=n_surrogates,
+        n_units=len(units),
+        null_types=null_type_tuple,
+    ):
+        existing = _read_null_result_csvs(output_path)
+        if existing is not None and len(existing.subject_rows) == len(units) * len(
+            null_type_tuple
+        ):
+            if progress:
+                print(
+                    f"[confirmatory] C4 complete marker valid "
+                    f"({len(units)} units, n_surrogates={n_surrogates}); skipping.",
+                    flush=True,
+                )
+            return existing
+
+    # Final CSVs without a valid complete marker are treated as corrupt.
+    if any(
+        (output_path / name).is_file()
+        for name in (
+            NULL_SUBJECT_RESULTS_FILENAME,
+            NULL_SUMMARY_FILENAME,
+            NULL_QC_FILENAME,
+        )
+    ) and not _validate_complete_marker(
+        output_path,
+        n_surrogates=n_surrogates,
+        n_units=len(units),
+        null_types=null_type_tuple,
+    ):
+        _delete_final_outputs(output_path)
+
+    checkpoint_dir = output_path / CHECKPOINT_DIRNAME
+    t0 = time.perf_counter()
     result = run_null_battery(
         units,
         n_surrogates=n_surrogates,
-        null_types=null_types,
+        null_types=null_type_tuple,
+        n_jobs=n_jobs,
+        checkpoint_dir=checkpoint_dir,
+        progress=progress,
+        cache_observed=cache_observed,
     )
-    write_null_outputs(result, output_dir)
+    wall = time.perf_counter() - t0
+    write_null_outputs(
+        result,
+        output_path,
+        n_surrogates=n_surrogates,
+        n_units=len(units),
+        null_types=null_type_tuple,
+        wall_time_s=wall,
+    )
     return result
 
 
 __all__ = [
     "BLOCK_LENGTH_S",
+    "CHECKPOINT_DIRNAME",
+    "CHECKPOINT_SCHEMA_VERSION",
+    "COMPLETE_MARKER_FILENAME",
     "DEFAULT_N_SURROGATES",
     "MIN_CIRCULAR_SHIFT_S",
     "NULL_QC_FILENAME",
@@ -1078,11 +1680,14 @@ __all__ = [
     "empirical_p_value",
     "lag1_autocorrelation",
     "phase_randomize_series",
+    "process_one_unit",
+    "resolve_n_jobs",
     "run_confirmatory_nulls",
     "run_null_battery",
     "seeded_derangement",
     "series_units_from_aligned_rows",
     "surrogate_effect_size",
+    "unit_analysis_key",
     "valid_circular_shifts",
     "write_null_outputs",
 ]

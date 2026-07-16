@@ -44,7 +44,9 @@ Configs are separated by analysis. Always run from the **repo root**.
 |----------|---------|------------|
 | Core EEG–PPG correlations | [`core-eeg-ppg/`](core-eeg-ppg/) | `python -m ppg_eeg.core_eeg_ppg` |
 | Exploratory temporal coupling (Stages 0–4) | [`exploratory-temporal-coupling/`](exploratory-temporal-coupling/) | `python -m ppg_eeg.temporal_coupling` |
-| Confirmatory zero-lag (C0–C7) | [`zero-lag-reanalysis-repo/`](zero-lag-reanalysis-repo/) | `python -m ppg_eeg.confirmatory` |
+| Confirmatory zero-lag (C0–C7) | [`zero-lag-reanalysis-repo/`](zero-lag-reanalysis-repo/) | `python -m ppg_eeg.confirmatory` (`--stage …` or `--mode qc-report`) |
+
+Confirmatory C4 details (production **500** surrogates; `--n-jobs` with `--stage C4` or `all`): see [`zero-lag-reanalysis-repo/README.md`](zero-lag-reanalysis-repo/README.md).
 
 Raw data: `./data`. Results: `./derivatives` (unchanged paths inside configs).
 

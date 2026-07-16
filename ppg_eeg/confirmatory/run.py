@@ -118,6 +118,7 @@ class StageContext:
     master_path: Path
     dataset_path: Path
     n_surrogates: int = DEFAULT_N_SURROGATES
+    n_jobs: int = -1
     force: bool = False
     enable_optional_artifact_controls: bool = False
     repo_root: Path | None = None
@@ -583,8 +584,10 @@ def run_c4(ctx: StageContext) -> dict[str, object]:
         out,
         n_surrogates=ctx.n_surrogates,
         durations=(240,),
+        n_jobs=ctx.n_jobs,
+        progress=True,
     )
-    return {"n_surrogates": ctx.n_surrogates}
+    return {"n_surrogates": ctx.n_surrogates, "n_jobs": ctx.n_jobs}
 
 
 def run_c5(ctx: StageContext) -> dict[str, object]:
@@ -749,8 +752,25 @@ def build_stage_parser() -> argparse.ArgumentParser:
         "--mode",
         type=str,
         default=None,
-        choices=("preflight", "smoke", "primary", "sensitivity", "clean_root"),
-        help="Production ops mode (M13a). Mutually exclusive with --stage.",
+        choices=(
+            "preflight",
+            "smoke",
+            "primary",
+            "sensitivity",
+            "clean_root",
+            "qc-report",
+        ),
+        help=(
+            "Production ops mode (M13a), or qc-report for read-only QC under "
+            "output_root/QC/. Mutually exclusive with --stage. "
+            "qc-report is not part of STAGE_ORDER / --stage all."
+        ),
+    )
+    parser.add_argument(
+        "--qc-root",
+        type=str,
+        default=None,
+        help="Optional override output directory for --mode qc-report (default: output_root/QC).",
     )
     parser.add_argument(
         "--n-surrogates",
@@ -760,6 +780,15 @@ def build_stage_parser() -> argparse.ArgumentParser:
             "Null surrogates for C4. Defaults to dataset YAML n_surrogates when "
             f"set, otherwise {DEFAULT_N_SURROGATES} (production). Smoke configs "
             f"set n_surrogates: {SMOKE_N_SURROGATES}."
+        ),
+    )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help=(
+            "Process-pool workers for C4 null battery. "
+            "-1 uses all CPUs; 1 forces serial execution."
         ),
     )
     parser.add_argument(
@@ -802,6 +831,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("Pass only one of --mode or --stage.", file=sys.stderr)
         return 2
 
+    if args.mode == "qc-report":
+        if not args.config:
+            parser.error("--config is required with --mode qc-report.")
+        from .qc_report import run_qc_report_from_config
+
+        try:
+            run_qc_report_from_config(
+                args.config,
+                master_config=args.master,
+                config_dir=args.config_dir,
+                qc_root=args.qc_root,
+                repo_root=args.repo_root,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"[confirmatory] STOP: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001
+            print(f"[confirmatory] error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     if args.mode:
         from .production import main as production_main
 
@@ -815,7 +865,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return production_main(prod_argv)
 
     if not args.stage:
-        parser.error("Provide --stage C0|…|all (or --mode for production ops).")
+        parser.error(
+            "Provide --stage C0|…|all (or --mode for production ops / qc-report)."
+        )
     if not args.config:
         parser.error("--config is required with --stage.")
 
@@ -845,6 +897,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else DEFAULT_N_SURROGATES
                 )
             ),
+            n_jobs=int(args.n_jobs),
             force=bool(args.force),
             enable_optional_artifact_controls=bool(args.optional_artifact_controls),
             repo_root=repo_root,

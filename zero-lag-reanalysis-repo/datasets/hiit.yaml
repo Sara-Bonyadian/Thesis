@@ -1,13 +1,24 @@
-# Confirmatory zero-lag analysis — HIIT full cohort (4 tasks × 2 modalities).
+# Confirmatory zero-lag analysis — HIIT full cohort (all subjects).
+# Role: sensitivity (master.yaml). Primary cardiac: PPG / photosensor.
+# Pairing: PRE rest↔Tetris and POST rest↔Tetris within each PH/PS session.
+#
+# selection.subjects: []  → discover all subjects under raw_root (not smoke subset).
+# n_surrogates omitted    → production default 500 (DEFAULT_N_SURROGATES).
+# Smoke counterpart: smoke/hiit/confirmatory.yaml (subjects 01–03, n_surrogates: 20).
+# Note: 500-surrogate results are not identical to prior 1000-surrogate runs
+# (finer p resolution was 1/1001; now 1/501; MC SE increases ~√2).
 schema_version: 1
 dataset_id: hiit
 role: sensitivity
 
 paths:
+  # Relative to this file (zero-lag-reanalysis-repo/datasets/).
   raw_root: ../../data/raw/HIIT
+  # Writes under derivatives/confirmatory_temporal_coupling/sensitivity/hiit/
   output_subdir: sensitivity/hiit
 
 selection:
+  # Empty = full cohort (currently HIIT_01…HIIT_21; subject 10 absent on disk).
   subjects: []
   tasks:
     - rest
@@ -37,3 +48,4 @@ cardiac:
   peak_height: 0.3
   ibi_min_ms: 400.0
   ibi_max_ms: 1500.0
+  debug_plot: false

@@ -3,7 +3,7 @@ schema_version: 1
 dataset_id: ds003816
 role: sensitivity
 
-# Smoke null battery; production default is 1000 (DEFAULT_N_SURROGATES).
+# Smoke null battery; production default is 500 (DEFAULT_N_SURROGATES).
 n_surrogates: 20
 
 paths:

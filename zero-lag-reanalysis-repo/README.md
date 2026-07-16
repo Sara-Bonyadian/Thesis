@@ -37,9 +37,64 @@ zero-lag-reanalysis-repo/
 
 Raw data stays shared: `./data` (repo root). Exploratory Stage 0/1b is **not** required for confirmatory runs.
 
+## HIIT full cohort (C-stage CLI)
+
+Config: `datasets/hiit.yaml` (all subjects; production nulls = 500 surrogates).
+
+Outputs go to:
+`derivatives/confirmatory_temporal_coupling/sensitivity/hiit/`
+
+From the repo root:
+
+```bash
+# Recommended: run C0 first and inspect eligibility / pairing
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/datasets/hiit.yaml \
+  --stage C0
+
+# Then either continue stage-by-stage…
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/datasets/hiit.yaml \
+  --stage C1a
+# …C1b, C1c, C2, C3, C4, C5, C6, C7
+
+# …or run the full pipeline (C0–C7) in one go
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/datasets/hiit.yaml \
+  --stage all
+
+# Same pipeline, force serial C4 (other stages ignore --n-jobs)
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/datasets/hiit.yaml \
+  --stage all \
+  --n-jobs 1
+
+# C4 only, all CPUs (default --n-jobs -1)
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --config zero-lag-reanalysis-repo/datasets/hiit.yaml \
+  --stage C4 \
+  --n-jobs -1
+```
+
+Notes:
+- C4 nulls use **500** surrogates by default (`DEFAULT_N_SURROGATES`; production contract).
+  This is an explicit Monte Carlo change from the prior **1000**-surrogate default:
+  results are **not** identical. Add-one empirical p resolves to `1/(n+1)` → finest p ≈
+  `1/501 ≈ 0.0020` (was `1/1001 ≈ 0.0010`); Monte Carlo SE scales up by ≈√2.
+  Seed generation is unchanged; only the draw count changes. Override only if
+  intentional: `--n-surrogates 20` (smoke-like; not for manuscript production).
+- C4 parallelizes over analysis units. `--n-jobs` applies with `--stage C4` **or**
+  `--stage all` (only C4 uses it; other stages ignore it). Default `-1` = all CPUs;
+  `--n-jobs 1` = serial. Observed endpoint is cached across the five null types;
+  unit checkpoints under `C4/_unit_checkpoints/` plus `C4_COMPLETE.json` support
+  safe resume after interrupt.
+- Optional artifact controls (CFA/QRS, motion/EOG/EMG, …) stay off unless you add
+  `--optional-artifact-controls` (typically on C6 / `all`).
+- Full HIIT is a **sensitivity** dataset in `master.yaml` (not a primary meta cohort).
+
 ## HIIT smoke (C-stage CLI)
 
-Everything for HIIT smoke lives under `smoke/hiit/`.
+Everything for HIIT smoke lives under `smoke/hiit/` (subjects 01–03; `n_surrogates: 20`).
 
 ```bash
 # C0: raw-data audit + pairing + duration eligibility
@@ -56,7 +111,60 @@ Everything for HIIT smoke lives under `smoke/hiit/`.
 ```
 
 Stages: `C0` `C1a` `C1b` `C1c` `C2` `C3` `C4` `C5` `C6` `C7` (or `all`).
-Production ops remain: `python -m ppg_eeg.confirmatory --mode preflight|smoke|…`.
+Production ops: `python -m ppg_eeg.confirmatory --mode preflight|smoke|primary|sensitivity|clean_root`.
+Post-run QC (not a stage): `--mode qc-report` (below).
+
+## Post-run QC report (read-only)
+
+After C0–C7 (or any **partial** stage tree), generate a **non-binding** review report
+under `{dataset_output_root}/QC/`.
+
+| Property | Rule |
+|----------|------|
+| Invocation | `--mode qc-report` + `--config …` (optional `--qc-root`) |
+| In `STAGE_ORDER` / `--stage all`? | **No** |
+| Writes | **Only** `{output_root}/QC/` (may overwrite prior QC files) |
+| Reads | Existing stage QC / eligibility CSVs only — no recomputation |
+| Effect on C0–C7 | **None** (hashes of stage trees must stay unchanged) |
+
+```bash
+# HIIT smoke → derivatives/.../smoke/hiit_m13b/QC/
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --mode qc-report \
+  --config zero-lag-reanalysis-repo/smoke/hiit/confirmatory.yaml
+
+# Full HIIT → derivatives/.../sensitivity/hiit/QC/ (does not re-run analysis)
+.venv/bin/python -m ppg_eeg.confirmatory \
+  --mode qc-report \
+  --config zero-lag-reanalysis-repo/datasets/hiit.yaml
+```
+
+### Outputs under `QC/`
+
+| File | Grain |
+|------|-------|
+| `observation_qc.csv` | observation (cardiac, polarity gap, IHR, EEG, review flags) |
+| `duration_qc.csv` | observation × duration |
+| `coupling_unit_qc.csv` | observation × duration × band × representation |
+| `contrast_qc.csv` | C5 contrast keys (empty if C5 absent → domain `not_assessed`) |
+| `null_unit_qc.csv` | C4 null keys |
+| `model_qc.csv` | C6 inference components |
+| `dataset_qc_summary.csv` | dataset flag tallies |
+| `visual_review_list.csv` | prioritized human review queue |
+| `QC_REPORT.md` | narrative + disclaimer |
+| `qc_params.json` | resolved heuristic thresholds + disclaimer |
+| `qc_manifest.json` | schema version, git commit, input SHA-256, missing inputs |
+| `extensions/` | reserved for future modules |
+
+### Labels (do not overstate)
+
+Use only: `pipeline_fact`, `derived_metric`, `heuristic_review_suggestion`,
+`analytical_exclusion`, `not_assessed`, `no_automated_concern_detected`,
+`flagged_for_review`. Absence of flags is **not** evidence of scientific correctness.
+Cardiac review domain is `review_cardiac` (ECG or PPG via `signal_type` / `channel_used`).
+
+Design authority: `.cursor/plans/post-run_qc_report_f40bad51.plan.md`.
+Implementation: `ppg_eeg/confirmatory/qc_report.py`.
 
 ## Duration–lag–endpoint contracts
 
@@ -120,4 +228,5 @@ Manuscript-facing text: `derivatives/confirmatory_temporal_coupling/review/figur
 
 ## Status
 
-See `.cursor/plans/zero_lag_redesign_e761cae5.plan.md`.
+Pipeline status: `.cursor/plans/zero_lag_redesign_e761cae5.plan.md`.
+Post-run QC design: `.cursor/plans/post-run_qc_report_f40bad51.plan.md`.

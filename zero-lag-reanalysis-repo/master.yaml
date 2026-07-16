@@ -4,8 +4,9 @@ confirmatory:
   # Confirmatory derivatives must never share a root with exploratory runs.
   output_root: ../derivatives/confirmatory_temporal_coupling
   root_seed: 20260713
-  # Null battery: DEFAULT_N_SURROGATES=1000 in code for production. Smoke YAML
+  # Null battery: DEFAULT_N_SURROGATES=500 in code for production. Smoke YAML
   # files set n_surrogates: 20 for fast CI / M13 checks.
+  # Contract note: 500 ≠ prior 1000 (p resolution 1/501 vs 1/1001; seeds unchanged).
   #
   # Robustness design (finalized; Methods-facing):
   #   Default confirmatory robustness:

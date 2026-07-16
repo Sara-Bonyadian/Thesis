@@ -74,6 +74,7 @@ from .protocol_audit import (
     write_duration_eligibility,
     write_protocol_audit,
 )
+from .qc_report import QcReportParams, generate_qc_report, run_qc_report_from_config
 from .report import generate_confirmatory_report, run_confirmatory_reporting
 from .run import (
     STAGE_ORDER,
@@ -100,7 +101,10 @@ __all__ = [
     "extract_multitaper_from_raw",
     "generate_confirmatory_figures",
     "generate_confirmatory_report",
+    "generate_qc_report",
+    "QcReportParams",
     "harmonize_observation",
+    "run_qc_report_from_config",
     "build_synthetic_aligned_tables",
     "primary_blockers_summary",
     "reconstruct_instant_hr",

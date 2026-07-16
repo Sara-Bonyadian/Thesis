@@ -27,7 +27,7 @@ todos:
     content: Build normalized participant tables and paired state contrasts
     status: completed
   - id: m9-nulls
-    content: Implement deterministic temporal surrogate and mismatch analyses
+    content: "Temporal nulls (C4): deterministic surrogates; process-pool --n-jobs; checkpoints; DEFAULT_N_SURROGATES=500"
     status: completed
   - id: m10-inference
     content: Implement mixed models, equivalence, meta-analysis, LOO, and FDR
@@ -48,13 +48,16 @@ todos:
     content: "Architecture: confirmatory/__main__.py + run.py with stages C0,C1a,C1b,C1c,C2,C3,C4,C5,C6,C7,all"
     status: completed
   - id: audit-signal-processing
-    content: "Audit Signal Processing vs manuscript; keep pipeline; document ordinary z-score choice in Methods"
+    content: Audit Signal Processing vs manuscript; keep pipeline; document ordinary z-score choice in Methods
     status: completed
   - id: audit-pairing
-    content: "Audit within-subject pairing C0/C5–C7; accept P2 Methods wording; verify P3 meta dependency"
+    content: Audit within-subject pairing C0/C5–C7; accept P2 Methods wording; verify P3 meta dependency
     status: completed
   - id: m10-meta-one-study
     content: "P3 fix: primary-meta contrast gate (one prespecified contrast/dataset; exclude HIIT/mindfulness); remove within-dataset IVW"
+    status: completed
+  - id: post-run-qc-report
+    content: Read-only post-run QC report (--mode qc-report); grain tables under output_root/QC/; not in STAGE_ORDER
     status: completed
   - id: m13c-primary-run
     content: "M13c: freeze configs; run primary cohorts once raw data complete; no hypothesis changes mid-run"
@@ -67,14 +70,15 @@ isProject: false
 
 # Zero-Lag EEG–Heart Rate Pipeline Implementation Plan
 
-## Status (2026-07-15)
+## Status (2026-07-15; QC report updated same day)
 
 | Milestone | Status | Notes |
 |-----------|--------|-------|
 | M1–M12 | **Done** | Package under `ppg_eeg/confirmatory/`; configs in `zero-lag-reanalysis-repo/` |
 | M13a | **Done** | `production.py` modes: preflight / smoke / primary / sensitivity / clean_root; synthetic E2E under `derivatives/confirmatory_temporal_coupling/production/` |
 | M13b | **Done (smoke)** | HIIT C0–C7 smoke artifacts at `derivatives/confirmatory_temporal_coupling/smoke/hiit_m13b/` (figures C7 present) |
-| C-stage CLI | **Done** | `python -m ppg_eeg.confirmatory --config … --stage C0…C7\|all` (+ `--mode` for M13a ops) |
+| C-stage CLI | **Done** | `python -m ppg_eeg.confirmatory --config … --stage C0…C7\|all` (+ `--mode` for M13a ops / `qc-report`) |
+| Post-run QC report | **Done** | `--mode qc-report` → `{output_root}/QC/` (grain CSVs + `QC_REPORT.md`); **not** in `STAGE_ORDER` / `--stage all`; read-only; see `.cursor/plans/post-run_qc_report_f40bad51.plan.md` |
 | Signal-processing audit | **Done** | R1–R3 Implemented; R4 ordinary within-segment z-score retained as documented Methods choice (no detrend / no robust temporal scaling without evidence) |
 | Pairing audit | **Done** | P1/P4/P5 Implemented; P2 Accepted (Methods); **P3 Implemented** — primary meta gated to one prespecified contrast per primary dataset; HIIT/mindfulness/ds004582/ds003816 excluded; within-dataset IVW removed |
 | Statistical Analysis audit | **Done** | S1–S4 Implemented; **S5/S6 not confirmatory requirements** — Methods = temporal surrogate nulls + equal four-band FDR; `PRIMARY_BAND=theta` display-only (no C6 dependency) |
@@ -113,7 +117,12 @@ flowchart TD
   C4 --> C5
   C5 --> C6["C6 mixed models and meta-analysis"]
   C6 --> C7["C7 figures, report, manifest"]
+  C7 -.-> QC["QC report mode read-only"]
+  C0 -.-> QC
+  C6 -.-> QC
 ```
+
+Post-run QC (`--mode qc-report`) reads existing C0–C7 outputs and writes only under `{dataset_output_root}/QC/`. It is **not** a pipeline stage and never changes eligibility or inference.
 
 ## 2. Gap analysis and disposition of existing stages
 
@@ -187,8 +196,9 @@ Add these modules (status as of 2026-07-15; live under `ppg_eeg/confirmatory/`):
 
 | Module | Role | Status |
 |--------|------|--------|
-| `confirmatory/__main__.py` | CLI with stages `C0`, `C1a`, `C1b`, `C1c`, `C2`, `C3`, `C4`, `C5`, `C6`, `C7`, `all` | **Done** — `python -m ppg_eeg.confirmatory --config … --stage C0|…|all`; production `--mode` still available |
-| `confirmatory/run.py` | Stage dependency checks and resumable dispatch; no implicit deletion or overwrite | **Done** |
+| `confirmatory/__main__.py` | CLI with stages `C0`, `C1a`, `C1b`, `C1c`, `C2`, `C3`, `C4`, `C5`, `C6`, `C7`, `all` | **Done** — `python -m ppg_eeg.confirmatory --config … --stage C0|…|all`; `--mode` for production ops + `qc-report` |
+| `confirmatory/run.py` | Stage dependency checks and resumable dispatch; no implicit deletion or overwrite; wires `--mode qc-report` | **Done** |
+| `confirmatory/qc_report.py` | Read-only post-run QC grains under `output_root/QC/`; heuristic review flags only | **Done** — not in `STAGE_ORDER`; see post-run QC plan |
 | `confirmatory/config.py` | Immutable dataclasses, master/dataset config loading, cross-field validation | Done |
 | `confirmatory/protocol_audit.py` | Eligibility, nuisance inventory, participant-key normalization, paired sets | Done (`C0` / M1; raw overlap from in-C0 `data_audit`) |
 | `confirmatory/data_audit.py` | Observation-level raw EEG–cardiac audit written under `C0/` | Done — no separate temporal_coupling Stage 0 required |
@@ -198,7 +208,7 @@ Add these modules (status as of 2026-07-15; live under `ppg_eeg/confirmatory/`):
 | `confirmatory/correlation.py` | Thin adapter around reusable lag functions and HR-only pair schemas | Done (`C2` / M5) |
 | `confirmatory/endpoints.py` | Fisher-z, ZLPI, local prominence, endpoint QC | Done (`C3` endpoints / M6) |
 | `confirmatory/peak_model.py` | Weighted Gaussian fitting and hierarchical parameter tables | Done (`C3` peaks / M7) |
-| `confirmatory/nulls.py` | Circular shift, phase randomization, block shuffle, cross-subject mismatch, AR(1) innovations | Done (`C4` / M9) |
+| `confirmatory/nulls.py` | Circular shift, phase randomization, block shuffle, cross-subject mismatch, AR(1) innovations; process-pool over units (`--n-jobs`); unit checkpoints + `C4_COMPLETE.json`; production default **500** surrogates | Done (`C4` / M9; parallel + 500-contract update) |
 | `confirmatory/group_tables.py` | Subject/state/band tidy tables and paired contrasts | Done (`C5` / M8) |
 | `confirmatory/inference.py` | Absolute MixedLM, TOST (low-demand μ), paired dataset effects, RE meta (primary-meta contrast gate), LOO, FDR | Done (`C6` / M10); **P3 Implemented** |
 | `confirmatory/artifact_controls.py` | Core broadband + duration sensitivities; optional CFA/nuisance via `--optional-artifact-controls` | Done (M11; C6 defaults optional off) |
@@ -213,8 +223,14 @@ Add these modules (status as of 2026-07-15; live under `ppg_eeg/confirmatory/`):
 ```text
 python -m ppg_eeg.confirmatory \
   --config zero-lag-reanalysis-repo/datasets/<dataset>.yaml \
-  --stage C0|C1a|C1b|C1c|C2|C3|C4|C5|C6|C7|all
+  --stage C0|C1a|C1b|C1c|C2|C3|C4|C5|C6|C7|all \
+  [--n-surrogates N] [--n-jobs -1|1|K]
 ```
+
+`--n-jobs` is honored for **C4** whether the stage list is `C4` alone or `all`
+(default `-1` = all CPUs; `1` = serial). Other stages ignore it.
+`--n-surrogates` defaults to dataset YAML when set, else `DEFAULT_N_SURROGATES`
+(**500** production; smoke YAMLs set `20`).
 
 | Stage | Name | Implements |
 |-------|------|------------|
@@ -224,13 +240,15 @@ python -m ppg_eeg.confirmatory \
 | `C1c` | Harmonize / nested durations | `harmonize.py` |
 | `C2` | Signed lag curves | `correlation.py` |
 | `C3` | Endpoints + peaks | `endpoints.py`, `peak_model.py` |
-| `C4` | Temporal nulls | `nulls.py` |
+| `C4` | Temporal nulls (parallel + checkpoints) | `nulls.py` |
 | `C5` | Group / paired tables | `group_tables.py` |
 | `C6` | Inference + default robustness (broadband, duration); optional artifacts if flagged | `inference.py`, `artifact_controls.py` |
 | `C7` | Figures, report, manifest | `figures.py`, `report.py`, `manifest.py` |
 | `all` | Dependency-ordered full run | `run.py` dispatch |
 
-Production modes (`--mode preflight|smoke|…`) stay as an **ops** entrypoint for cohort gating; they should call the same C-stage runner rather than reimplement stages.
+**Not a stage:** `--mode qc-report` (read-only aggregator → `{output_root}/QC/`). Never included in `all`.
+
+Production modes (`--mode preflight|smoke|…`) stay as an **ops** entrypoint for cohort gating; they should call the same C-stage runner rather than reimplement stages. QC reporting is a separate read-only mode sharing `--config` resolution.
 
 Preserve the current observation layout helper in [`paths.py`](ppg_eeg/temporal_coupling/paths.py), but add confirmatory path constants so legacy and confirmatory outputs cannot collide.
 
@@ -373,7 +391,8 @@ For every adapter, C0 must emit a completed checklist with: source files, task/s
 - Block shuffle: permute nonoverlapping 30-s EEG blocks and reject identity order; trim only incomplete terminal block consistently.
 - Cross-subject mismatch: seeded derangements within dataset × state × modality × duration.
 - Innovations: fit AR(1) separately to HR and EEG and recompute curves from innovations.
-- Use 1,000 surrogates for final runs and 20 for smoke tests; derive deterministic seeds from a stable SHA-256 hash of observation ID, analysis key, and null type—not Python's process-randomized `hash()`.
+- Use **500** surrogates for final / production runs (`DEFAULT_N_SURROGATES`) and **20** for smoke tests. This is an explicit Monte Carlo contract change from the prior 1000-surrogate default (results are **not** identical): add-one empirical p finest resolution is `1/501 ≈ 0.0020` (was `1/1001`); MC SE scales ≈√2. Derive deterministic seeds from a stable SHA-256 hash of observation ID, analysis key, and null type—not Python's process-randomized `hash()`. Seed generation is unchanged when `n_surrogates` changes; only the draw count changes.
+- C4 execution: process-pool over analysis units (`--n-jobs`, default all CPUs; works with `--stage all`); cache observed endpoint across the five null types; atomic per-unit checkpoints under `C4/_unit_checkpoints/` and `C4_COMPLETE.json` for safe resume. Serial and parallel paths are bit-identical at the same surrogate count.
 - Figure 2 “cluster-aware” Panel A uses participant-level means and optional cluster **bootstrap** for display CIs only; it is not a cluster-permutation test and does not alter C6 decisions.
 
 ### Robustness design (finalized Methods)
@@ -583,8 +602,10 @@ Validation must reject: D ≤ max lag for confirmatory ZLPI, flank outside lag g
 
 - Files: `nulls.py`, statistic callback exposure, tests.
 - Dependencies: M4–M6.
-- Outputs: `null_subject_results.csv`, `null_summary.csv`, empirical p-values.
-- Validation: seeded reproducibility; phase-spectrum preservation; block composition preservation; derangement proof; AR(1) autocorrelation reduction; uniform empirical p-values under synthetic null.
+- Outputs: `null_subject_results.csv`, `null_summary.csv`, `null_qc.csv`, `C4_COMPLETE.json`; unit checkpoints under `C4/_unit_checkpoints/`.
+- Production contract: **`DEFAULT_N_SURROGATES = 500`** (was 1000; not bit-identical); smoke = 20.
+- Execution: `--n-jobs` process pool over analysis units (default all CPUs; works with `--stage all`); observed-endpoint cache across null types; deterministic seeds unchanged.
+- Validation: seeded reproducibility; serial ≡ parallel at same `n_surrogates`; phase-spectrum preservation; block composition preservation; derangement proof; AR(1) autocorrelation reduction; checkpoint resume / corrupt rejection; uniform empirical p-values under synthetic null.
 
 ### M10 — Mixed models, meta-analysis, multiplicity (Large)
 
@@ -665,7 +686,7 @@ Split into operational sub-milestones so engineering (preflight/orchestration) c
 - **Autocorrelation invalidates parametric r uncertainty:** base primary significance on temporal surrogates and participant-level inference; retain innovations sensitivity.
 - **Peak-fit nonidentifiability:** constrained weighted fits, fit diagnostics, prespecified failure criteria, and ZLPI as the primary endpoint so peak failure cannot invalidate all subjects.
 - **Cardiac modality heterogeneity:** declare exactly one primary cardiac modality per dataset (ECG or PPG) in PROTOCOL_SPECS / YAML for instantaneous HR; inventory alternate sensors in C0 without dual-modality confirmatory tables.
-- **Compute cost of raw EEG and 1,000 nulls:** cache C1a/C1b/C1c, vectorize curves, smoke with 20 nulls, parallelize by observation, checkpoint null batches.
+- **Compute cost of raw EEG and production nulls (500 surrogates):** cache C1a/C1b/C1c; smoke with 20 nulls; parallelize C4 by analysis unit (`--n-jobs`); atomic unit checkpoints + `C4_COMPLETE.json` for resume. (Prior plan text said 1,000 nulls; production contract is now **500**.)
 
 ### Medium
 
@@ -699,7 +720,7 @@ Expected engineering effort is roughly 25–35 person-days for the mandatory cor
 6. ~~Commit Fisher-z, ZLPI, local prominence, and endpoint QC.~~ **Done (M6)**
 7. ~~Commit Gaussian peak fitting and two-stage hierarchical parameter inference.~~ **Done (M7)**
 8. ~~Commit participant tables, paired contrasts, and inclusion-flow outputs.~~ **Done (M8)**
-9. ~~Commit temporal null battery with deterministic parallel execution.~~ **Done (M9)**
+9. ~~Commit temporal null battery with deterministic parallel execution.~~ **Done (M9)** — later updated: process-pool `--n-jobs`, unit checkpoints, production **500** surrogates
 10. ~~Commit mixed-effects, equivalence, meta-analysis, LOO, and multiplicity registry.~~ **Done (M10)**
 11. ~~Commit artifact, nuisance, duration, and modality sensitivities.~~ **Done (M11)** — default robustness = broadband + duration (+ C4 nulls); optional CFA/nuisance via `--optional-artifact-controls`
 12. ~~Commit Figures 1–3, source-data exports, report generator, and manifests.~~ **Done (M12)**
@@ -708,8 +729,9 @@ Expected engineering effort is roughly 25–35 person-days for the mandatory cor
 15. ~~Signal-processing audit vs manuscript; keep pipeline; Methods = ordinary z-score.~~ **Done**
 16. ~~Pairing audit; accept P2 Methods (absolute MixedLM / TOST); confirm P3 meta dependency.~~ **Done (audit)**
 17. ~~Implement primary-meta contrast gate + remove within-dataset IVW (`m10-meta-one-study`).~~ **Done**
-18. Freeze primary configs; run primary cohorts when raw complete (M13c).
-19. Sensitivities, clean-root reproducibility, lock hashes, manuscript tables (M13d).
+18. ~~Read-only post-run QC report (`--mode qc-report` → `output_root/QC/`).~~ **Done**
+19. Freeze primary configs; run primary cohorts when raw complete (M13c).
+20. Sensitivities, clean-root reproducibility, lock hashes, manuscript tables (M13d).
 
 This order keeps each commit independently testable, delays expensive raw-data computation until schemas are fixed, and prevents exploratory outputs or sensitivity results from contaminating the primary confirmatory analysis.
 

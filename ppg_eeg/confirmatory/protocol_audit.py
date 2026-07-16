@@ -273,15 +273,18 @@ PROTOCOL_SPECS: dict[str, ProtocolSpec] = {
             "embedded PPG is primary cardiac source for instantaneous HR; "
             "inventory co-recorded ECG in C0 when channel QC passes"
         ),
-        eye_state="unknown",
-        posture="unknown",
-        task_timing="PRE and POST rest/Tetris recordings in PH and PS sessions",
-        nuisance_signals=("photosensor", "ECG", "respiration", "protocol modality PH/PS"),
-        run_pairing_policy="pair rest/Tetris by participant, modality session, and timepoint",
-        unresolved_assumptions=(
-            "Confirm posture and eye-state instructions.",
-            "Confirm whether PH and PS should remain separate modality sessions.",
+        eye_state="rest=eyes_closed; tetris=eyes_open",
+        posture="rest=seated; tetris=seated",
+        task_timing=(
+            "PRE and POST rest/Tetris recordings in separate PH and PS "
+            "randomized-crossover modality sessions"
         ),
+        nuisance_signals=("photosensor", "ECG", "respiration", "protocol modality PH/PS"),
+        run_pairing_policy=(
+            "PH and PS remain separate crossover sessions; pair Rest–Tetris "
+            "within participant, PH/PS session, and PRE/POST timepoint"
+        ),
+        unresolved_assumptions=(),
     ),
     "mindfulness": ProtocolSpec(
         dataset_id="mindfulness",
