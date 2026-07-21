@@ -21,7 +21,7 @@ import pandas as pd
 from .duration_contracts import EXPECTED_DURATIONS_S, EXPECTED_PRIMARY_DURATION_S
 from .manifest import git_commit_hash, sha256_file
 
-SCHEMA_VERSION = "confirmatory_qc_report_v1"
+SCHEMA_VERSION = "confirmatory_qc_report_v1.1"
 QC_DIRNAME = "QC"
 EXTENSIONS_DIRNAME = "extensions"
 
@@ -33,11 +33,19 @@ NOT_ASSESSED = "not_assessed"
 NO_AUTOMATED_CONCERN = "no_automated_concern_detected"
 FLAGGED_FOR_REVIEW = "flagged_for_review"
 
+SEVERITY_NONE = "none"
+SEVERITY_MILD = "mild"
+SEVERITY_MODERATE = "moderate"
+SEVERITY_SEVERE = "severe"
+SEVERITY_ORDER = (SEVERITY_SEVERE, SEVERITY_MODERATE, SEVERITY_MILD, SEVERITY_NONE)
+
 DISCLAIMER = (
-    "QC report thresholds are not prespecified analytical exclusions, are "
-    "non-binding, are intended only to prioritize human review, and cannot "
-    "change C0–C7 eligibility or inference. Absence of automated flags is not "
-    "evidence of scientific correctness."
+    "QC report thresholds are descriptive and non-binding. They are not "
+    "prespecified analytical exclusions, do not change C0–C7 eligibility or "
+    "inference, and exist only to prioritize human review. Binary review "
+    "disposition fields are preserved for reproducibility; severity columns "
+    "and the ranked visual-review list are presentation aids only. Absence of "
+    "automated flags is not evidence of scientific correctness."
 )
 
 PRIMARY_POWER_REPRESENTATION = "absolute_log10"
@@ -51,8 +59,15 @@ HEURISTIC_PARAM_KEYS = (
     "polarity_score_gap",
     "polarity_score_rel_gap",
     "eeg_channel_reject_pct",
+    "severity_frac_hr_outside_moderate",
+    "severity_frac_hr_outside_severe",
+    "severity_jump_rate_per_min_moderate",
+    "severity_jump_rate_per_min_severe",
+    "severity_max_hr_jump_moderate",
+    "severity_max_hr_jump_severe",
     "visual_review_n_extremes",
     "visual_review_n_random",
+    "visual_review_n_mild",
     "visual_review_seed",
 )
 
@@ -69,8 +84,16 @@ class QcReportParams:
     polarity_score_gap: float = 50.0
     polarity_score_rel_gap: float = 0.05
     eeg_channel_reject_pct: float = 25.0
+    # Descriptive severity tiers (do not alter binary review dispositions).
+    severity_frac_hr_outside_moderate: float = 0.05
+    severity_frac_hr_outside_severe: float = 0.10
+    severity_jump_rate_per_min_moderate: float = 5.0
+    severity_jump_rate_per_min_severe: float = 15.0
+    severity_max_hr_jump_moderate: float = 40.0
+    severity_max_hr_jump_severe: float = 80.0
     visual_review_n_extremes: int = 10
     visual_review_n_random: int = 10
+    visual_review_n_mild: int = 10
     visual_review_seed: int = 0
     schema_version: str = SCHEMA_VERSION
     aligned_to_c1b_usable_hr_band: bool = True
@@ -84,6 +107,18 @@ class QcReportParams:
                 "Default [40, 180] aligns with C1b usable median_hr gate; "
                 "still a heuristic review aid when applied to IHR samples."
             ),
+            "binary_review_fields": (
+                "review_*_disposition and observation_review_disposition remain "
+                "the reproducible binary QC fields. A single >20 bpm consecutive "
+                "IHR jump still triggers flagged_for_review; that rule is "
+                "intentionally sensitive and poorly discriminating."
+            ),
+            "severity_columns": (
+                "frac_hr_outside, ihr_jump_rate_per_min, max_consecutive_hr_jump, "
+                "and qc_review_severity rank review priority without changing "
+                "binary dispositions or analytical eligibility."
+            ),
+            "thresholds_are_descriptive": True,
             "binding": False,
             "affects_c0_c7_eligibility": False,
             "affects_inference": False,
@@ -259,7 +294,10 @@ def _ihr_derived_metrics(
         "hr_max_bpm": float("nan"),
         "n_hr_outside_plausible_band": 0,
         "frac_hr_outside_plausible_band": float("nan"),
+        "frac_hr_outside": float("nan"),
         "n_hr_abs_diff_gt_threshold": 0,
+        "max_consecutive_hr_jump": float("nan"),
+        "ihr_jump_rate_per_min": float("nan"),
         "ihr_derived_metric_source": NOT_ASSESSED,
     }
     if ihr_qc:
@@ -288,11 +326,69 @@ def _ihr_derived_metrics(
     )
     outside = (hr < params.hr_plausible_min_bpm) | (hr > params.hr_plausible_max_bpm)
     out["n_hr_outside_plausible_band"] = int(np.sum(outside))
-    out["frac_hr_outside_plausible_band"] = float(np.mean(outside))
+    frac_out = float(np.mean(outside))
+    out["frac_hr_outside_plausible_band"] = frac_out
+    out["frac_hr_outside"] = frac_out
     if hr.size >= 2:
         diffs = np.abs(np.diff(hr))
         out["n_hr_abs_diff_gt_threshold"] = int(np.sum(diffs > params.hr_abs_diff_bpm))
+        out["max_consecutive_hr_jump"] = float(np.max(diffs))
+    # Jump rate uses valid sample count as time proxy (1 Hz IHR grid).
+    n_valid = max(int(out["n_valid_hr_samples"]), 1)
+    out["ihr_jump_rate_per_min"] = (
+        60.0 * float(out["n_hr_abs_diff_gt_threshold"]) / float(n_valid)
+    )
     return out
+
+
+def assign_qc_review_severity(
+    row: Mapping[str, Any],
+    params: QcReportParams,
+) -> str:
+    """Descriptive severity for ranking; does not change binary dispositions."""
+    frac = _as_float(row.get("frac_hr_outside"))
+    if not math.isfinite(frac):
+        frac = _as_float(row.get("frac_hr_outside_plausible_band"))
+    jump_rate = _as_float(row.get("ihr_jump_rate_per_min"))
+    max_jump = _as_float(row.get("max_consecutive_hr_jump"))
+    pct_gap = _as_float(row.get("pct_gap_masked"))
+
+    severe = False
+    moderate = False
+    if math.isfinite(frac) and frac > params.severity_frac_hr_outside_severe:
+        severe = True
+    elif math.isfinite(frac) and frac > params.severity_frac_hr_outside_moderate:
+        moderate = True
+    if math.isfinite(jump_rate) and jump_rate > params.severity_jump_rate_per_min_severe:
+        severe = True
+    elif math.isfinite(jump_rate) and jump_rate > params.severity_jump_rate_per_min_moderate:
+        moderate = True
+    if math.isfinite(max_jump) and max_jump > params.severity_max_hr_jump_severe:
+        severe = True
+    elif math.isfinite(max_jump) and max_jump > params.severity_max_hr_jump_moderate:
+        moderate = True
+    if math.isfinite(pct_gap) and pct_gap > params.gap_masked_pct * 2.0:
+        severe = True
+    elif math.isfinite(pct_gap) and pct_gap > params.gap_masked_pct:
+        moderate = True
+
+    if severe:
+        return SEVERITY_SEVERE
+    if moderate:
+        return SEVERITY_MODERATE
+
+    dispositions = (
+        str(row.get("review_cardiac_disposition", "")),
+        str(row.get("review_polarity_disposition", "")),
+        str(row.get("review_ihr_disposition", "")),
+        str(row.get("review_eeg_disposition", "")),
+        str(row.get("observation_review_disposition", "")),
+    )
+    if any(d == FLAGGED_FOR_REVIEW for d in dispositions):
+        return SEVERITY_MILD
+    if any(d == ANALYTICAL_EXCLUSION for d in dispositions):
+        return SEVERITY_SEVERE
+    return SEVERITY_NONE
 
 
 def _eeg_reject_pct(row: Mapping[str, Any]) -> float:
@@ -420,6 +516,12 @@ def apply_observation_flags(
             ),
         }
     )
+    # Severity is additive presentation only; binary dispositions stay unchanged.
+    if "frac_hr_outside" not in row or not math.isfinite(
+        _as_float(row.get("frac_hr_outside"))
+    ):
+        row["frac_hr_outside"] = _as_float(row.get("frac_hr_outside_plausible_band"))
+    row["qc_review_severity"] = assign_qc_review_severity(row, params)
     return row
 
 
@@ -1112,6 +1214,7 @@ def _build_visual_review_list(
     observation_qc: pd.DataFrame,
     params: QcReportParams,
 ) -> pd.DataFrame:
+    """Rank review cases by severity instead of listing all binary flags equally."""
     columns = [
         "grain",
         "observation_id",
@@ -1119,29 +1222,110 @@ def _build_visual_review_list(
         "reason",
         "triggering_rule",
         "disposition",
+        "qc_review_severity",
+        "review_rank",
         "metric_value",
+        "frac_hr_outside",
+        "ihr_jump_rate_per_min",
+        "max_consecutive_hr_jump",
     ]
     if observation_qc.empty:
         return pd.DataFrame(columns=columns)
+
+    df = observation_qc.copy()
+    if "qc_review_severity" not in df.columns:
+        df["qc_review_severity"] = [
+            assign_qc_review_severity(r, params) for _, r in df.iterrows()
+        ]
+    if "frac_hr_outside" not in df.columns:
+        df["frac_hr_outside"] = df.get(
+            "frac_hr_outside_plausible_band", float("nan")
+        )
+    for col in ("ihr_jump_rate_per_min", "max_consecutive_hr_jump", "frac_hr_outside"):
+        if col not in df.columns:
+            df[col] = float("nan")
+        df[col] = df[col].map(_as_float)
+
+    severity_rank = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+    df["_sev_rank"] = df["qc_review_severity"].map(
+        lambda s: severity_rank.get(str(s), len(SEVERITY_ORDER))
+    )
+    df["_jump"] = df["ihr_jump_rate_per_min"].fillna(-1.0)
+    df["_frac"] = df["frac_hr_outside"].fillna(-1.0)
+    df["_maxj"] = df["max_consecutive_hr_jump"].fillna(-1.0)
+    ranked = df.sort_values(
+        ["_sev_rank", "_jump", "_frac", "_maxj", "observation_id"],
+        ascending=[True, False, False, False, True],
+    ).reset_index(drop=True)
+
     entries: list[dict[str, Any]] = []
-    flagged = observation_qc[
-        observation_qc["observation_review_disposition"] == FLAGGED_FOR_REVIEW
-    ]
-    for _, r in flagged.iterrows():
+    already: set[str] = set()
+    review_rank = 0
+
+    def _append(
+        row: Mapping[str, Any],
+        *,
+        priority: str,
+        reason: str,
+        triggering_rule: str,
+        metric_value: float,
+    ) -> None:
+        nonlocal review_rank
+        oid = str(row["observation_id"])
+        if oid in already and priority not in {"extreme", "random"}:
+            return
+        # Extremes/random may duplicate an observation with a second reason.
+        key = f"{oid}::{reason}"
+        if any(e.get("_dedupe") == key for e in entries):
+            return
+        review_rank += 1
         entries.append(
             {
                 "grain": "observation",
-                "observation_id": r["observation_id"],
-                "priority": "flagged",
-                "reason": "heuristic_or_warning_flag",
-                "triggering_rule": r.get("observation_triggering_rules", ""),
-                "disposition": FLAGGED_FOR_REVIEW,
-                "metric_value": float("nan"),
+                "observation_id": oid,
+                "priority": priority,
+                "reason": reason,
+                "triggering_rule": triggering_rule,
+                "disposition": row.get(
+                    "observation_review_disposition", NO_AUTOMATED_CONCERN
+                ),
+                "qc_review_severity": row.get("qc_review_severity", SEVERITY_NONE),
+                "review_rank": review_rank,
+                "metric_value": metric_value,
+                "frac_hr_outside": _as_float(row.get("frac_hr_outside")),
+                "ihr_jump_rate_per_min": _as_float(row.get("ihr_jump_rate_per_min")),
+                "max_consecutive_hr_jump": _as_float(
+                    row.get("max_consecutive_hr_jump")
+                ),
+                "_dedupe": key,
             }
+        )
+        if priority in {"severity", "extreme", "random"}:
+            already.add(oid)
+
+    # All severe + moderate, ranked; then a capped mild sample.
+    mild_budget = max(int(params.visual_review_n_mild), 0)
+    mild_added = 0
+    for _, r in ranked.iterrows():
+        sev = str(r.get("qc_review_severity", SEVERITY_NONE))
+        if sev == SEVERITY_NONE:
+            continue
+        if sev == SEVERITY_MILD:
+            if mild_added >= mild_budget:
+                continue
+            mild_added += 1
+        metric = _as_float(r.get("ihr_jump_rate_per_min"))
+        if not math.isfinite(metric):
+            metric = _as_float(r.get("frac_hr_outside"))
+        _append(
+            r,
+            priority="severity",
+            reason=f"qc_review_severity={sev}",
+            triggering_rule=str(r.get("observation_triggering_rules", "") or ""),
+            metric_value=metric,
         )
 
     def _add_extremes(
-        df: pd.DataFrame,
         column: str,
         *,
         ascending: bool,
@@ -1158,68 +1342,71 @@ def _build_visual_review_list(
             params.visual_review_n_extremes
         )
         for _, r in sub.iterrows():
-            entries.append(
-                {
-                    "grain": "observation",
-                    "observation_id": r["observation_id"],
-                    "priority": "extreme",
-                    "reason": reason,
-                    "triggering_rule": f"extreme:{column}",
-                    "disposition": r.get(
-                        "observation_review_disposition", NO_AUTOMATED_CONCERN
-                    ),
-                    "metric_value": r["_v"],
-                }
+            _append(
+                r,
+                priority="extreme",
+                reason=reason,
+                triggering_rule=f"extreme:{column}",
+                metric_value=float(r["_v"]),
             )
 
     _add_extremes(
-        observation_qc,
+        "ihr_jump_rate_per_min",
+        ascending=False,
+        reason="largest_ihr_jump_rate_per_min",
+    )
+    _add_extremes(
+        "frac_hr_outside",
+        ascending=False,
+        reason="largest_frac_hr_outside",
+    )
+    _add_extremes(
+        "max_consecutive_hr_jump",
+        ascending=False,
+        reason="largest_max_consecutive_hr_jump",
+    )
+    _add_extremes(
         "polarity_score_gap_abs",
         ascending=True,
         reason="smallest_polarity_score_gap",
     )
     _add_extremes(
-        observation_qc,
         "pct_gap_masked",
         ascending=False,
         reason="largest_pct_gap_masked",
     )
     _add_extremes(
-        observation_qc,
         "pct_channels_rejected",
         ascending=False,
         reason="largest_pct_channels_rejected",
     )
 
-    already = {e["observation_id"] for e in entries}
+    already_oids = {e["observation_id"] for e in entries}
     pool = sorted(
         oid
-        for oid in observation_qc["observation_id"].astype(str).tolist()
-        if oid not in already
+        for oid in df["observation_id"].astype(str).tolist()
+        if oid not in already_oids
     )
     rng = random.Random(params.visual_review_seed)
     rng.shuffle(pool)
     for oid in pool[: params.visual_review_n_random]:
-        entries.append(
-            {
-                "grain": "observation",
-                "observation_id": oid,
-                "priority": "random",
-                "reason": "random_sample",
-                "triggering_rule": f"visual_review_seed={params.visual_review_seed}",
-                "disposition": NO_AUTOMATED_CONCERN,
-                "metric_value": float("nan"),
-            }
+        r = df[df["observation_id"].astype(str) == oid].iloc[0]
+        _append(
+            r,
+            priority="random",
+            reason="random_sample",
+            triggering_rule=f"visual_review_seed={params.visual_review_seed}",
+            metric_value=float("nan"),
         )
 
     out = pd.DataFrame(entries)
     if out.empty:
         return pd.DataFrame(columns=columns)
-    out = out.drop_duplicates(subset=["observation_id", "reason"], keep="first")
+    out = out.drop(columns=["_dedupe"], errors="ignore")
     out = out.sort_values(
-        ["priority", "reason", "observation_id"]
+        ["review_rank", "priority", "observation_id"]
     ).reset_index(drop=True)
-    return out
+    return out[columns]
 
 
 def _build_dataset_summary(
@@ -1237,6 +1424,9 @@ def _build_dataset_summary(
         if df.empty or col not in df.columns:
             return 0
         return int((df[col] == label).sum())
+
+    def _count_sev(label: str) -> int:
+        return _count_disp(observation_qc, "qc_review_severity", label)
 
     domains_not_assessed = []
     if observation_qc.empty:
@@ -1279,6 +1469,10 @@ def _build_dataset_summary(
         "n_review_eeg_flagged": _count_disp(
             observation_qc, "review_eeg_disposition", FLAGGED_FOR_REVIEW
         ),
+        "n_obs_severity_none": _count_sev(SEVERITY_NONE),
+        "n_obs_severity_mild": _count_sev(SEVERITY_MILD),
+        "n_obs_severity_moderate": _count_sev(SEVERITY_MODERATE),
+        "n_obs_severity_severe": _count_sev(SEVERITY_SEVERE),
         "n_duration_rows": int(len(duration_qc)),
         "n_coupling_unit_rows": int(len(coupling_unit_qc)),
         "n_contrast_rows": int(len(contrast_qc)),
@@ -1333,7 +1527,16 @@ def _write_markdown_report(
         f"- review_polarity flagged: **{s.get('n_review_polarity_flagged', 0)}**",
         f"- review_ihr flagged: **{s.get('n_review_ihr_flagged', 0)}**",
         f"- review_eeg flagged: **{s.get('n_review_eeg_flagged', 0)}**",
+        f"- severity none/mild/moderate/severe: "
+        f"**{s.get('n_obs_severity_none', 0)}** / "
+        f"**{s.get('n_obs_severity_mild', 0)}** / "
+        f"**{s.get('n_obs_severity_moderate', 0)}** / "
+        f"**{s.get('n_obs_severity_severe', 0)}**",
         f"- Domains `{NOT_ASSESSED}`: `{s.get('domains_not_assessed', '')}`",
+        "",
+        "Binary `flagged_for_review` counts above are preserved for "
+        "reproducibility. Prefer `qc_review_severity` and "
+        "`visual_review_list.csv` (ranked) when prioritizing human review.",
         "",
         "## Missing inputs",
         "",
@@ -1343,23 +1546,46 @@ def _write_markdown_report(
             lines.append(f"- `{item}`")
     else:
         lines.append("- (none)")
-    lines.extend(["", "## Observation flags (flagged only)", ""])
+    lines.extend(["", "## Observation flags (severity-ranked review queue)", ""])
     if observation_qc.empty:
         lines.append("_No observation rows._")
     else:
         flagged = observation_qc[
             observation_qc["observation_review_disposition"] == FLAGGED_FOR_REVIEW
         ]
-        if flagged.empty:
-            lines.append(f"_No observations with `{FLAGGED_FOR_REVIEW}`._")
-        else:
-            lines.append("| observation_id | disposition | triggering_rules |")
-            lines.append("|---|---|---|")
-            for _, r in flagged.sort_values("observation_id").iterrows():
+        lines.append(
+            f"Binary `{FLAGGED_FOR_REVIEW}` count: **{len(flagged)}** "
+            "(non-binding; often high because any single >20 bpm IHR jump flags)."
+        )
+        lines.append("")
+        if "qc_review_severity" in observation_qc.columns:
+            severe = observation_qc[
+                observation_qc["qc_review_severity"] == SEVERITY_SEVERE
+            ].sort_values("observation_id")
+            moderate = observation_qc[
+                observation_qc["qc_review_severity"] == SEVERITY_MODERATE
+            ].sort_values("observation_id")
+            lines.append(
+                "| observation_id | severity | frac_hr_outside | "
+                "ihr_jump_rate_per_min | max_consecutive_hr_jump |"
+            )
+            lines.append("|---|---|---|---|---|")
+            show = pd.concat([severe, moderate], ignore_index=True)
+            if show.empty:
                 lines.append(
-                    f"| `{r['observation_id']}` | `{r['observation_review_disposition']}` | "
-                    f"`{r.get('observation_triggering_rules', '')}` |"
+                    "_No moderate/severe observations; see "
+                    "`visual_review_list.csv` for ranked mild extremes._"
                 )
+            else:
+                for _, r in show.iterrows():
+                    lines.append(
+                        f"| `{r['observation_id']}` | `{r['qc_review_severity']}` | "
+                        f"{_as_float(r.get('frac_hr_outside')):.4f} | "
+                        f"{_as_float(r.get('ihr_jump_rate_per_min')):.3f} | "
+                        f"{_as_float(r.get('max_consecutive_hr_jump')):.2f} |"
+                    )
+        else:
+            lines.append("_Severity columns unavailable._")
     lines.extend(
         [
             "",

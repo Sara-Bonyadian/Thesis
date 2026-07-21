@@ -15,8 +15,13 @@ from ppg_eeg.confirmatory.qc_report import (
     FLAGGED_FOR_REVIEW,
     NO_AUTOMATED_CONCERN,
     NOT_ASSESSED,
+    SEVERITY_MILD,
+    SEVERITY_MODERATE,
+    SEVERITY_NONE,
+    SEVERITY_SEVERE,
     QcReportParams,
     apply_observation_flags,
+    assign_qc_review_severity,
     generate_qc_report,
 )
 from ppg_eeg.confirmatory.run import STAGE_ORDER, expand_stages, main as confirmatory_main
@@ -405,6 +410,98 @@ class QcReportTests(unittest.TestCase):
         self.assertEqual(row["review_eeg_disposition"], FLAGGED_FOR_REVIEW)
         self.assertIn("pct_channels_rejected>25", row["review_eeg_triggering_rule"])
         self.assertEqual(row["observation_review_disposition"], FLAGGED_FOR_REVIEW)
+        self.assertEqual(row["qc_review_severity"], SEVERITY_SEVERE)
+
+    def test_severity_ranking_preserves_binary_flags(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "toy"
+            _seed_minimal_tree(root, with_c4_c6=True)
+            # Make obs-b severely out-of-band without changing binary schema.
+            hrs = [70.0] * 50 + [20.0] * 50  # 50% outside [40,180]
+            _write_csv(
+                root / "C1b" / "obs-b" / "features_instant_hr.csv",
+                [
+                    {
+                        "time_s": float(i),
+                        "instant_hr_bpm": hrs[i],
+                        "is_valid_hr": True,
+                    }
+                    for i in range(100)
+                ],
+            )
+            qc_dir = generate_qc_report(root, dataset_id="toy")
+            obs = pd.read_csv(qc_dir / "observation_qc.csv")
+            for col in (
+                "frac_hr_outside",
+                "ihr_jump_rate_per_min",
+                "max_consecutive_hr_jump",
+                "qc_review_severity",
+                "review_ihr_disposition",
+                "observation_review_disposition",
+            ):
+                self.assertIn(col, obs.columns)
+            # Binary IHR flags still fire on any >20 bpm jump (obs-a).
+            a = obs.loc[obs["observation_id"] == "obs-a"].iloc[0]
+            self.assertEqual(a["review_ihr_disposition"], FLAGGED_FOR_REVIEW)
+            self.assertIn("n_hr_abs_diff_gt_20>0", str(a["review_ihr_triggering_rule"]))
+            # Severity ranks the out-of-band case as severe.
+            b = obs.loc[obs["observation_id"] == "obs-b"].iloc[0]
+            self.assertEqual(b["qc_review_severity"], SEVERITY_SEVERE)
+            self.assertGreater(float(b["frac_hr_outside"]), 0.10)
+
+            visual = pd.read_csv(qc_dir / "visual_review_list.csv")
+            self.assertIn("qc_review_severity", visual.columns)
+            self.assertIn("review_rank", visual.columns)
+            # Ranked list must not dump every binary flag as equal priority.
+            self.assertFalse((visual["priority"] == "flagged").any())
+            severity_rows = visual[visual["priority"] == "severity"]
+            self.assertFalse(severity_rows.empty)
+            # First severity row should be severe before mild.
+            first = severity_rows.sort_values("review_rank").iloc[0]
+            self.assertEqual(first["qc_review_severity"], SEVERITY_SEVERE)
+
+            params = json.loads((qc_dir / "qc_params.json").read_text(encoding="utf-8"))
+            self.assertTrue(params["notes"]["thresholds_are_descriptive"])
+            summary = pd.read_csv(qc_dir / "dataset_qc_summary.csv").iloc[0]
+            self.assertGreaterEqual(int(summary["n_obs_severity_severe"]), 1)
+
+    def test_assign_qc_review_severity_tiers(self) -> None:
+        params = QcReportParams()
+        mild = assign_qc_review_severity(
+            {
+                "review_ihr_disposition": FLAGGED_FOR_REVIEW,
+                "observation_review_disposition": FLAGGED_FOR_REVIEW,
+                "frac_hr_outside": 0.02,
+                "ihr_jump_rate_per_min": 1.0,
+                "max_consecutive_hr_jump": 25.0,
+                "pct_gap_masked": 0.0,
+            },
+            params,
+        )
+        self.assertEqual(mild, SEVERITY_MILD)
+        moderate = assign_qc_review_severity(
+            {
+                "review_ihr_disposition": FLAGGED_FOR_REVIEW,
+                "frac_hr_outside": 0.06,
+                "ihr_jump_rate_per_min": 6.0,
+                "max_consecutive_hr_jump": 45.0,
+                "pct_gap_masked": 0.0,
+            },
+            params,
+        )
+        self.assertEqual(moderate, SEVERITY_MODERATE)
+        none = assign_qc_review_severity(
+            {
+                "review_ihr_disposition": NO_AUTOMATED_CONCERN,
+                "observation_review_disposition": NO_AUTOMATED_CONCERN,
+                "frac_hr_outside": 0.0,
+                "ihr_jump_rate_per_min": 0.0,
+                "max_consecutive_hr_jump": 5.0,
+                "pct_gap_masked": 0.0,
+            },
+            params,
+        )
+        self.assertEqual(none, SEVERITY_NONE)
 
     def test_immutability_and_qc_only_writes(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -22,6 +22,15 @@ from .duration_contracts import (
     contract_for_duration,
 )
 from .endpoints import fisher_z
+from .forest_display import (
+    FOREST_EXPORT_FIELDS,
+    build_alpha_forest_export,
+    draw_alpha_meta_forest,
+    hiit_session_mean_zlpi_cells,
+    hiit_session_sensitivity_forest_rows,
+    hiit_session_surrogate_significance_marks,
+    primary_meta_alpha_forest_rows,
+)
 from .manifest import FigurePanelSource
 from .null_delta_inference import PRIMARY_NULL_TYPE
 from .protocol_audit import PROTOCOL_SPECS
@@ -272,10 +281,20 @@ def participant_lag_category_rows(
 def subject_level_mean_zlpi_cells(
     subject_rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """Dataset × band mean low-demand ZLPI from subject_level_metrics."""
+    """Dataset × band mean low-demand ZLPI from subject_level_metrics.
+
+    Non-HIIT datasets: one cell per dataset × band (participant-level means as
+    stored in subject_level_metrics). HIIT is a single combined sensitivity row
+    via within-participant averaging of available PH/PS × PRE/POST low-demand
+    ZLPI (see ``hiit_session_mean_zlpi_cells``).
+    """
     f = _fig()
     buckets: dict[tuple[str, str], list[float]] = {}
     for row in subject_rows:
+        dataset_id = f._as_str(row.get("dataset_id")).casefold()
+        if dataset_id == "hiit":
+            # Handled by hiit_session_mean_zlpi_cells (within-participant combine).
+            continue
         if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
             continue
         if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
@@ -297,27 +316,49 @@ def subject_level_mean_zlpi_cells(
             continue
         key = (f._as_str(row.get("dataset_id")), band)
         buckets.setdefault(key, []).append(value)
-    return [
+    out: list[dict[str, object]] = [
         {
             "dataset_id": ds,
+            "source_dataset_id": ds,
+            "session_id": "",
+            "display_label": "",
+            "dataset_role": "",
             "band": band,
             "mean_zlpi": float(np.mean(vals)),
             "n_participants": len(vals),
+            "n_participant_sessions": len(vals),
             "endpoint_name": ENDPOINT_ZLPI,
             "duration_s": EXPECTED_PRIMARY_DURATION_S,
             "power_representation": f.PRIMARY_REPRESENTATION,
+            "aggregation": "subject_level_endpoint_index",
         }
         for (ds, band), vals in sorted(buckets.items())
     ]
+    out.extend(
+        hiit_session_mean_zlpi_cells(
+            subject_rows,
+            band_order=f.BAND_ORDER,
+            primary_representation=f.PRIMARY_REPRESENTATION,
+        )
+    )
+    return out
 
 
 def surrogate_significance_marks(
     null_summary_rows: Sequence[Mapping[str, object]],
 ) -> dict[tuple[str, str], bool]:
-    """Prespecified display rule: median_empirical_p < α for PRIMARY_NULL_TYPE."""
+    """Prespecified display rule: median_empirical_p < α for PRIMARY_NULL_TYPE.
+
+    Non-HIIT: median of condition-level median_empirical_p within (dataset, band).
+    HIIT: one combined mark per band from all low-demand PH/PS × PRE/POST
+    condition-level p-values (see ``hiit_session_surrogate_significance_marks``).
+    """
     f = _fig()
     by_cell: dict[tuple[str, str], list[float]] = {}
     for row in null_summary_rows:
+        dataset_id = f._as_str(row.get("dataset_id")).casefold()
+        if dataset_id == "hiit":
+            continue
         if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
             continue
         if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
@@ -342,75 +383,41 @@ def surrogate_significance_marks(
             continue
         key = (f._as_str(row.get("dataset_id")), f._as_str(row.get("band")).casefold())
         by_cell.setdefault(key, []).append(p)
-    return {
+    marks = {
         key: float(np.median(ps)) < f.FIGURE1_PANEL_D_SURROGATE_ALPHA
         for key, ps in by_cell.items()
     }
+    marks.update(
+        hiit_session_surrogate_significance_marks(
+            null_summary_rows,
+            band_order=f.BAND_ORDER,
+            primary_representation=f.PRIMARY_REPRESENTATION,
+            null_type=PRIMARY_NULL_TYPE,
+            alpha=f.FIGURE1_PANEL_D_SURROGATE_ALPHA,
+            low_demand_labels=set(f.LOW_DEMAND_CONDITION_LABELS),
+        )
+    )
+    return marks
 
 
 def alpha_replication_forest_rows(
     dataset_effects: Sequence[Mapping[str, object]],
     meta_rows: Sequence[Mapping[str, object]],
     protocol_rows: Sequence[Mapping[str, object]],
-) -> tuple[list[dict[str, object]], dict[str, object] | None]:
-    """PRIMARY_META study effects for alpha (display filter of equal-band meta)."""
-    f = _fig()
-    studies: list[dict[str, object]] = []
-    for row in dataset_effects:
-        if not f._as_bool(row.get("enters_meta")):
-            continue
-        if f._as_str(row.get("band")).casefold() != "alpha":
-            continue
-        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
-            continue
-        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
-            continue
-        dataset_id = f._as_str(row.get("dataset_id"))
-        studies.append(
-            {
-                "dataset_id": dataset_id,
-                "contrast_id": f._as_str(row.get("contrast_id")),
-                "band": "alpha",
-                "endpoint_name": ENDPOINT_ZLPI,
-                "duration_s": EXPECTED_PRIMARY_DURATION_S,
-                "effect_mean": f._as_float(row.get("effect_mean")),
-                "ci_low": f._as_float(row.get("ci_low")),
-                "ci_high": f._as_float(row.get("ci_high")),
-                "n_pairs": f._as_int(row.get("n_pairs")),
-                "enters_meta": True,
-                "cardiac_modality": _cardiac_modality(dataset_id, protocol_rows),
-            }
-        )
-    studies.sort(key=lambda r: f._as_str(r["dataset_id"]).casefold())
+    paired_rows: Sequence[Mapping[str, object]] | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
+    """PRIMARY_META alpha rows + display-only combined HIIT sensitivity + pooled.
 
-    pooled: dict[str, object] | None = None
-    for row in meta_rows:
-        if f._as_str(row.get("band")).casefold() != "alpha":
-            continue
-        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
-            continue
-        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
-            continue
-        if (
-            f._as_str(row.get("power_representation"), f.PRIMARY_REPRESENTATION).casefold()
-            != f.PRIMARY_REPRESENTATION
-        ):
-            continue
-        pooled = {
-            "band": "alpha",
-            "endpoint_name": ENDPOINT_ZLPI,
-            "duration_s": EXPECTED_PRIMARY_DURATION_S,
-            "pooled_effect": f._as_float(row.get("pooled_effect")),
-            "ci_low": f._as_float(row.get("ci_low")),
-            "ci_high": f._as_float(row.get("ci_high")),
-            "prediction_low": f._as_float(row.get("prediction_low")),
-            "prediction_high": f._as_float(row.get("prediction_high")),
-            "n_datasets": f._as_int(row.get("n_datasets")),
-            "i2": f._as_float(row.get("i2")),
-            "tau2": f._as_float(row.get("tau2")),
-        }
-        break
-    return studies, pooled
+    Sensitivity rows never set ``enters_meta`` and are not used for pooling.
+    """
+    studies, pooled = primary_meta_alpha_forest_rows(
+        dataset_effects,
+        meta_rows,
+        protocol_rows,
+        cardiac_modality_fn=_cardiac_modality,
+    )
+    sensitivity = hiit_session_sensitivity_forest_rows(paired_rows or [])
+    return studies, sensitivity, pooled
 
 
 def _panel_c_group_summaries(
@@ -588,6 +595,7 @@ def render_figure1(
     peaks = f.read_csv_rows(inputs.get("peak_params"))
     equivalence = f.read_csv_rows(inputs.get("peak_equivalence"))
     protocol = f.read_csv_rows(inputs.get("protocol_audit"))
+    paired = f.read_csv_rows(inputs.get("paired_contrasts"))
 
     fig = plt.figure(figsize=(17.2, 16.0))
     gs = GridSpec(
@@ -868,7 +876,10 @@ def render_figure1(
     for cell in cells:
         key = (f._as_str(cell["dataset_id"]), f._as_str(cell["band"]))
         cell["surrogate_significant"] = bool(marks.get(key, False))
-        cell["dataset_role"] = _dataset_role(f._as_str(cell["dataset_id"]), protocol)
+        if not f._as_str(cell.get("dataset_role")):
+            cell["dataset_role"] = _dataset_role(f._as_str(cell["dataset_id"]), protocol)
+        if not f._as_str(cell.get("display_label")):
+            cell["display_label"] = f._dataset_display(f._as_str(cell["dataset_id"]))
 
     primary_ds = sorted(
         {
@@ -904,6 +915,11 @@ def render_figure1(
             (f._as_str(c["dataset_id"]), f._as_str(c["band"])): bool(
                 c["surrogate_significant"]
             )
+            for c in cells
+        }
+        label_map = {
+            f._as_str(c["dataset_id"]): f._as_str(c.get("display_label"))
+            or f._dataset_display(f._as_str(c["dataset_id"]))
             for c in cells
         }
         matrix = np.full((len(row_datasets), len(f.BAND_ORDER)), np.nan)
@@ -948,12 +964,13 @@ def render_figure1(
             else:
                 role = _dataset_role(ds, protocol)
                 tag = "P" if role == "primary" else ("S" if role == "sensitivity" else "?")
-                ylabels.append(f"{f._dataset_display(ds)} [{tag}]")
+                base = label_map.get(ds) or f._dataset_display(ds)
+                ylabels.append(f"{base} [{tag}]")
         ax_d.set_yticks(range(len(row_datasets)))
         ax_d.set_yticklabels(ylabels, fontsize=f.FS_TICK - 2)
         cbar = fig.colorbar(im, ax=ax_d, fraction=0.046, pad=0.04)
         cbar.set_label("Mean ZLPI (Fisher z)", fontsize=f.FS_TICK - 1)
-        f._set_panel_title(ax_d, "Dataset × band ZLPI (primary | sensitivity)")
+        f._set_panel_title(ax_d, "Dataset/session × band ZLPI (primary | sensitivity)")
     else:
         f._mark_empty_panel(
             ax_d,
@@ -961,7 +978,7 @@ def render_figure1(
             xlabel="EEG band",
             ylabel="Dataset",
         )
-        f._set_panel_title(ax_d, "Dataset × band ZLPI")
+        f._set_panel_title(ax_d, "Dataset/session × band ZLPI")
     ax_d.text(
         0.5,
         -0.20,
@@ -980,14 +997,19 @@ def render_figure1(
         cells,
         (
             "dataset_id",
+            "source_dataset_id",
+            "session_id",
+            "display_label",
             "dataset_role",
             "band",
             "mean_zlpi",
             "n_participants",
+            "n_participant_sessions",
             "surrogate_significant",
             "endpoint_name",
             "duration_s",
             "power_representation",
+            "aggregation",
         ),
     )
     source_paths.append(panel_d_csv)
@@ -995,7 +1017,7 @@ def render_figure1(
         FigurePanelSource(
             figure_id="figure1",
             panel_id="zlpi_heatmap",
-            title="Dataset × band ZLPI heatmap",
+            title="Dataset/session × band ZLPI heatmap",
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
             input_tables=[
@@ -1006,115 +1028,44 @@ def render_figure1(
             source_data_csv=str(panel_d_csv),
             analysis_keys=[
                 "value=subject_level_mean_endpoint_index",
+                "hiit_display=combined_ph_ps_within_participant_mean",
                 f"surrogate_rule=median_empirical_p<{f.FIGURE1_PANEL_D_SURROGATE_ALPHA}",
                 f"null_type={PRIMARY_NULL_TYPE}",
+                "hiit_surrogate=combined_ph_ps_low_demand_median_p",
             ],
-            notes=f.FIGURE1_PANEL_D_SURROGATE_RULE_NOTE,
+            notes=f.FIGURE1_PANEL_D_NOTE,
         )
     )
 
     # ----- Panel E: alpha replication forest -----
     ax_e = fig.add_subplot(gs[2, 0])
-    studies, pooled = alpha_replication_forest_rows(effects, meta, protocol)
-    forest_export: list[dict[str, object]] = list(studies)
-    if studies or (pooled and math.isfinite(float(pooled.get("pooled_effect", float("nan"))))):
-        y_labels: list[str] = []
-        y_pos = 0
-        positions: list[float] = []
-        for row in studies:
-            effect = float(row["effect_mean"])
-            lo = float(row["ci_low"])
-            hi = float(row["ci_high"])
-            xerr = None
-            if math.isfinite(lo) and math.isfinite(hi):
-                xerr = [[effect - lo], [hi - effect]]
-            ax_e.errorbar(
-                effect,
-                y_pos,
-                xerr=xerr,
-                fmt="o",
-                color=f._band_color("alpha"),
-                markersize=f.MARKER_SIZE,
-                capsize=4,
-                elinewidth=f.LINE_WIDTH,
-                markeredgecolor=f.PALETTE["dark_gray"],
-                markeredgewidth=0.6,
-            )
-            modality = f._as_str(row.get("cardiac_modality"))
-            label = f._dataset_display(
-                f._as_str(row["dataset_id"]), n_pairs=int(row["n_pairs"])
-            )
-            if modality:
-                label = f"{label} · {modality}"
-            y_labels.append(label)
-            positions.append(float(y_pos))
-            y_pos += 1
-        if pooled is not None:
-            pe = float(pooled["pooled_effect"])
-            plo = float(pooled["ci_low"])
-            phi = float(pooled["ci_high"])
-            pred_lo = float(pooled["prediction_low"])
-            pred_hi = float(pooled["prediction_high"])
-            if math.isfinite(pred_lo) and math.isfinite(pred_hi):
-                ax_e.plot(
-                    [pred_lo, pred_hi],
-                    [y_pos, y_pos],
-                    color=f.PALETTE["light_gray"],
-                    lw=6,
-                    solid_capstyle="butt",
-                    zorder=2,
-                    label="Prediction interval",
-                )
-            if math.isfinite(pe):
-                xerr = None
-                if math.isfinite(plo) and math.isfinite(phi):
-                    xerr = [[pe - plo], [phi - pe]]
-                ax_e.errorbar(
-                    pe,
-                    y_pos,
-                    xerr=xerr,
-                    fmt="D",
-                    color=f.PALETTE["dark_gray"],
-                    markersize=f.MARKER_SIZE,
-                    capsize=4,
-                    elinewidth=f.LINE_WIDTH,
-                    zorder=3,
-                    label="Pooled RE",
-                )
-            y_labels.append(
-                f"Pooled RE (k = {int(pooled.get('n_datasets') or len(studies))})"
-            )
-            positions.append(float(y_pos))
-            forest_export.append(
-                {
-                    "dataset_id": "POOLED",
-                    "contrast_id": "",
-                    "band": "alpha",
-                    "endpoint_name": ENDPOINT_ZLPI,
-                    "duration_s": EXPECTED_PRIMARY_DURATION_S,
-                    "effect_mean": pooled["pooled_effect"],
-                    "ci_low": pooled["ci_low"],
-                    "ci_high": pooled["ci_high"],
-                    "n_pairs": "",
-                    "enters_meta": True,
-                    "cardiac_modality": "",
-                    "prediction_low": pooled["prediction_low"],
-                    "prediction_high": pooled["prediction_high"],
-                    "n_datasets": pooled["n_datasets"],
-                    "row_type": "pooled",
-                }
-            )
-            y_pos += 1
-        f._ref_vline(ax_e, 0.0)
-        ax_e.set_yticks(positions)
-        ax_e.set_yticklabels(y_labels, fontsize=f.FS_TICK - 2)
-        ax_e.set_xlabel(
-            f"Δ {_endpoint_label()} ({f.ZLPI_METRIC}; {f.CI_95_LABEL})",
-            fontsize=f.FS_AXIS,
-        )
-        f._style_axes(ax_e)
-        f._set_panel_title(ax_e, "Alpha replication (PRIMARY_META display)")
-    else:
+    studies, sensitivity_studies, pooled = alpha_replication_forest_rows(
+        effects, meta, protocol, paired
+    )
+    forest_export = build_alpha_forest_export(
+        primary_studies=studies,
+        sensitivity_studies=sensitivity_studies,
+        pooled=pooled,
+    )
+    drawn = draw_alpha_meta_forest(
+        ax_e,
+        primary_studies=studies,
+        sensitivity_studies=sensitivity_studies,
+        pooled=pooled,
+        dataset_display_fn=f._dataset_display,
+        band_color_fn=f._band_color,
+        ref_vline_fn=f._ref_vline,
+        style_axes_fn=f._style_axes,
+        set_panel_title_fn=f._set_panel_title,
+        panel_title="Alpha replication (PRIMARY_META display)",
+        xlabel=f"Δ {_endpoint_label()} ({f.ZLPI_METRIC}; {f.CI_95_LABEL})",
+        marker_size=f.MARKER_SIZE,
+        line_width=f.LINE_WIDTH,
+        tick_fontsize=f.FS_TICK,
+        axis_fontsize=f.FS_AXIS,
+        palette=f.PALETTE,
+    )
+    if not drawn:
         f._mark_empty_panel(
             ax_e,
             "No PRIMARY_META alpha study effects in this run.",
@@ -1127,23 +1078,7 @@ def render_figure1(
     f.write_source_csv(
         panel_e_csv,
         forest_export,
-        (
-            "dataset_id",
-            "contrast_id",
-            "band",
-            "endpoint_name",
-            "duration_s",
-            "effect_mean",
-            "ci_low",
-            "ci_high",
-            "n_pairs",
-            "enters_meta",
-            "cardiac_modality",
-            "prediction_low",
-            "prediction_high",
-            "n_datasets",
-            "row_type",
-        ),
+        FOREST_EXPORT_FIELDS,
     )
     source_paths.append(panel_e_csv)
     panel_sources.append(
@@ -1157,12 +1092,14 @@ def render_figure1(
                 str(inputs.get("dataset_effects") or ""),
                 str(inputs.get("meta_analysis") or ""),
                 str(inputs.get("protocol_audit") or ""),
+                str(inputs.get("paired_contrasts") or ""),
             ],
             source_data_csv=str(panel_e_csv),
             analysis_keys=[
                 "band=alpha",
                 "enters_meta=true",
                 "display_only_band_filter=true",
+                "hiit_sensitivity_display=combined_ph_ps_within_participant_mean",
             ],
             notes=f.FIGURE1_PANEL_E_NOTE,
         )
@@ -1436,8 +1373,9 @@ def render_figure1(
             f"{f.CI_95_METHOD_NOTE}. {f.FIGURE1_DISPLAY_GRID_DISCLOSURE}\n"
             "C: Participant-level lag-category Fisher-z (lag 0 vs max shoulder vs "
             "combined distant flank); group means ± participant SEM with faint dots.\n"
-            f"D: Dataset × band subject-level mean ZLPI; {f.FIGURE1_PANEL_D_ASTERISK_LABEL}. "
-            "Primary vs sensitivity cohorts are visually separated.\n"
+            f"D: Dataset/session × band subject-level mean ZLPI; {f.FIGURE1_PANEL_D_ASTERISK_LABEL}. "
+            "Primary vs sensitivity cohorts are visually separated. "
+            f"{f.FIGURE1_PANEL_D_NOTE}\n"
             f"E: {f.FIGURE1_PANEL_E_NOTE} Includes study CIs, pooled RE CI, and "
             "prediction interval when present; cardiac modality is metadata only.\n"
             f"F: {f.FIGURE1_PANEL_F_NOTE} μ axis focuses on identifiable participant "
@@ -1454,11 +1392,16 @@ def render_figure1(
             "(not parametric SE); four-band overlay retained with lighter ribbons "
             f"(α={f.FIGURE1_PANEL_B_CI_ALPHA}) instead of small multiples.\n"
             "- Panel C: group means ± participant SEM; faint dots (no spaghetti lines).\n"
-            "- Panel D values: subject-level mean ZLPI; surrogate mark uses "
+            "- Panel D values: subject-level mean ZLPI; HIIT shown as one combined "
+            "sensitivity row (within-participant mean of available PH/PS × PRE/POST "
+            "low-demand ZLPI); surrogate mark uses "
             f"`median_empirical_p < {f.FIGURE1_PANEL_D_SURROGATE_ALPHA}` for "
-            f"`{PRIMARY_NULL_TYPE}` (circular-shift significance only).\n"
+            f"`{PRIMARY_NULL_TYPE}` (circular-shift significance only; HIIT marks "
+            "from combined low-demand condition p-values).\n"
             "- Panel E: alpha band display of equal four-band PRIMARY_META "
-            "(not an alpha-only hierarchy).\n"
+            "(not an alpha-only hierarchy); one combined HIIT display-only "
+            "sensitivity row (within-participant mean of available contrasts) "
+            "never enters RE pooling.\n"
             "- Panel F: participant μ/FWHM + existing μ TOST; data-driven axis "
             "limits on identifiable peaks; FWHM descriptive only.\n"
             "- Footer: multi-line below panels E/F to avoid overlap.\n"

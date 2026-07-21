@@ -125,6 +125,40 @@ class Figure2PanelCAlphaMetaTests(unittest.TestCase):
             (out / "source_data" / "figure2_panel_c_d180_sensitivity.csv").exists()
         )
 
+    def test_empty_primary_meta_panel_annotated_expected_not_applicable(self) -> None:
+        from ppg_eeg.confirmatory.figures import (
+            PANEL_STATUS_EXPECTED_NOT_APPLICABLE,
+            primary_meta_expected_na_message,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            artifacts = render_figure2(
+                {
+                    "subject_level": None,
+                    "paired_contrasts": None,
+                    "curves_d240": None,
+                    "dataset_effects": None,
+                    "meta_analysis": None,
+                    "peak_equivalence": None,
+                    "mixed_model": None,
+                    "protocol_audit": None,
+                },
+                out,
+            )
+            panel_c = next(
+                p for p in artifacts.panels if p.panel_id == "alpha_primary_meta_forest"
+            )
+            self.assertIn(
+                f"panel_status={PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",
+                panel_c.analysis_keys,
+            )
+            self.assertIn("Expected not applicable", panel_c.notes)
+            self.assertIn(
+                "Expected not applicable",
+                primary_meta_expected_na_message("No PRIMARY_META alpha study effects."),
+            )
+
     def test_nested_durations_match_intended_sample_counts(self) -> None:
         times = tuple(float(i) for i in range(300))
         block = ContiguousBlock(start_s=0.0, end_s=299.0, time_s=times)

@@ -104,6 +104,8 @@ BAND_DURATION_X_OFFSET: dict[str, float] = {
 FIGURE3_DURATION_XLIM = (42.0, 258.0)
 DATASET_DISPLAY: dict[str, str] = {
     "hiit": "HIIT",
+    "hiit_ph": "HIIT PH",
+    "hiit_ps": "HIIT PS",
 }
 ENDPOINT_DISPLAY: dict[str, str] = {
     ENDPOINT_ZLPI: "ZLPI",
@@ -185,12 +187,28 @@ FIGURE1_PANEL_D_SURROGATE_RULE_NOTE = (
     f"{PRIMARY_REPRESENTATION} ZLPI (circular-shift significance only; "
     "prespecified display α; not a new FDR family)."
 )
+FIGURE1_PANEL_D_NOTE = (
+    FIGURE1_PANEL_D_SURROGATE_RULE_NOTE
+    + " HIIT is shown as one descriptive sensitivity estimate. PH and PS are "
+    "repeated sessions from the same participant cohort and were combined within "
+    "participant (mean of available PH/PS × PRE/POST low-demand ZLPI) before group "
+    "summarization. Sample size is unique participants; participant-session counts "
+    "are reported separately. The HIIT row is a sensitivity summary, not an "
+    "independent primary dataset. Surrogate marks use the median of all HIIT "
+    "low-demand condition-level median_empirical_p values for that band."
+)
 FIGURE1_PANEL_D_ASTERISK_LABEL = (
     f"* = circular-shift surrogate p < {FIGURE1_PANEL_D_SURROGATE_ALPHA:g} only"
 )
 FIGURE1_PANEL_E_NOTE = (
     "Alpha-focused replication display of the equal four-band primary meta "
-    "(one prespecified contrast per dataset); not an alpha-only confirmatory hierarchy."
+    "(one prespecified contrast per dataset); not an alpha-only confirmatory hierarchy. "
+    "HIIT is shown as one descriptive sensitivity estimate. PH and PS are repeated "
+    "sessions from the same participant cohort and were combined within participant "
+    "(mean of available Rest–Tetris ΔZLPI contrasts) before group summarization. "
+    "The HIIT row is excluded from the pooled random-effects meta-analysis. Sample "
+    "size refers to unique participants; participant-session counts are reported "
+    "separately."
 )
 FIGURE1_PANEL_F_NOTE = (
     "Participant-level identifiable Gaussian μ and FWHM with dataset summaries; "
@@ -205,7 +223,9 @@ FIGURE2_TITLE = (
 FIGURE3_TITLE = "Temporal specificity and core robustness"
 FIGURE2_PANEL_C_NOTE = (
     "Alpha PRIMARY_META absolute paired ΔZLPI (task − low-demand); "
-    "no percent attenuation."
+    "no percent attenuation. HIIT is shown as one descriptive sensitivity estimate "
+    "(PH/PS combined within participant) and is excluded from the pooled "
+    "random-effects meta-analysis."
 )
 FIGURE2_PANEL_D_NOTE = (
     "Absolute pooled state model — MixedLM/OLS coefficients with stored CIs "
@@ -226,6 +246,31 @@ FIGURE2_WIRING_GAP_NOTE = (
     "Wiring gap: C5 low/effort observation_ids could not be matched to C2 "
     "lag curves; unpaired fallback is not used."
 )
+PANEL_STATUS_EXPECTED_NOT_APPLICABLE = "expected_not_applicable"
+FIGURE2_EXPECTED_NOT_APPLICABLE_NOTE = (
+    "Expected not applicable: PRIMARY_META panels require primary-cohort "
+    "meta inputs and are empty by design for sensitivity-only runs "
+    "(e.g. HIIT alone)."
+)
+
+
+def primary_meta_expected_na_message(detail: str) -> str:
+    """On-figure notice for empty PRIMARY_META / sensitivity-only panels."""
+    detail = detail.strip()
+    return (
+        f"Expected not applicable — {detail} "
+        "PRIMARY_META panels are empty by design for sensitivity-only runs."
+    )
+
+
+def annotate_expected_not_applicable(notes: str, *, detail: str) -> str:
+    """Append a panel_status annotation for empty sensitivity-only panels."""
+    prefix = (
+        f"Expected not applicable "
+        f"(panel_status={PANEL_STATUS_EXPECTED_NOT_APPLICABLE}); {detail.strip()}"
+    )
+    base = notes.strip()
+    return f"{prefix} {base}".strip() if base else prefix
 
 FIGURE1_STEM = "figure1_lag_resolved_zero_lag"
 FIGURE2_STEM = "figure2_state_attenuation_replication"

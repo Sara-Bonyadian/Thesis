@@ -21,6 +21,13 @@ from .duration_contracts import (
     contract_for_duration,
 )
 from .endpoints import fisher_z
+from .forest_display import (
+    FOREST_EXPORT_FIELDS,
+    build_alpha_forest_export,
+    draw_alpha_meta_forest,
+    hiit_session_sensitivity_forest_rows,
+    primary_meta_alpha_forest_rows,
+)
 from .inference import PRIMARY_META_CONTRASTS
 from .manifest import FigurePanelSource
 from .protocol_audit import PROTOCOL_SPECS
@@ -458,6 +465,8 @@ def render_figure2(
     gs_a = GridSpecFromSubplotSpec(2, 2, subplot_spec=gs[0, 0], hspace=0.35, wspace=0.28)
     panel_a_export: list[dict[str, object]] = []
     has_a = False
+    panel_a_expected_na = False
+    panel_a_na_detail = ""
     ax_a0: plt.Axes | None = None
     if series_rows:
         for bi, band in enumerate(f.BAND_ORDER):
@@ -536,11 +545,14 @@ def render_figure2(
         has_a = True
     else:
         ax_a = fig.add_subplot(gs[0, 0])
-        msg = (
-            f.FIGURE2_WIRING_GAP_NOTE
-            if wiring_gaps
-            else "No PRIMARY_META C5 pairs with reconstructable C2 curves."
-        )
+        if wiring_gaps:
+            msg = f.FIGURE2_WIRING_GAP_NOTE
+        else:
+            panel_a_na_detail = (
+                "No PRIMARY_META C5 pairs with reconstructable C2 curves."
+            )
+            panel_a_expected_na = True
+            msg = f.primary_meta_expected_na_message(panel_a_na_detail)
         f._mark_empty_panel(ax_a, msg, xlabel=f.LAG_XLABEL, ylabel=f.Z_YLABEL)
         f._set_panel_title(ax_a, "Matched low vs effort curves")
         f._add_panel_label(ax_a, "A")
@@ -602,11 +614,24 @@ def render_figure2(
                 "cohort=PRIMARY_META_C5_pairs",
                 "ci=paired_participant_within_dataset_bootstrap",
                 "unpaired_fallback=false",
+                *(
+                    [f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}"]
+                    if panel_a_expected_na
+                    else []
+                ),
             ],
             notes=(
-                "Exact C5 paired-intersection participants linked via "
-                "low/effort_observation_ids → C2 observation_id. "
-                + (f.FIGURE2_WIRING_GAP_NOTE if wiring_gaps and not has_a else "")
+                f.annotate_expected_not_applicable(
+                    "Exact C5 paired-intersection participants linked via "
+                    "low/effort_observation_ids → C2 observation_id.",
+                    detail=panel_a_na_detail,
+                )
+                if panel_a_expected_na
+                else (
+                    "Exact C5 paired-intersection participants linked via "
+                    "low/effort_observation_ids → C2 observation_id. "
+                    + (f.FIGURE2_WIRING_GAP_NOTE if wiring_gaps and not has_a else "")
+                )
             ),
         )
     )
@@ -653,13 +678,20 @@ def render_figure2(
         assert ax_b0 is not None
         f._add_panel_label(ax_b0, "B")
         has_b_nested = True
+        panel_b_expected_na = False
+        panel_b_na_detail = ""
     else:
         ax_b = fig.add_subplot(gs[0, 1])
-        msg = (
-            f.FIGURE2_WIRING_GAP_NOTE
-            if wiring_gaps
-            else "No PRIMARY_META C5 pairs with reconstructable C2 curves."
-        )
+        if wiring_gaps:
+            msg = f.FIGURE2_WIRING_GAP_NOTE
+            panel_b_expected_na = False
+            panel_b_na_detail = ""
+        else:
+            panel_b_na_detail = (
+                "No PRIMARY_META C5 pairs with reconstructable C2 curves."
+            )
+            panel_b_expected_na = True
+            msg = f.primary_meta_expected_na_message(panel_b_na_detail)
         f._mark_empty_panel(ax_b, msg, xlabel=f.LAG_XLABEL, ylabel=f"Δ {f.Z_YLABEL}")
         f._set_panel_title(ax_b, "Matched lag-difference curves")
         f._add_panel_label(ax_b, "B")
@@ -702,182 +734,70 @@ def render_figure2(
                 "cohort=PRIMARY_META_C5_pairs",
                 "ci=paired_participant_within_dataset_bootstrap",
                 "cluster_permutation=false",
+                *(
+                    [f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}"]
+                    if panel_b_expected_na
+                    else []
+                ),
             ],
             notes=(
-                "Display-only matched Δz(τ). Formal lag-0 attenuation uses "
-                "paired ΔZLPI / PRIMARY_META / C4 surrogates (Panels C/elsewhere). "
-                "No cluster-permutation testing."
+                f.annotate_expected_not_applicable(
+                    "Display-only matched Δz(τ). Formal lag-0 attenuation uses "
+                    "paired ΔZLPI / PRIMARY_META / C4 surrogates (Panels C/elsewhere). "
+                    "No cluster-permutation testing.",
+                    detail=panel_b_na_detail,
+                )
+                if panel_b_expected_na
+                else (
+                    "Display-only matched Δz(τ). Formal lag-0 attenuation uses "
+                    "paired ΔZLPI / PRIMARY_META / C4 surrogates (Panels C/elsewhere). "
+                    "No cluster-permutation testing."
+                )
             ),
         )
     )
 
     # ----- Panel C: alpha PRIMARY_META absolute ΔZLPI forest -----
     ax_c = fig.add_subplot(gs[1, 0])
-    studies: list[dict[str, object]] = []
-    for row in effects:
-        if not f._as_bool(row.get("enters_meta")):
-            continue
-        if f._as_str(row.get("band")).casefold() != "alpha":
-            continue
-        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold() != ENDPOINT_ZLPI:
-            continue
-        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
-            continue
-        if (
-            f._as_str(row.get("power_representation"), f.PRIMARY_REPRESENTATION).casefold()
-            != f.PRIMARY_REPRESENTATION
-        ):
-            continue
-        dataset_id = f._as_str(row.get("dataset_id"))
-        studies.append(
-            {
-                "dataset_id": dataset_id,
-                "contrast_id": f._as_str(row.get("contrast_id")),
-                "band": "alpha",
-                "endpoint_name": ENDPOINT_ZLPI,
-                "duration_s": EXPECTED_PRIMARY_DURATION_S,
-                "effect_mean": f._as_float(row.get("effect_mean")),
-                "ci_low": f._as_float(row.get("ci_low")),
-                "ci_high": f._as_float(row.get("ci_high")),
-                "n_pairs": f._as_int(row.get("n_pairs")),
-                "enters_meta": True,
-                "cardiac_modality": _cardiac_modality(dataset_id, protocol),
-                "prediction_low": "",
-                "prediction_high": "",
-                "n_datasets": "",
-                "row_type": "study",
-            }
-        )
-    pooled = None
-    for row in meta:
-        if f._as_str(row.get("band")).casefold() != "alpha":
-            continue
-        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold() != ENDPOINT_ZLPI:
-            continue
-        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
-            continue
-        if str(row.get("is_primary_analysis", "true")).lower() not in {
-            "true",
-            "1",
-            "yes",
-            "",
-        }:
-            continue
-        pooled = {
-            "pooled_effect": f._as_float(row.get("pooled_effect")),
-            "ci_low": f._as_float(row.get("ci_low")),
-            "ci_high": f._as_float(row.get("ci_high")),
-            "prediction_low": f._as_float(row.get("prediction_low")),
-            "prediction_high": f._as_float(row.get("prediction_high")),
-            "n_datasets": f._as_int(row.get("n_datasets")),
-        }
-        break
-
-    forest_export: list[dict[str, object]] = []
-    if studies or pooled is not None:
-        y_labels: list[str] = []
-        positions: list[float] = []
-        y_pos = 0.0
-        for study in studies:
-            pe = float(study["effect_mean"])
-            lo = float(study["ci_low"])
-            hi = float(study["ci_high"])
-            xerr = None
-            if math.isfinite(pe) and math.isfinite(lo) and math.isfinite(hi):
-                xerr = [[pe - lo], [hi - pe]]
-            ax_c.errorbar(
-                pe if math.isfinite(pe) else 0.0,
-                y_pos,
-                xerr=xerr,
-                fmt="o",
-                color=f._band_color("alpha"),
-                markersize=f.MARKER_SIZE,
-                capsize=4,
-                elinewidth=f.LINE_WIDTH,
-                markeredgecolor=f.PALETTE["dark_gray"],
-                markeredgewidth=0.6,
-                zorder=3,
-            )
-            modality = str(study["cardiac_modality"] or "")
-            n_pairs = study["n_pairs"]
-            label = f"{f._dataset_display(str(study['dataset_id']))}"
-            if n_pairs:
-                label += f" (n={n_pairs}"
-                if modality:
-                    label += f"; {modality}"
-                label += ")"
-            elif modality:
-                label += f" ({modality})"
-            y_labels.append(label)
-            positions.append(float(y_pos))
-            forest_export.append(study)
-            y_pos += 1
-        if pooled is not None:
-            pe = float(pooled["pooled_effect"])
-            plo = float(pooled["ci_low"])
-            phi = float(pooled["ci_high"])
-            pred_lo = float(pooled["prediction_low"])
-            pred_hi = float(pooled["prediction_high"])
-            if math.isfinite(pred_lo) and math.isfinite(pred_hi):
-                ax_c.plot(
-                    [pred_lo, pred_hi],
-                    [y_pos, y_pos],
-                    color=f.PALETTE["light_gray"],
-                    lw=6,
-                    solid_capstyle="butt",
-                    zorder=2,
-                )
-            if math.isfinite(pe):
-                xerr = None
-                if math.isfinite(plo) and math.isfinite(phi):
-                    xerr = [[pe - plo], [phi - pe]]
-                ax_c.errorbar(
-                    pe,
-                    y_pos,
-                    xerr=xerr,
-                    fmt="D",
-                    color=f.PALETTE["dark_gray"],
-                    markersize=f.MARKER_SIZE,
-                    capsize=4,
-                    elinewidth=f.LINE_WIDTH,
-                    zorder=3,
-                )
-            y_labels.append(
-                f"Pooled RE (k = {int(pooled.get('n_datasets') or len(studies))})"
-            )
-            positions.append(float(y_pos))
-            forest_export.append(
-                {
-                    "dataset_id": "POOLED",
-                    "contrast_id": "",
-                    "band": "alpha",
-                    "endpoint_name": ENDPOINT_ZLPI,
-                    "duration_s": EXPECTED_PRIMARY_DURATION_S,
-                    "effect_mean": pooled["pooled_effect"],
-                    "ci_low": pooled["ci_low"],
-                    "ci_high": pooled["ci_high"],
-                    "n_pairs": "",
-                    "enters_meta": True,
-                    "cardiac_modality": "",
-                    "prediction_low": pooled["prediction_low"],
-                    "prediction_high": pooled["prediction_high"],
-                    "n_datasets": pooled["n_datasets"],
-                    "row_type": "pooled",
-                }
-            )
-        f._ref_vline(ax_c, 0.0)
-        ax_c.set_yticks(positions)
-        ax_c.set_yticklabels(y_labels, fontsize=f.FS_TICK - 2)
-        ax_c.set_xlabel(
-            f"Δ {_endpoint_label()} ({f.ZLPI_METRIC})",
-            fontsize=f.FS_AXIS,
-        )
-        f._style_axes(ax_c)
-        f._set_panel_title(ax_c, "Alpha PRIMARY_META ΔZLPI")
+    studies, pooled = primary_meta_alpha_forest_rows(
+        effects,
+        meta,
+        protocol,
+        cardiac_modality_fn=_cardiac_modality,
+    )
+    sensitivity_studies = hiit_session_sensitivity_forest_rows(paired)
+    forest_export = build_alpha_forest_export(
+        primary_studies=studies,
+        sensitivity_studies=sensitivity_studies,
+        pooled=pooled,
+    )
+    drawn = draw_alpha_meta_forest(
+        ax_c,
+        primary_studies=studies,
+        sensitivity_studies=sensitivity_studies,
+        pooled=pooled,
+        dataset_display_fn=f._dataset_display,
+        band_color_fn=f._band_color,
+        ref_vline_fn=f._ref_vline,
+        style_axes_fn=f._style_axes,
+        set_panel_title_fn=f._set_panel_title,
+        panel_title="Alpha PRIMARY_META ΔZLPI",
+        xlabel=f"Δ {_endpoint_label()} ({f.ZLPI_METRIC})",
+        marker_size=f.MARKER_SIZE,
+        line_width=f.LINE_WIDTH,
+        tick_fontsize=f.FS_TICK,
+        axis_fontsize=f.FS_AXIS,
+        palette=f.PALETTE,
+    )
+    if drawn:
+        panel_c_expected_na = False
+        panel_c_na_detail = ""
     else:
+        panel_c_expected_na = True
+        panel_c_na_detail = "No PRIMARY_META alpha study effects in this run."
         f._mark_empty_panel(
             ax_c,
-            "No PRIMARY_META alpha study effects in this run.",
+            f.primary_meta_expected_na_message(panel_c_na_detail),
             xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
             ylabel="Dataset",
         )
@@ -887,23 +807,7 @@ def render_figure2(
     f.write_source_csv(
         panel_c_csv,
         forest_export,
-        (
-            "dataset_id",
-            "contrast_id",
-            "band",
-            "endpoint_name",
-            "duration_s",
-            "effect_mean",
-            "ci_low",
-            "ci_high",
-            "n_pairs",
-            "enters_meta",
-            "cardiac_modality",
-            "prediction_low",
-            "prediction_high",
-            "n_datasets",
-            "row_type",
-        ),
+        FOREST_EXPORT_FIELDS,
     )
     source_paths.append(panel_c_csv)
     panel_sources.append(
@@ -917,6 +821,7 @@ def render_figure2(
                 str(inputs.get("dataset_effects") or ""),
                 str(inputs.get("meta_analysis") or ""),
                 str(inputs.get("protocol_audit") or ""),
+                str(inputs.get("paired_contrasts") or ""),
             ],
             source_data_csv=str(panel_c_csv),
             analysis_keys=[
@@ -924,8 +829,21 @@ def render_figure2(
                 "enters_meta=true",
                 "endpoint=absolute_delta_zlpi",
                 "percent_attenuation=false",
+                "hiit_sensitivity_display=combined_ph_ps_within_participant_mean",
+                *(
+                    [f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}"]
+                    if panel_c_expected_na
+                    else []
+                ),
             ],
-            notes=f.FIGURE2_PANEL_C_NOTE,
+            notes=(
+                f.annotate_expected_not_applicable(
+                    f.FIGURE2_PANEL_C_NOTE,
+                    detail=panel_c_na_detail,
+                )
+                if panel_c_expected_na
+                else f.FIGURE2_PANEL_C_NOTE
+            ),
         )
     )
 
@@ -1240,16 +1158,21 @@ def render_figure2(
         ax_e_fwhm.set_xlabel("FWHM (s)", fontsize=f.FS_AXIS - 2)
         ax_e_fwhm.ticklabel_format(axis="x", useOffset=False, style="plain")
         f._style_axes(ax_e_fwhm)
+        panel_e_expected_na = False
+        panel_e_na_detail = ""
     else:
+        panel_e_expected_na = True
+        panel_e_na_detail = "No PRIMARY_META paired peak rows."
+        msg = f.primary_meta_expected_na_message(panel_e_na_detail)
         f._mark_empty_panel(
             ax_e_mu,
-            "No PRIMARY_META paired peak rows.",
+            msg,
             xlabel="Peak μ (s)",
             ylabel=f.EEG_BAND_YLABEL,
         )
         f._mark_empty_panel(
             ax_e_fwhm,
-            "No PRIMARY_META paired peak rows.",
+            msg,
             xlabel="FWHM (s)",
             ylabel=f.EEG_BAND_YLABEL,
         )
@@ -1287,8 +1210,20 @@ def render_figure2(
                 "cohort=PRIMARY_META_C5_pairs",
                 "sampling_unit=dataset_participant",
                 "fwhm=descriptive",
+                *(
+                    [f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}"]
+                    if panel_e_expected_na
+                    else []
+                ),
             ],
-            notes=f.FIGURE2_PANEL_E_NOTE,
+            notes=(
+                f.annotate_expected_not_applicable(
+                    f.FIGURE2_PANEL_E_NOTE,
+                    detail=panel_e_na_detail,
+                )
+                if panel_e_expected_na
+                else f.FIGURE2_PANEL_E_NOTE
+            ),
         )
     )
 
@@ -1379,10 +1314,14 @@ def render_figure2(
         )
         f._style_axes(ax_f)
         f._set_panel_title(ax_f, "Graded contrasts (ds003690)")
+        panel_f_expected_na = False
+        panel_f_na_detail = ""
     else:
+        panel_f_expected_na = True
+        panel_f_na_detail = "ds003690 graded contrasts not present in this run."
         f._mark_empty_panel(
             ax_f,
-            "ds003690 graded contrasts not present in this run.",
+            f.primary_meta_expected_na_message(panel_f_na_detail),
             xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
             ylabel="Contrast · band",
         )
@@ -1421,8 +1360,20 @@ def render_figure2(
                 "contrasts=passive__simplert,passive__gonogo",
                 "dose_response=false",
                 "behavioral=false",
+                *(
+                    [f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}"]
+                    if panel_f_expected_na
+                    else []
+                ),
             ],
-            notes=f.FIGURE2_PANEL_F_NOTE,
+            notes=(
+                f.annotate_expected_not_applicable(
+                    f.FIGURE2_PANEL_F_NOTE,
+                    detail=panel_f_na_detail,
+                )
+                if panel_f_expected_na
+                else f.FIGURE2_PANEL_F_NOTE
+            ),
         )
     )
 
@@ -1497,7 +1448,8 @@ def render_figure2(
             "- Six-panel manuscript layout (presentation only; C0–C6 frozen).\n"
             "- Panels A/B: exact C5 pairs → C2 curves via observation IDs; "
             "paired bootstrap; no unpaired fallback; no cluster permutation.\n"
-            "- Panel C: absolute PRIMARY_META α ΔZLPI forest; no percent attenuation.\n"
+            "- Panel C: absolute PRIMARY_META α ΔZLPI forest; no percent attenuation; "
+            "one combined HIIT display-only sensitivity row never enters RE pooling.\n"
             "- Panel D: MixedLM coefficient forest (not marginal means).\n"
             "- Panel E: paired low/effort μ and FWHM; FWHM descriptive.\n"
             "- Panel F: prespecified ds003690 graded contrasts only.\n"
