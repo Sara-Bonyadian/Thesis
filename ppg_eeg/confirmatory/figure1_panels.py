@@ -515,7 +515,7 @@ def _draw_schematic(ax: plt.Axes) -> None:
         (0.28, 0.70, 0.22, 0.24, "EEG → multitaper\nθ/α/β/low-γ\n(channel median)"),
         (0.54, 0.70, 0.22, 0.24, "Common support\nlag-resolved r\n→ Fisher-z"),
         (0.80, 0.70, 0.18, 0.24, "Region means\nZLPI /\nprominence"),
-        (0.28, 0.28, 0.22, 0.24, "Gaussian peak\nA, μ, FWHM"),
+        (0.28, 0.28, 0.22, 0.24, "Central near-zero peak\n(flank baseline +\nGaussian A, μ, FWHM)"),
         (0.54, 0.28, 0.44, 0.24, "Confirmatory inference\n(surrogates, pairs,\nPRIMARY_META, μ TOST)"),
     ]
     for x, y, w, h, text in boxes:
@@ -594,6 +594,7 @@ def render_figure1(
     meta = f.read_csv_rows(inputs.get("meta_analysis"))
     peaks = f.read_csv_rows(inputs.get("peak_params"))
     equivalence = f.read_csv_rows(inputs.get("peak_equivalence"))
+    peak_hier = f.read_csv_rows(inputs.get("peak_hierarchical"))
     protocol = f.read_csv_rows(inputs.get("protocol_audit"))
     paired = f.read_csv_rows(inputs.get("paired_contrasts"))
 
@@ -1148,7 +1149,7 @@ def render_figure1(
         )
         peak_export.append(participant_peak_rows[-1])
 
-    # μ TOST group rows (existing table).
+    # μ TOST / hierarchical group rows.
     eq_export: list[dict[str, object]] = []
     for row in equivalence:
         if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
@@ -1173,6 +1174,27 @@ def render_figure1(
                 "tost_p": f._as_float(row.get("tost_p")),
             }
         )
+
+    # Hierarchical FWHM summaries (back-transformed log-FWHM MixedLM).
+    fwhm_hier: dict[str, dict[str, float]] = {}
+    for row in peak_hier:
+        if f._as_str(row.get("parameter")) != "fwhm":
+            continue
+        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
+            continue
+        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
+            continue
+        if (
+            f._as_str(row.get("power_representation"), f.PRIMARY_REPRESENTATION).casefold()
+            != f.PRIMARY_REPRESENTATION
+        ):
+            continue
+        band = f._as_str(row.get("band")).casefold()
+        fwhm_hier[band] = {
+            "mean": f._as_float(row.get("mean")),
+            "ci_low": f._as_float(row.get("ci_low")),
+            "ci_high": f._as_float(row.get("ci_high")),
+        }
 
     if participant_peak_rows or eq_export:
         ax_f_mu.axvspan(
@@ -1203,8 +1225,15 @@ def render_figure1(
                     linewidths=0.4,
                     zorder=2,
                 )
+            for erow in eq_export:
+                if f._as_str(erow["band"]) != band:
+                    continue
+                mean_mu = float(erow["mean_mu"])
+                if not math.isfinite(mean_mu):
+                    continue
+                # Hierarchical MixedLM mean (diamond) + CI.
                 ax_f_mu.scatter(
-                    [float(np.mean(mus))],
+                    [mean_mu],
                     [bi],
                     color=f._band_color(band),
                     s=90,
@@ -1213,12 +1242,6 @@ def render_figure1(
                     linewidths=0.8,
                     zorder=3,
                 )
-            for erow in eq_export:
-                if f._as_str(erow["band"]) != band:
-                    continue
-                mean_mu = float(erow["mean_mu"])
-                if not math.isfinite(mean_mu):
-                    continue
                 lo = float(erow["ci_low"])
                 hi = float(erow["ci_high"])
                 xerr = None
@@ -1226,13 +1249,12 @@ def render_figure1(
                     xerr = [[mean_mu - lo], [hi - mean_mu]]
                 ax_f_mu.errorbar(
                     mean_mu,
-                    bi + 0.28,
+                    bi,
                     xerr=xerr,
-                    fmt="s",
-                    color=f.PALETTE["dark_gray"],
-                    markersize=6,
-                    capsize=3,
+                    fmt="none",
+                    ecolor="black",
                     elinewidth=1.5,
+                    capsize=3,
                     zorder=4,
                 )
         ax_f_mu.set_yticks(range(len(f.BAND_ORDER)))
@@ -1266,16 +1288,43 @@ def render_figure1(
                 linewidths=0.4,
                 zorder=2,
             )
-            ax_f_fwhm.scatter(
-                [float(np.mean(fwhms))],
-                [bi],
-                color=f._band_color(band),
-                s=90,
-                marker="D",
-                edgecolors="black",
-                linewidths=0.8,
-                zorder=3,
-            )
+            hier = fwhm_hier.get(band)
+            if hier and math.isfinite(float(hier["mean"])):
+                mean_f = float(hier["mean"])
+                ax_f_fwhm.scatter(
+                    [mean_f],
+                    [bi],
+                    color=f._band_color(band),
+                    s=90,
+                    marker="D",
+                    edgecolors="black",
+                    linewidths=0.8,
+                    zorder=3,
+                )
+                lo = float(hier["ci_low"])
+                hi = float(hier["ci_high"])
+                if math.isfinite(lo) and math.isfinite(hi):
+                    ax_f_fwhm.errorbar(
+                        mean_f,
+                        bi,
+                        xerr=[[mean_f - lo], [hi - mean_f]],
+                        fmt="none",
+                        ecolor="black",
+                        elinewidth=1.5,
+                        capsize=3,
+                        zorder=4,
+                    )
+            else:
+                ax_f_fwhm.scatter(
+                    [float(np.mean(fwhms))],
+                    [bi],
+                    color=f._band_color(band),
+                    s=90,
+                    marker="D",
+                    edgecolors="black",
+                    linewidths=0.8,
+                    zorder=3,
+                )
         ax_f_fwhm.set_yticks(range(len(f.BAND_ORDER)))
         ax_f_fwhm.set_yticklabels([f._band_display(b) for b in f.BAND_ORDER])
         ax_f_fwhm.set_xlabel("FWHM (s)", fontsize=f.FS_AXIS - 2)
@@ -1402,8 +1451,10 @@ def render_figure1(
             "(not an alpha-only hierarchy); one combined HIIT display-only "
             "sensitivity row (within-participant mean of available contrasts) "
             "never enters RE pooling.\n"
-            "- Panel F: participant μ/FWHM + existing μ TOST; data-driven axis "
-            "limits on identifiable peaks; FWHM descriptive only.\n"
+            "- Panel F: Option C near-zero central peak (flank baseline + "
+            "baseline-adjusted Gaussian on |τ|≤20); participant-nested MixedLM "
+            "μ/FWHM (HIIT PH/PS within participant) + hierarchical μ TOST; "
+            "data-driven axis limits; FWHM hierarchical CI (log-scale fit).\n"
             "- Footer: multi-line below panels E/F to avoid overlap.\n"
             "- No ECG–vs–PPG comparison; no max-|r| / argmax metrics.\n"
         ),

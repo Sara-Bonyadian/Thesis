@@ -124,6 +124,40 @@ def build_methods_summary(inputs: Mapping[str, Path | None]) -> list[dict[str, o
             ),
         },
         {
+            "section": "peak_model",
+            "item": "near_zero_peak_fit",
+            "value": "option_c_flank_baseline_central_gaussian",
+            "source": "peak_model",
+            "notes": (
+                "Linear baseline B(τ)=b0+b1τ from flanks 20≤|τ|≤60 s; "
+                "nonnegative Gaussian on baseline-adjusted |τ|≤20 s; "
+                "μ init from central baseline-adjusted argmax; "
+                "A≥0, μ∈±20 s, σ∈[1,60] s; FWHM=2.355σ."
+            ),
+        },
+        {
+            "section": "peak_model",
+            "item": "identifiability",
+            "value": "A>=1e-3; A>=1.8*RMSE; A>=2*SE(A); weak_edge",
+            "source": "peak_model",
+            "notes": (
+                "RMSE and SE(A) from baseline-adjusted central residuals "
+                "(flank baseline fixed). Weak-edge: reject if μ at ±20 and A<0.2."
+            ),
+        },
+        {
+            "section": "peak_model",
+            "item": "group_mu_inference",
+            "value": "participant_mean_nested_tost",
+            "source": "inference",
+            "notes": (
+                "Identifiable low-demand μ/FWHM/A: equal-weight mean of "
+                "per-participant means (HIIT PH/PS nested within participant), "
+                "then TOST on that mean vs ±2 s for μ. MixedLM RE tried as "
+                "diagnostic only when intercept is sane. FWHM on log scale."
+            ),
+        },
+        {
             "section": "multiplicity",
             "item": "fdr_method",
             "value": "bh_fdr_0.05",

@@ -148,8 +148,9 @@ EEG_BAND_YLABEL = "EEG frequency band"
 EQUIVALENCE_REGION_LABEL = f"±{EXPECTED_PEAK_CENTER_EQUIVALENCE_S} s"
 MEDIAN_PEAK_CENTER_LABEL = "Median fitted peak μ (≠ group-mean max)"
 MU_CLARIFICATION_NOTE = (
-    "Orange dotted line: median of participant-specific Gaussian-fitted peak centers (μ); "
-    "this is not necessarily the location of the maximum of the group-average Fisher-z curve"
+    "Orange dotted line: median of participant-specific near-zero Gaussian peak "
+    "centers (μ; flank baseline + central-window fit); this is not necessarily "
+    "the location of the maximum of the group-average Fisher-z curve"
 )
 GROUP_MEAN_LABEL_TEMPLATE = "Group mean Fisher z (n = {n} participants)"
 MU_EQUIVALENCE_LABEL = f"μ equivalence ({EQUIVALENCE_REGION_LABEL})"
@@ -211,9 +212,11 @@ FIGURE1_PANEL_E_NOTE = (
     "separately."
 )
 FIGURE1_PANEL_F_NOTE = (
-    "Participant-level identifiable Gaussian μ and FWHM with dataset summaries; "
-    "μ TOST / ±2 s band from existing peak_center_equivalence (no hierarchical "
-    "FWHM inference)."
+    "Near-zero central peak: linear baseline from distant flanks (20≤|τ|≤60 s), "
+    "nonnegative Gaussian on baseline-adjusted |τ|≤20 s; identifiable peaks only "
+    "(A ≥ 1.8×RMSE, SE(A), weak-edge). Group μ/FWHM: mean of per-participant "
+    "means (HIIT PH/PS nested within participant) with hierarchical CI; "
+    "μ TOST / ±2 s on that mean. FWHM on log scale (back-transformed CI)."
 )
 
 FIGURE1_TITLE = "Confirmatory EEG–cardiac coupling: structure, replication, and peaks"
@@ -899,6 +902,7 @@ def resolve_reporting_inputs(confirmatory_root: str | Path) -> dict[str, Path | 
         "leave_one_out": "leave_one_dataset_out.csv",
         "peak_params": "peak_fit_params.csv",
         "peak_equivalence": "peak_center_equivalence.csv",
+        "peak_hierarchical": "peak_hierarchical_summaries.csv",
         "null_subject": "null_subject_results.csv",
         "null_summary": "null_summary.csv",
         "protocol_audit": "protocol_audit.csv",

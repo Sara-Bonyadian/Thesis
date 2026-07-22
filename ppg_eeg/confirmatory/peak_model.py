@@ -1,8 +1,23 @@
-"""Subject-level Gaussian peak fits on Fisher-z lag curves.
+"""Subject-level near-zero Gaussian peak fits on Fisher-z lag curves.
 
 Model
 -----
-``z(τ) = C + A · exp(-(τ - μ)² / (2σ²))``
+Primary production fit (near-zero central peak):
+1) Estimate distant-lag linear baseline on flanks ``20 ≤ |τ| ≤ 60``::
+
+    B(τ) = b0 + b1·τ
+
+2) Baseline-adjust central window ``|τ| ≤ 20``::
+
+    z_adj(τ) = z(τ) - B(τ)
+
+3) Fit nonnegative Gaussian component on central window only::
+
+    z_adj(τ) = A · exp(-(τ - μ)² / (2σ²))
+
+For diagnostics and output compatibility, ``baseline_C`` stores ``b0``.
+The helper ``gaussian_peak()`` remains available as
+``C + A·exp(...)`` for synthetic tests and historical tooling.
 
 Constraints (confirmatory protocol)
 -----------------------------------
@@ -10,6 +25,18 @@ Constraints (confirmatory protocol)
 - ``μ ∈ [-20, +20]`` s
 - ``σ ∈ [1, 60]`` s
 - ``FWHM = 2.355 · σ``
+
+Identifiability (positive peak; all must hold)
+----------------------------------------------
+- ``A ≥ MIN_IDENTIFIABLE_A`` (``1e-3``)
+- ``A ≥ IDENTIFIABLE_A_OVER_RMSE × RMSE`` (production: ``1.8×RMSE``)
+- ``A ≥ 2 × SE(A)`` when ``SE(A)`` is finite and positive
+- weak-edge: reject when ``μ`` is at the ±20 s bound **and** ``A < 0.2``
+
+After Option C baseline subtraction, ``RMSE`` and ``SE(A)`` are computed on the
+baseline-adjusted central-window residuals (``|τ| ≤ 20``), with the flank
+baseline held fixed. Threshold constants are unchanged; their reference noise
+is therefore the central residual scale, not the full ±60 s residual scale.
 
 Fitting uses weighted nonlinear least squares with lag ``n_overlap`` as weights.
 This module performs **subject-level** fits only; group hierarchical inference is M10+.
@@ -49,8 +76,13 @@ SIGMA_MAX_S = 60.0
 FWHM_FACTOR = 2.355
 BOUNDARY_ATOL = 1e-6
 MIN_IDENTIFIABLE_A = 1e-3
+# Amplitude vs residual noise: production Panel F / peak-timing gate.
+IDENTIFIABLE_A_OVER_RMSE = 1.8
 MIN_FINITE_POINTS = 4
 DEFAULT_SIGMA0_S = 10.0
+CENTRAL_LAG_MAX_S = 20.0
+FLANK_INNER_S = 20.0
+FLANK_OUTER_S = 60.0
 
 EXCLUSION_FIT_NOT_ATTEMPTED = "gaussian_fit_not_attempted"
 EXCLUSION_FIT_FAILED = "fit_failed"
@@ -142,6 +174,22 @@ def gaussian_peak(
     return values
 
 
+def _gaussian_component(
+    lag_s: np.ndarray | float,
+    peak_height_A: float,
+    peak_center_mu_s: float,
+    sigma_s: float,
+) -> np.ndarray | float:
+    """Gaussian component without baseline (used on baseline-adjusted central data)."""
+    lag = np.asarray(lag_s, dtype=float)
+    if sigma_s <= 0:
+        raise ValueError("sigma_s must be > 0.")
+    values = peak_height_A * np.exp(-0.5 * ((lag - peak_center_mu_s) / sigma_s) ** 2)
+    if np.isscalar(lag_s):
+        return float(values)
+    return values
+
+
 def fwhm_from_sigma(sigma_s: float) -> float:
     if not math.isfinite(sigma_s) or sigma_s <= 0:
         return float("nan")
@@ -197,15 +245,33 @@ def _group_curve_rows(
 def _initial_guess(
     lags: np.ndarray,
     z_values: np.ndarray,
-) -> tuple[float, float, float, float]:
-    baseline = float(np.median(z_values))
+) -> tuple[float, float, float]:
+    """Initial (A, mu, sigma) for central baseline-adjusted Gaussian component."""
     peak_idx = int(np.argmax(z_values))
-    peak_height = float(max(0.0, z_values[peak_idx] - baseline))
-    mu0 = float(np.clip(lags[peak_idx], -MU_BOUND_S, MU_BOUND_S))
+    peak_height = float(max(0.0, z_values[peak_idx]))
+    mu0 = float(np.clip(lags[peak_idx], -CENTRAL_LAG_MAX_S, CENTRAL_LAG_MAX_S))
     sigma0 = DEFAULT_SIGMA0_S
     if peak_height <= 0:
         mu0 = 0.0
-    return baseline, peak_height, mu0, sigma0
+    return peak_height, mu0, sigma0
+
+
+def _fit_weighted_linear_baseline(
+    lags: np.ndarray,
+    z_values: np.ndarray,
+    weights: np.ndarray,
+) -> tuple[float, float]:
+    """Weighted least-squares fit of b0 + b1*lag on flank rows."""
+    if lags.size < 2:
+        return float(np.median(z_values)), 0.0
+    X = np.column_stack((np.ones_like(lags), lags))
+    sqrt_w = np.sqrt(np.clip(weights, 1e-12, None))
+    Xw = X * sqrt_w[:, None]
+    yw = z_values * sqrt_w
+    beta, *_ = np.linalg.lstsq(Xw, yw, rcond=None)
+    b0 = float(beta[0])
+    b1 = float(beta[1]) if beta.shape[0] > 1 else 0.0
+    return b0, b1
 
 
 def _near_bound(value: float, lo: float, hi: float, *, atol: float = BOUNDARY_ATOL) -> bool:
@@ -220,7 +286,7 @@ def fit_gaussian_peak(
     *,
     weights: Sequence[float] | np.ndarray | None = None,
 ) -> dict[str, object]:
-    """Fit one weighted Gaussian peak to a Fisher-z lag curve."""
+    """Fit one weighted near-zero Gaussian peak to a Fisher-z lag curve."""
     lags = np.asarray(lags_s, dtype=float)
     z = np.asarray(z_values, dtype=float)
     if lags.shape != z.shape:
@@ -275,49 +341,89 @@ def fit_gaussian_peak(
         )
         return empty
 
-    c0, a0, mu0, sigma0 = _initial_guess(lags_f, z_f)
+    # Baseline from distant flanks: 20 <= |tau| <= 60.
+    flank_mask = (
+        np.abs(lags_f) >= FLANK_INNER_S
+    ) & (
+        np.abs(lags_f) <= FLANK_OUTER_S
+    )
+    if int(np.sum(flank_mask)) >= 2:
+        b0, b1 = _fit_weighted_linear_baseline(
+            lags_f[flank_mask],
+            z_f[flank_mask],
+            w_f[flank_mask],
+        )
+    else:
+        # Fallback for degenerate short windows lacking flank support.
+        b0, b1 = float(np.median(z_f)), 0.0
+
+    # Central window fit domain: |tau| <= 20.
+    central_mask = np.abs(lags_f) <= CENTRAL_LAG_MAX_S
+    lags_c = lags_f[central_mask]
+    z_c = z_f[central_mask]
+    w_c = w_f[central_mask]
+    n_central = int(lags_c.size)
+    if n_central < MIN_FINITE_POINTS:
+        empty["n_lags_fit"] = n_central
+        empty["baseline_C"] = b0
+        empty["init_baseline_C"] = b0
+        empty["exclusion_reason"] = EXCLUSION_FIT_NOT_ATTEMPTED
+        empty["optimizer_message"] = (
+            "Gaussian fit not attempted: need at least 4 finite weighted central lag points."
+        )
+        return empty
+
+    baseline_c = b0 + b1 * lags_c
+    z_center_adjusted = z_c - baseline_c
+
+    a0, mu0, sigma0 = _initial_guess(lags_c, z_center_adjusted)
     empty.update(
         {
-            "init_baseline_C": c0,
+            "init_baseline_C": b0,
             "init_peak_height_A": a0,
             "init_peak_center_mu_s": mu0,
             "init_sigma_s": sigma0,
+            "baseline_C": b0,
+            "n_lags_fit": n_central,
         }
     )
 
     # curve_fit sigma is y-std; larger weight → smaller sigma.
-    y_sigma = 1.0 / np.sqrt(w_f)
-    bounds_lower = [-np.inf, 0.0, -MU_BOUND_S, SIGMA_MIN_S]
-    bounds_upper = [np.inf, np.inf, MU_BOUND_S, SIGMA_MAX_S]
+    y_sigma = 1.0 / np.sqrt(np.clip(w_c, 1e-12, None))
+    bounds_lower = [0.0, -MU_BOUND_S, SIGMA_MIN_S]
+    bounds_upper = [np.inf, MU_BOUND_S, SIGMA_MAX_S]
 
     try:
         popt, pcov = curve_fit(
-            gaussian_peak,
-            lags_f,
-            z_f,
-            p0=(c0, a0, mu0, sigma0),
+            _gaussian_component,
+            lags_c,
+            z_center_adjusted,
+            p0=(a0, mu0, sigma0),
             bounds=(bounds_lower, bounds_upper),
             sigma=y_sigma,
             absolute_sigma=False,
             maxfev=20000,
         )
-        message = "curve_fit converged"
+        message = (
+            "curve_fit converged (flank baseline on 20<=|tau|<=60; "
+            "Gaussian on |tau|<=20 baseline-adjusted data)"
+        )
         success = True
     except (RuntimeError, ValueError) as exc:
         empty["exclusion_reason"] = EXCLUSION_FIT_FAILED
         empty["optimizer_message"] = str(exc)
         return empty
 
-    baseline_C, peak_height_A, peak_center_mu_s, sigma_s = (float(v) for v in popt)
-    se = np.full(4, np.nan, dtype=float)
+    peak_height_A, peak_center_mu_s, sigma_s = (float(v) for v in popt)
+    se = np.full(3, np.nan, dtype=float)
     if pcov is not None:
         diag = np.diag(np.asarray(pcov, dtype=float))
-        if diag.shape == (4,) and np.all(np.isfinite(diag)) and np.all(diag >= 0):
+        if diag.shape == (3,) and np.all(np.isfinite(diag)) and np.all(diag >= 0):
             se = np.sqrt(diag)
 
-    fitted = gaussian_peak(lags_f, baseline_C, peak_height_A, peak_center_mu_s, sigma_s)
-    resid = z_f - fitted
-    weighted_rss = float(np.sum(w_f * resid * resid))
+    fitted = _gaussian_component(lags_c, peak_height_A, peak_center_mu_s, sigma_s)
+    resid = z_center_adjusted - fitted
+    weighted_rss = float(np.sum(w_c * resid * resid))
     rmse = float(np.sqrt(np.mean(resid * resid)))
 
     a_at_lower = peak_height_A <= BOUNDARY_ATOL
@@ -327,9 +433,9 @@ def fit_gaussian_peak(
 
     # Positive identifiable peak: height above absolute floor and residual noise.
     amplitude_ok = peak_height_A >= MIN_IDENTIFIABLE_A and peak_height_A >= (
-        2.0 * rmse
+        IDENTIFIABLE_A_OVER_RMSE * rmse
     )
-    se_A = float(se[1])
+    se_A = float(se[0])
     if math.isfinite(se_A) and se_A > 0:
         amplitude_ok = amplitude_ok and peak_height_A >= (2.0 * se_A)
     # Reject weak edge artifacts when mu sits on the ±20 s wall.
@@ -339,15 +445,13 @@ def fit_gaussian_peak(
     has_peak = bool(success and amplitude_ok)
     report_timing = bool(has_peak)
     reported_mu = peak_center_mu_s if report_timing else float("nan")
-    reported_se_mu = (
-        float(se[2]) if report_timing and math.isfinite(float(se[2])) else float("nan")
-    )
+    reported_se_mu = float(se[1]) if report_timing and math.isfinite(float(se[1])) else float("nan")
 
     return {
         "converged": True,
         "has_identifiable_peak": has_peak,
         "report_timing_shift": report_timing,
-        "baseline_C": baseline_C,
+        "baseline_C": b0,
         "peak_height_A": peak_height_A,
         # Timing-report μ remains NaN when the peak is not identifiable.
         "peak_center_mu_s": reported_mu,
@@ -355,20 +459,21 @@ def fit_gaussian_peak(
         "fwhm_s": fwhm_from_sigma(sigma_s),
         # Always retain the optimizer μ for comparison with the observed peak.
         "peak_lag_fitted_s": peak_center_mu_s,
-        "se_baseline_C": float(se[0]),
-        "se_peak_height_A": float(se[1]),
+        # Baseline slope/intercept uncertainty is not currently exported.
+        "se_baseline_C": float("nan"),
+        "se_peak_height_A": float(se[0]),
         "se_peak_center_mu_s": reported_se_mu,
-        "se_sigma_s": float(se[3]),
+        "se_sigma_s": float(se[2]),
         "rmse": rmse,
         "weighted_rss": weighted_rss,
-        "n_lags_fit": n_fit,
+        "n_lags_fit": n_central,
         "A_at_lower_bound": a_at_lower,
         "mu_at_bound": mu_at_bound,
         "sigma_at_bound": sigma_at_bound,
         "boundary_hit": boundary_hit,
         "fit_success": True,
         "optimizer_message": message,
-        "init_baseline_C": c0,
+        "init_baseline_C": b0,
         "init_peak_height_A": a0,
         "init_peak_center_mu_s": mu0,
         "init_sigma_s": sigma0,
@@ -632,6 +737,7 @@ __all__ = [
     "EXCLUSION_FIT_NOT_ATTEMPTED",
     "EXCLUSION_NO_IDENTIFIABLE_PEAK",
     "FWHM_FACTOR",
+    "IDENTIFIABLE_A_OVER_RMSE",
     "MIN_IDENTIFIABLE_A",
     "MU_BOUND_S",
     "PARAMS_FILENAME",

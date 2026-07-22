@@ -96,6 +96,25 @@ Notes:
   `--optional-artifact-controls` (typically on C6 / `all`).
 - Full HIIT is a **sensitivity** dataset in `master.yaml` (not a primary meta cohort).
 
+## Peak model (Figure 1 Panel F)
+
+Production subject-level fits (`ppg_eeg/confirmatory/peak_model.py`, stage **C3**) estimate the
+**near-zero central peak**, not the strongest peak on ±60 s:
+
+1. Linear baseline `B(τ)=b0+b1τ` from distant flanks `20 ≤ |τ| ≤ 60` s.
+2. Nonnegative Gaussian on baseline-adjusted central data `|τ| ≤ 20` s.
+3. μ initialized from the central baseline-adjusted argmax; constrained to ±20 s.
+4. Identifiable peaks only (`A ≥ 1.8×RMSE`, SE(A), weak-edge) enter group inference.
+
+**Group hierarchy (C6):** equal-weight mean of per-participant means (HIIT PH/PS nested
+within participant), then μ TOST (±2 s) on that mean. FWHM uses the same nesting on
+log-FWHM (back-transformed). See `peak_hierarchical_summaries.csv` and
+`peak_center_equivalence.csv`.
+
+Manuscript-ready wording and QC live under:
+`derivatives/.../C7/figures/internal_qc/panel_f_option_c_update/` and
+`.../panel_f_hierarchical_inference/`.
+
 ## HIIT smoke (C-stage CLI)
 
 Everything for HIIT smoke lives under `smoke/hiit/` (subjects 01–03; `n_surrogates: 20`).

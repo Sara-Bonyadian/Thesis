@@ -207,7 +207,7 @@ Add these modules (status as of 2026-07-15; live under `ppg_eeg/confirmatory/`):
 | `confirmatory/harmonize.py` | 1 Hz alignment, clean blocks, nested duration windows, representations, z-scoring | Done (`C1c` / M4) |
 | `confirmatory/correlation.py` | Thin adapter around reusable lag functions and HR-only pair schemas | Done (`C2` / M5) |
 | `confirmatory/endpoints.py` | Fisher-z, ZLPI, local prominence, endpoint QC | Done (`C3` endpoints / M6) |
-| `confirmatory/peak_model.py` | Weighted Gaussian fitting and hierarchical parameter tables | Done (`C3` peaks / M7) |
+| `confirmatory/peak_model.py` | Option C near-zero peak fits (flank baseline + central Gaussian) | Done (`C3` peaks / M7 subject-level; hierarchy pending) |
 | `confirmatory/nulls.py` | Circular shift, phase randomization, block shuffle, cross-subject mismatch, AR(1) innovations; process-pool over units (`--n-jobs`); unit checkpoints + `C4_COMPLETE.json`; production default **500** surrogates | Done (`C4` / M9; parallel + 500-contract update) |
 | `confirmatory/group_tables.py` | Subject/state/band tidy tables and paired contrasts | Done (`C5` / M8) |
 | `confirmatory/inference.py` | Absolute MixedLM, TOST (low-demand μ), paired dataset effects, RE meta (primary-meta contrast gate), LOO, FDR | Done (`C6` / M10); **P3 Implemented** |
@@ -360,9 +360,15 @@ For every adapter, C0 must emit a completed checklist with: source files, task/s
 
 ### Peak model and hierarchy
 
-- Fit `z(τ) = C + A exp(-(τ-μ)^2/(2σ²))` by weighted nonlinear least squares, weighting by per-lag overlap.
-- Constrain μ to ±20 s for the zero-lag confirmatory fit, A ≥ 0, and σ to 1–60 s; save convergence, boundary, covariance, and residual diagnostics. FWHM is `2.355σ`.
-- Implement hierarchical estimation as an explicit two-stage frequentist model: subject-level weighted fits followed by mixed-effects models on A, μ, and log-FWHM with state/band fixed effects and subject/dataset random intercepts. Do not introduce an unplanned Bayesian dependency.
+- **Estimand:** center and width of the identifiable **near-zero central peak**, not the strongest peak anywhere on ±60 s.
+- **Production fit (Option C; `peak_model.py`):**
+  1. Estimate linear lag-dependent baseline `B(τ)=b0+b1τ` from distant flanks `20 ≤ |τ| ≤ 60` s (weighted least squares on flank rows).
+  2. Baseline-adjust the central window: `z_adj(τ)=z(τ)−B(τ)` for `|τ| ≤ 20` s.
+  3. Fit nonnegative Gaussian component on central data only: `z_adj(τ)=A exp(-(τ−μ)²/(2σ²))` by weighted NLS (weights = per-lag `n_overlap`).
+- Initialize μ from the largest baseline-adjusted central value (not the global ±60 s argmax). Constrain `A ≥ 0`, `μ ∈ [-20,+20]` s, `σ ∈ [1,60]` s. FWHM = `2.355σ`. Export convergence, boundary, covariance/SE, and residual diagnostics; `baseline_C` stores `b0`.
+- **Identifiability (unchanged thresholds; central residuals):** `A ≥ 1e-3`, `A ≥ 1.8×RMSE`, `A ≥ 2×SE(A)` when SE finite, and weak-edge rejection when μ is at ±20 and `A < 0.2`. RMSE/SE(A) are computed on baseline-adjusted central residuals with the flank baseline held fixed.
+- **Flank-baseline assumption:** distant flanks are treated as free of *systematic* lag-locked peaks (idiosyncratic subject-level bumps allowed). HIIT low-demand QC supports this for θ/β/low-γ (PASS) with alpha marginal on amplitude ratio only (`panel_f_option_c_update/flank_baseline_assumption/`).
+- **Group inference status:** subject-level fits are production. Current μ TOST / Panel F markers use one-sample summaries of identifiable low-demand μ rows (not MixedLM). Planned hierarchy remains: MixedLM on identifiable μ (and optionally log-FWHM) with state/band fixed effects and subject/dataset random intercepts; do not introduce an unplanned Bayesian dependency. Until then, Methods must not claim hierarchical μ/FWHM estimates.
 - Test μ equivalence to zero using two one-sided tests (TOST) with bounds -2 and +2 s among **absolute low-demand** identifiable peak centers; report CI and both one-sided p-values. This TOST is **not** a paired task-minus-rest analysis.
 
 ### State models
@@ -436,13 +442,14 @@ Each dataset selects **one** primary cardiac modality (ECG or PPG) in `PROTOCOL_
 ### Figure 1 — confirmatory structure, replication, and peaks (six panels)
 
 - Presentation-only layout in [`figure1_panels.py`](ppg_eeg/confirmatory/figure1_panels.py); C0–C6 analyses frozen.
-- **A:** Implemented pipeline schematic (ECG/PPG→HR; multitaper bands; Fisher-z; ZLPI; Gaussian A/μ/FWHM; confirmatory inference).
+- **A:** Implemented pipeline schematic (ECG/PPG→HR; multitaper bands; Fisher-z; ZLPI; central near-zero peak A/μ/FWHM; confirmatory inference).
 - **B:** Multi-band low-demand D240 Fisher-z curves; **participant-within-dataset** bootstrap 95% CIs (preserve repeated observations of drawn participants).
 - **C:** Participant lag-category means (lag 0 vs max-shoulder vs combined flank) from endpoint metrics.
 - **D:** Dataset × band heatmap of **subject-level mean ZLPI**; surrogate mark if `median_empirical_p < 0.05` for primary `circular_shift` null; primary vs sensitivity cohorts separated.
 - **E:** Alpha-focused **replication display** of equal four-band PRIMARY_META (not an alpha-only hierarchy); study CIs, pooled RE, prediction interval; cardiac modality as metadata only.
-- **F:** Participant identifiable μ/FWHM + dataset summaries + existing μ TOST (±2 s); FWHM descriptive only (no hierarchical FWHM inference).
+- **F:** Participant identifiable near-zero μ/FWHM (Option C flank baseline + central Gaussian) + group summaries + existing one-sample μ TOST (±2 s); FWHM descriptive only (no MixedLM hierarchical μ/FWHM inference yet).
 - Outputs: PDF/SVG/PNG + `source_data/figure1_panel_*`.
+- **Manuscript-ready peak Methods (subject-level fit):** To characterize the timing and width of the near-zero coupling peak, we estimated a linear lag-dependent baseline from the distant flanks (20≤|τ|≤60 s). We then fitted a nonnegative Gaussian component to the baseline-adjusted Fisher-z lag curve within the central region (|τ|≤20 s). The peak center was initialized from the largest baseline-adjusted central value and constrained to the same central region. Only identifiable positive peaks contributed to group summaries of μ and FWHM and to equivalence testing of low-demand μ against the prespecified ±2 s region.
 
 ### Figure 2 — state attenuation and replication (six-panel, presentation only)
 
@@ -584,12 +591,14 @@ Validation must reject: D ≤ max lag for confirmatory ZLPI, flank outside lag g
 - Outputs: per-observation endpoint metrics and QC.
 - Validation: hand-calculated curves, clipping, missing flank rejection, asymmetrical shoulders, null/flat curves.
 
-### M7 — Gaussian and hierarchical peak models (Large)
+### M7 — Near-zero central peak model (Large; Option C)
 
 - Files: `peak_model.py`, fit diagnostics, tests.
 - Dependencies: M5/M6.
-- Outputs: `peak_fit_params.csv`, hierarchical parameter tables, μ equivalence results.
-- Validation: synthetic Gaussian recovery across noise levels, boundary/failure behavior, bootstrap coverage simulation, TOST unit tests.
+- Outputs: `peak_fit_params.csv`, `peak_fit_qc.csv`; μ equivalence via C6 `peak_center_equivalence.csv` (one-sample TOST on identifiable low-demand μ).
+- Production estimand: flank linear baseline (`20≤|τ|≤60`) + baseline-adjusted Gaussian on `|τ|≤20`; μ init from central baseline-adjusted argmax; A≥0, μ∈±20, σ∈[1,60].
+- Status: subject-level Option C fits **done**; MixedLM hierarchical μ/log-FWHM **not yet** (Panel F currently uses arithmetic / one-sample TOST summaries).
+- Validation: synthetic Gaussian recovery; old-vs-new Option C comparison; flank-baseline assumption QC; boundary/failure behavior; TOST unit tests.
 
 ### M8 — Participant tables and paired contrasts (Medium)
 
@@ -718,7 +727,7 @@ Expected engineering effort is roughly 25–35 person-days for the mandatory cor
 4. ~~Commit common-support alignment and deterministic nested D240/D180/D120 segments.~~ **Done (M4)**
 5. ~~Commit signed HR-only 1-s lag curves while proving legacy Stage 2 unchanged.~~ **Done (M5)**
 6. ~~Commit Fisher-z, ZLPI, local prominence, and endpoint QC.~~ **Done (M6)**
-7. ~~Commit Gaussian peak fitting and two-stage hierarchical parameter inference.~~ **Done (M7)**
+7. ~~Commit Gaussian peak fitting (Option C near-zero central peak) and subject-level μ TOST.~~ **Done (M7 subject-level; MixedLM hierarchy still pending)**
 8. ~~Commit participant tables, paired contrasts, and inclusion-flow outputs.~~ **Done (M8)**
 9. ~~Commit temporal null battery with deterministic parallel execution.~~ **Done (M9)** — later updated: process-pool `--n-jobs`, unit checkpoints, production **500** surrogates
 10. ~~Commit mixed-effects, equivalence, meta-analysis, LOO, and multiplicity registry.~~ **Done (M10)**
@@ -793,7 +802,7 @@ This order keeps each commit independently testable, delays expensive raw-data c
 | C2 | Fisher *z* before inference | **Implemented** |
 | C3 | ZLPI | **Implemented** — D240/D180; flanks 20–60 s |
 | C4 | Local prominence | **Implemented** — shoulders 5–15 s |
-| C5 | Gaussian *A*, μ, FWHM | **Implemented** — subject-level fits; μ TOST |
+| C5 | Near-zero Gaussian *A*, μ, FWHM | **Implemented** — Option C subject-level fits (flank baseline + central Gaussian); μ TOST one-sample (not MixedLM yet) |
 | Legacy max-\|r\| / argmax lag | C2/C3 QC only | **No primary leak** |
 
 **Methods wording (frozen):** state explicitly that confirmatory analyses use duration-specific proximal indices — D240/D180 → ZLPI (±60; flanks 20–60), D120 → MWPI (±30; flanks 20–30), D60 → SWPI (±20; flanks 10–20) — and that MWPI/SWPI are never pooled with or described as ZLPI.

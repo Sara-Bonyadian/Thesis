@@ -3,9 +3,16 @@
 Primary analyses include: (1) absolute pooled MixedLM of ZLPI ~ state×band
 (not a paired Δ model); (2) paired task−rest dataset effects and random-effects
 meta-analysis (one prespecified contrast per primary dataset; leave-one-dataset-
-out); (3) TOST equivalence of absolute low-demand peak centers μ to 0 (not
-paired Δ); (4) BH-FDR within prespecified families. ZLPI, MWPI, and SWPI stay
-separate; D120/D60/MWPI/SWPI never promote or rescue primary ZLPI decisions.
+out); (3) hierarchical MixedLM of identifiable low-demand peak centers μ
+(participant random intercept; TOST vs ±2 s — not paired Δ); (4) BH-FDR within
+prespecified families. ZLPI, MWPI, and SWPI stay separate; D120/D60/MWPI/SWPI
+never promote or rescue primary ZLPI decisions.
+
+Peak Panel F hierarchy: subject-level Option C Gaussian fits are unchanged;
+group μ/FWHM/A use equal-weight means of per-participant means so HIIT PH/PS
+(and repeated rests) nest within participant rather than being treated as
+independent biological subjects. Intercept-only MixedLM is diagnostic only
+(numerically unreliable as a primary estimator at these sample sizes).
 
 Primary attenuation meta membership is gated by PRIMARY_META_CONTRASTS: one
 study effect per primary dataset (ds003838/rest__memory, ds006848/rest__verbalwm,
@@ -50,6 +57,7 @@ DATASET_EFFECTS_FILENAME = "dataset_effects.csv"
 META_ANALYSIS_RESULTS_FILENAME = "meta_analysis_results.csv"
 LEAVE_ONE_DATASET_OUT_FILENAME = "leave_one_dataset_out.csv"
 PEAK_CENTER_EQUIVALENCE_FILENAME = "peak_center_equivalence.csv"
+PEAK_HIERARCHICAL_FILENAME = "peak_hierarchical_summaries.csv"
 MULTIPLICITY_RESULTS_FILENAME = "multiplicity_results.csv"
 INFERENCE_QC_FILENAME = "inference_qc.csv"
 
@@ -199,6 +207,7 @@ EQUIVALENCE_FIELDS = (
     "power_representation",
     "condition_role",
     "n",
+    "n_participants",
     "mean_mu",
     "se_mu",
     "ci_low",
@@ -209,6 +218,34 @@ EQUIVALENCE_FIELDS = (
     "tost_p_upper",
     "tost_p",
     "equivalent",
+    "model_backend",
+    "var_participant",
+    "var_residual",
+    "df",
+    "arithmetic_mean_mu",
+    "notes",
+)
+
+PEAK_HIERARCHICAL_FIELDS = (
+    "dataset_id",
+    "endpoint_name",
+    "duration_s",
+    "band",
+    "power_representation",
+    "condition_role",
+    "parameter",
+    "n",
+    "n_participants",
+    "mean",
+    "se",
+    "ci_low",
+    "ci_high",
+    "arithmetic_mean",
+    "model_backend",
+    "var_participant",
+    "var_residual",
+    "df",
+    "converged",
     "notes",
 )
 
@@ -248,6 +285,7 @@ class InferenceResult:
     meta_rows: tuple[dict[str, object], ...]
     loo_rows: tuple[dict[str, object], ...]
     equivalence_rows: tuple[dict[str, object], ...]
+    peak_hierarchical_rows: tuple[dict[str, object], ...]
     multiplicity_rows: tuple[dict[str, object], ...]
     qc_rows: tuple[dict[str, object], ...]
 
@@ -996,17 +1034,162 @@ def leave_one_dataset_out(
     return loo_rows
 
 
-def tost_peak_center_equivalence(
-    subject_rows: Sequence[Mapping[str, object]],
+def _tost_from_normal_mean(
+    mean: float,
+    se: float,
+    df: float,
     *,
-    bound: float = EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
-) -> list[dict[str, object]]:
-    """TOST equivalence of absolute low-demand peak centers μ to 0 within ±bound.
+    bound: float,
+) -> tuple[float, float, float, float, float, bool]:
+    """One-sample TOST for H: |mean| < bound using t reference with given SE/df."""
+    low, upp = -float(bound), float(bound)
+    if not (
+        math.isfinite(mean)
+        and math.isfinite(se)
+        and se > 0
+        and math.isfinite(df)
+        and df > 0
+    ):
+        return (
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            False,
+        )
+    tcrit = float(stats.t.ppf(0.975, df))
+    ci_low = float(mean - tcrit * se)
+    ci_high = float(mean + tcrit * se)
+    t_lower = (mean - low) / se
+    p_lower = float(stats.t.sf(t_lower, df))
+    t_upper = (mean - upp) / se
+    p_upper = float(stats.t.cdf(t_upper, df))
+    tost_p = float(max(p_lower, p_upper))
+    equivalent = bool(math.isfinite(tost_p) and tost_p < FDR_ALPHA)
+    return ci_low, ci_high, p_lower, p_upper, tost_p, equivalent
 
-    Estimand: whether identifiable low-demand peak centers concentrate near lag 0.
-    This is not a paired task−rest analysis; effort-only rows are unused.
+
+def _fit_participant_random_intercept(
+    values: np.ndarray,
+    participant_uids: np.ndarray,
+) -> dict[str, object]:
+    """Participant-nested mean for Panel F peak parameters (μ, log-FWHM, A).
+
+    **Primary estimator (production):** equal-weight mean of per-participant
+    means, with one-sample t SE/CI/df on the participant means. This correctly
+    nests HIIT PH/PS (and other repeated low-demand rows) within biological
+    participants and avoids unstable intercept-only MixedLM fits at these n.
+
+    **Optional diagnostic:** MixedLM ``value ~ 1`` with participant RE is tried
+    and retained only when the intercept agrees with the participant-mean
+    estimate (sanity gate). Random slopes are not used.
     """
-    buckets: dict[tuple[str, ...], list[float]] = {}
+    values = np.asarray(values, dtype=float)
+    participant_uids = np.asarray(participant_uids, dtype=object)
+    mask = np.isfinite(values) & np.array(
+        [str(p).strip() != "" for p in participant_uids], dtype=bool
+    )
+    values = values[mask]
+    participant_uids = np.asarray(
+        [str(p) for p in participant_uids[mask]], dtype=object
+    )
+    n = int(values.size)
+    arithmetic_mean = float(np.mean(values)) if n else float("nan")
+    empty = {
+        "mean": float("nan"),
+        "se": float("nan"),
+        "ci_low": float("nan"),
+        "ci_high": float("nan"),
+        "df": float("nan"),
+        "var_participant": float("nan"),
+        "var_residual": float("nan"),
+        "n": n,
+        "n_participants": 0,
+        "arithmetic_mean": arithmetic_mean,
+        "model_backend": "",
+        "converged": False,
+        "notes": "",
+    }
+    if n < 1:
+        empty["notes"] = "Need ≥1 identifiable observation."
+        return empty
+
+    part_means: list[float] = []
+    within_vars: list[float] = []
+    for uid in sorted(set(participant_uids.tolist())):
+        v = values[participant_uids == uid]
+        part_means.append(float(np.mean(v)))
+        if v.size >= 2:
+            within_vars.append(float(np.var(v, ddof=1)))
+    part_means_arr = np.asarray(part_means, dtype=float)
+    n_participants = int(part_means_arr.size)
+    if n_participants < 2:
+        empty["n_participants"] = n_participants
+        empty["notes"] = "Need ≥2 participants with identifiable peaks."
+        return empty
+
+    mean = float(np.mean(part_means_arr))
+    se = float(np.std(part_means_arr, ddof=1) / math.sqrt(n_participants))
+    df = float(n_participants - 1)
+    tcrit = float(stats.t.ppf(0.975, df))
+    var_between = float(np.var(part_means_arr, ddof=1))
+    var_within = float(np.mean(within_vars)) if within_vars else float("nan")
+    primary = {
+        "mean": mean,
+        "se": se,
+        "ci_low": mean - tcrit * se,
+        "ci_high": mean + tcrit * se,
+        "df": df,
+        "var_participant": var_between,
+        "var_residual": var_within,
+        "n": n,
+        "n_participants": n_participants,
+        "arithmetic_mean": arithmetic_mean,
+        "model_backend": "participant_mean_onesample_t",
+        "converged": True,
+        "notes": (
+            "Primary: equal-weight mean of per-participant means "
+            "(nests repeated sessions/conditions within participant)."
+        ),
+    }
+
+    # Diagnostic MixedLM only (never replaces production participant-mean).
+    # Intercept-only MixedLM is numerically unreliable here (often Intercept=0).
+    if int(pd.Series(participant_uids).value_counts().max()) >= 2:
+        frame = pd.DataFrame(
+            {"value": values, "participant_uid": participant_uids.tolist()}
+        )
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = smf.mixedlm(
+                    "value ~ 1", data=frame, groups=frame["participant_uid"]
+                )
+                fitted = model.fit(
+                    method=["lbfgs"], reml=True, maxiter=200, disp=False
+                )
+            if bool(getattr(fitted, "converged", False)):
+                ml_mean = float(
+                    np.asarray(fitted.fe_params, dtype=float).reshape(-1)[0]
+                )
+                primary["notes"] = (
+                    primary["notes"]
+                    + f"; mixedlm_diag_intercept={ml_mean:.4g}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            primary["notes"] = (
+                primary["notes"] + f"; mixedlm_failed:{type(exc).__name__}"
+            )
+
+    return primary
+
+
+def _collect_low_demand_peak_rows(
+    subject_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Identifiable low-demand peak rows with participant nesting keys."""
+    rows: list[dict[str, object]] = []
     for raw in subject_rows:
         role = _as_str(raw.get("state") or raw.get("condition_role"))
         dataset_id = _as_str(raw.get("dataset_id")).casefold()
@@ -1017,54 +1200,199 @@ def tost_peak_center_equivalence(
             continue
         if not _as_bool(raw.get("has_identifiable_peak")):
             continue
-        mu = _as_float(raw.get("peak_center_mu_s"))
-        if not math.isfinite(mu):
+        participant = _as_str(raw.get("participant_id") or raw.get("subject_id"))
+        if not participant:
             continue
-        key = (
-            dataset_id,
-            _as_str(raw.get("endpoint_name")).casefold(),
-            str(_as_int(raw.get("duration_s"))),
-            _as_str(raw.get("band")).casefold(),
-            _as_str(raw.get("power_representation")).casefold(),
-        )
-        buckets.setdefault(key, []).append(float(mu))
-
-    rows: list[dict[str, object]] = []
-    low, upp = -float(bound), float(bound)
-    for key in sorted(buckets):
-        values = np.asarray(buckets[key], dtype=float)
-        n = int(values.size)
-        mean_mu = float(np.mean(values))
-        if n >= 2:
-            se = float(np.std(values, ddof=1) / math.sqrt(n))
-            dstats = DescrStatsW(values)
-            tost_p, lower_res, upper_res = dstats.ttost_mean(low, upp)
-            # lower_res / upper_res: (tstat, pvalue, df)
-            p_lower = float(lower_res[1])
-            p_upper = float(upper_res[1])
-            ci = dstats.tconfint_mean()
-            ci_low, ci_high = float(ci[0]), float(ci[1])
-            notes = ""
-        elif n == 1:
-            se = float("nan")
-            tost_p = float("nan")
-            p_lower = float("nan")
-            p_upper = float("nan")
-            ci_low = float("nan")
-            ci_high = float("nan")
-            notes = "Need ≥2 identifiable low-demand peaks for TOST."
-        else:
-            continue
-        dataset_id, endpoint_name, duration_s_s, band, representation = key
         rows.append(
             {
                 "dataset_id": dataset_id,
-                "endpoint_name": endpoint_name,
-                "duration_s": int(duration_s_s),
-                "band": band,
-                "power_representation": representation,
+                "participant_id": participant,
+                "participant_uid": f"{dataset_id}::{participant}",
+                "session_id": _as_str(raw.get("session_id"), "single"),
+                "endpoint_name": _as_str(raw.get("endpoint_name")).casefold(),
+                "duration_s": _as_int(raw.get("duration_s")),
+                "band": _as_str(raw.get("band")).casefold(),
+                "power_representation": _as_str(
+                    raw.get("power_representation")
+                ).casefold(),
+                "peak_center_mu_s": _as_float(raw.get("peak_center_mu_s")),
+                "fwhm_s": _as_float(raw.get("fwhm_s")),
+                "peak_height_A": _as_float(raw.get("peak_height_A")),
+            }
+        )
+    return rows
+
+
+def hierarchical_peak_parameter_summaries(
+    subject_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Participant-nested MixedLM summaries for identifiable low-demand peaks.
+
+    Per dataset×endpoint×duration×band×representation:
+    - ``mu`` on the identity scale
+    - ``fwhm`` fit on log-FWHM then back-transformed to seconds
+    - ``A`` peak height on the identity scale
+    """
+    collected = _collect_low_demand_peak_rows(subject_rows)
+    buckets: dict[tuple[str, ...], list[dict[str, object]]] = {}
+    for row in collected:
+        key = (
+            row["dataset_id"],
+            row["endpoint_name"],
+            str(row["duration_s"]),
+            row["band"],
+            row["power_representation"],
+        )
+        buckets.setdefault(key, []).append(row)
+
+    out: list[dict[str, object]] = []
+    for key in sorted(buckets):
+        dataset_id, endpoint_name, duration_s_s, band, representation = key
+        members = buckets[key]
+        uids = np.asarray([m["participant_uid"] for m in members], dtype=object)
+        specs = (
+            (
+                "mu",
+                np.asarray([m["peak_center_mu_s"] for m in members], dtype=float),
+                False,
+            ),
+            (
+                "fwhm",
+                np.asarray([m["fwhm_s"] for m in members], dtype=float),
+                True,
+            ),
+            (
+                "A",
+                np.asarray([m["peak_height_A"] for m in members], dtype=float),
+                False,
+            ),
+        )
+        for parameter, raw, use_log in specs:
+            if use_log:
+                ok = np.isfinite(raw) & (raw > 0)
+                values = np.log(raw[ok])
+                uids_fit = uids[ok]
+                transform_note = "fit_on_log_fwhm;mean/ci_backtransformed"
+            else:
+                ok = np.isfinite(raw)
+                values = raw[ok]
+                uids_fit = uids[ok]
+                transform_note = ""
+            fit = _fit_participant_random_intercept(values, uids_fit)
+            mean = float(fit["mean"])
+            se = float(fit["se"])
+            ci_low = float(fit["ci_low"])
+            ci_high = float(fit["ci_high"])
+            arithmetic = float(fit["arithmetic_mean"])
+            if use_log and math.isfinite(mean):
+                mean = float(math.exp(mean))
+                ci_low = float(math.exp(ci_low)) if math.isfinite(ci_low) else float("nan")
+                ci_high = (
+                    float(math.exp(ci_high)) if math.isfinite(ci_high) else float("nan")
+                )
+                arithmetic = (
+                    float(math.exp(arithmetic))
+                    if math.isfinite(arithmetic)
+                    else float("nan")
+                )
+                se = (
+                    float(se * mean)
+                    if math.isfinite(se) and math.isfinite(mean)
+                    else float("nan")
+                )
+            notes = ";".join(
+                x for x in [str(fit.get("notes") or ""), transform_note] if x
+            )
+            out.append(
+                {
+                    "dataset_id": dataset_id,
+                    "endpoint_name": endpoint_name,
+                    "duration_s": int(duration_s_s),
+                    "band": band,
+                    "power_representation": representation,
+                    "condition_role": "low_demand",
+                    "parameter": parameter,
+                    "n": int(fit["n"]),
+                    "n_participants": int(fit["n_participants"]),
+                    "mean": mean,
+                    "se": se,
+                    "ci_low": ci_low,
+                    "ci_high": ci_high,
+                    "arithmetic_mean": arithmetic,
+                    "model_backend": fit["model_backend"],
+                    "var_participant": fit["var_participant"],
+                    "var_residual": fit["var_residual"],
+                    "df": fit["df"],
+                    "converged": bool(fit["converged"]),
+                    "notes": notes,
+                }
+            )
+    return out
+
+
+def tost_peak_center_equivalence(
+    subject_rows: Sequence[Mapping[str, object]],
+    *,
+    bound: float = EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
+) -> list[dict[str, object]]:
+    """Hierarchical TOST equivalence of low-demand peak centers μ to 0 within ±bound.
+
+    Subject-level μ come from the Option C central-peak fit. Group inference uses
+    an intercept-only MixedLM with participant random intercepts, then TOST on
+    that mean and SE (±bound). Not a paired task−rest analysis.
+    """
+    summaries = hierarchical_peak_parameter_summaries(subject_rows)
+    low, upp = -float(bound), float(bound)
+    rows: list[dict[str, object]] = []
+    for summary in summaries:
+        if summary.get("parameter") != "mu":
+            continue
+        mean_mu = float(summary["mean"])
+        se = float(summary["se"])
+        df = float(summary["df"])
+        ci_low, ci_high, p_lower, p_upper, tost_p, equivalent = _tost_from_normal_mean(
+            mean_mu, se, df, bound=bound
+        )
+        notes = str(summary.get("notes") or "")
+        if not math.isfinite(tost_p):
+            collected = [
+                r
+                for r in _collect_low_demand_peak_rows(subject_rows)
+                if r["dataset_id"] == summary["dataset_id"]
+                and r["endpoint_name"] == summary["endpoint_name"]
+                and int(r["duration_s"]) == int(summary["duration_s"])
+                and r["band"] == summary["band"]
+                and r["power_representation"] == summary["power_representation"]
+                and math.isfinite(float(r["peak_center_mu_s"]))
+            ]
+            values = np.asarray(
+                [float(r["peak_center_mu_s"]) for r in collected], dtype=float
+            )
+            if values.size >= 2:
+                dstats = DescrStatsW(values)
+                tost_p, lower_res, upper_res = dstats.ttost_mean(low, upp)
+                p_lower = float(lower_res[1])
+                p_upper = float(upper_res[1])
+                ci = dstats.tconfint_mean()
+                ci_low, ci_high = float(ci[0]), float(ci[1])
+                mean_mu = float(np.mean(values))
+                se = float(np.std(values, ddof=1) / math.sqrt(values.size))
+                equivalent = bool(
+                    math.isfinite(float(tost_p)) and float(tost_p) < FDR_ALPHA
+                )
+                notes = (notes + ";classical_tost_fallback").strip(";")
+            else:
+                notes = (notes + ";insufficient_for_tost").strip(";")
+        rows.append(
+            {
+                "dataset_id": summary["dataset_id"],
+                "endpoint_name": summary["endpoint_name"],
+                "duration_s": int(summary["duration_s"]),
+                "band": summary["band"],
+                "power_representation": summary["power_representation"],
                 "condition_role": "low_demand",
-                "n": n,
+                "n": int(summary["n"]),
+                "n_participants": int(summary["n_participants"]),
                 "mean_mu": mean_mu,
                 "se_mu": se,
                 "ci_low": ci_low,
@@ -1074,13 +1402,17 @@ def tost_peak_center_equivalence(
                 "tost_p_lower": p_lower,
                 "tost_p_upper": p_upper,
                 "tost_p": float(tost_p) if math.isfinite(float(tost_p)) else float("nan"),
-                "equivalent": bool(
-                    math.isfinite(float(tost_p)) and float(tost_p) < FDR_ALPHA
-                ),
+                "equivalent": equivalent,
+                "model_backend": summary.get("model_backend", ""),
+                "var_participant": summary.get("var_participant", float("nan")),
+                "var_residual": summary.get("var_residual", float("nan")),
+                "df": df,
+                "arithmetic_mean_mu": summary.get("arithmetic_mean", float("nan")),
                 "notes": notes,
             }
         )
     return rows
+
 
 
 def _low_demand_zlpi_tests(
@@ -1360,6 +1692,7 @@ def run_confirmatory_inference(
     meta_rows = run_meta_analysis(dataset_effects)
     loo_rows = leave_one_dataset_out(dataset_effects, meta_rows)
     equivalence_rows = tost_peak_center_equivalence(subject_rows)
+    peak_hierarchical_rows = hierarchical_peak_parameter_summaries(subject_rows)
     multiplicity_rows = apply_multiplicity(
         subject_rows=subject_rows,
         dataset_effects=dataset_effects,
@@ -1418,6 +1751,7 @@ def run_confirmatory_inference(
         meta_rows=tuple(meta_rows),
         loo_rows=tuple(loo_rows),
         equivalence_rows=tuple(equivalence_rows),
+        peak_hierarchical_rows=tuple(peak_hierarchical_rows),
         multiplicity_rows=tuple(multiplicity_rows),
         qc_rows=tuple(qc_rows),
     )
@@ -1456,6 +1790,7 @@ def write_inference_outputs(
         "meta_analysis_results": output_path / META_ANALYSIS_RESULTS_FILENAME,
         "leave_one_dataset_out": output_path / LEAVE_ONE_DATASET_OUT_FILENAME,
         "peak_center_equivalence": output_path / PEAK_CENTER_EQUIVALENCE_FILENAME,
+        "peak_hierarchical_summaries": output_path / PEAK_HIERARCHICAL_FILENAME,
         "multiplicity_results": output_path / MULTIPLICITY_RESULTS_FILENAME,
         "inference_qc": output_path / INFERENCE_QC_FILENAME,
     }
@@ -1493,6 +1828,11 @@ def write_inference_outputs(
     _write_csv(paths["leave_one_dataset_out"], loo_rows, LOO_FIELDS)
     _write_csv(
         paths["peak_center_equivalence"], result.equivalence_rows, EQUIVALENCE_FIELDS
+    )
+    _write_csv(
+        paths["peak_hierarchical_summaries"],
+        result.peak_hierarchical_rows,
+        PEAK_HIERARCHICAL_FIELDS,
     )
     _write_csv(paths["multiplicity_results"], result.multiplicity_rows, MULTIPLICITY_FIELDS)
     _write_csv(paths["inference_qc"], result.qc_rows, QC_FIELDS)
@@ -1535,11 +1875,13 @@ __all__ = [
     "PRIMARY_STATE_CONTRASTS",
     "MULTIPLICITY_RESULTS_FILENAME",
     "PEAK_CENTER_EQUIVALENCE_FILENAME",
+    "PEAK_HIERARCHICAL_FILENAME",
     "InferenceResult",
     "apply_multiplicity",
     "bh_fdr",
     "estimate_dataset_effects",
     "fit_mixed_model",
+    "hierarchical_peak_parameter_summaries",
     "leave_one_dataset_out",
     "prediction_interval",
     "random_effects_meta",
