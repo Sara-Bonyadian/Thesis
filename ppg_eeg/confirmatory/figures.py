@@ -191,12 +191,11 @@ FIGURE1_PANEL_D_SURROGATE_RULE_NOTE = (
 FIGURE1_PANEL_D_NOTE = (
     FIGURE1_PANEL_D_SURROGATE_RULE_NOTE
     + " HIIT is shown as one descriptive sensitivity estimate. PH and PS are "
-    "repeated sessions from the same participant cohort and were combined within "
-    "participant (mean of available PH/PS × PRE/POST low-demand ZLPI) before group "
-    "summarization. Sample size is unique participants; participant-session counts "
-    "are reported separately. The HIIT row is a sensitivity summary, not an "
-    "independent primary dataset. Surrogate marks use the median of all HIIT "
-    "low-demand condition-level median_empirical_p values for that band."
+    "session subjects (Panel B-aligned; counted separately, n≈40). Within each "
+    "session, available PRE/POST low-demand ZLPI are averaged before the group "
+    "mean. The HIIT row is a sensitivity summary, not an independent primary "
+    "dataset. Surrogate marks use the median of all HIIT low-demand "
+    "condition-level median_empirical_p values for that band."
 )
 FIGURE1_PANEL_D_ASTERISK_LABEL = (
     f"* = circular-shift surrogate p < {FIGURE1_PANEL_D_SURROGATE_ALPHA:g} only"
@@ -204,19 +203,18 @@ FIGURE1_PANEL_D_ASTERISK_LABEL = (
 FIGURE1_PANEL_E_NOTE = (
     "Alpha-focused replication display of the equal four-band primary meta "
     "(one prespecified contrast per dataset); not an alpha-only confirmatory hierarchy. "
-    "HIIT is shown as one descriptive sensitivity estimate. PH and PS are repeated "
-    "sessions from the same participant cohort and were combined within participant "
-    "(mean of available Rest–Tetris ΔZLPI contrasts) before group summarization. "
-    "The HIIT row is excluded from the pooled random-effects meta-analysis. Sample "
-    "size refers to unique participants; participant-session counts are reported "
-    "separately."
+    "HIIT is shown as one descriptive sensitivity estimate. PH and PS are session "
+    "subjects (Panel B-aligned; counted separately). Within each session, available "
+    "Rest–Tetris ΔZLPI contrasts are averaged before group summarization. "
+    "The HIIT row is excluded from the pooled random-effects meta-analysis."
 )
 FIGURE1_PANEL_F_NOTE = (
     "Near-zero central peak: linear baseline from distant flanks (20≤|τ|≤60 s), "
     "nonnegative Gaussian on baseline-adjusted |τ|≤20 s; identifiable peaks only "
-    "(A ≥ 1.8×RMSE, SE(A), weak-edge). Group μ/FWHM: mean of per-participant "
-    "means (HIIT PH/PS nested within participant) with hierarchical CI; "
-    "μ TOST / ±2 s on that mean. FWHM on log scale (back-transformed CI)."
+    "(A ≥ 1.8×RMSE, SE(A), weak-edge). Group μ/FWHM: mean of per-session-subject "
+    "means (Panel B-aligned; HIIT PH/PS counted as separate units) with "
+    "hierarchical CI; μ TOST / ±2 s on that mean. FWHM on log scale "
+    "(back-transformed CI)."
 )
 
 FIGURE1_TITLE = "Confirmatory EEG–cardiac coupling: structure, replication, and peaks"
@@ -227,8 +225,8 @@ FIGURE3_TITLE = "Temporal specificity and core robustness"
 FIGURE2_PANEL_C_NOTE = (
     "Alpha PRIMARY_META absolute paired ΔZLPI (task − low-demand); "
     "no percent attenuation. HIIT is shown as one descriptive sensitivity estimate "
-    "(PH/PS combined within participant) and is excluded from the pooled "
-    "random-effects meta-analysis."
+    "(PH/PS session subjects counted separately, Panel B-aligned) and is excluded "
+    "from the pooled random-effects meta-analysis."
 )
 FIGURE2_PANEL_D_NOTE = (
     "Absolute pooled state model — MixedLM/OLS coefficients with stored CIs "
@@ -250,10 +248,20 @@ FIGURE2_WIRING_GAP_NOTE = (
     "lag curves; unpaired fallback is not used."
 )
 PANEL_STATUS_EXPECTED_NOT_APPLICABLE = "expected_not_applicable"
+PANEL_STATUS_SENSITIVITY_DISPLAY = "sensitivity_display"
 FIGURE2_EXPECTED_NOT_APPLICABLE_NOTE = (
     "Expected not applicable: PRIMARY_META panels require primary-cohort "
     "meta inputs and are empty by design for sensitivity-only runs "
     "(e.g. HIIT alone)."
+)
+FIGURE2_PANEL_A_HIIT_SENSITIVITY_NOTE = (
+    "HIIT Sensitivity (display-only): matched Rest–Tetris Fisher-z lag curves "
+    "from C5 pairs (PRE and POST each contribute; no PRE/POST or PH/PS "
+    "averaging before the group mean). Point estimate = mean across matched "
+    "pairs; 95% CI = PH/PS session-subject cluster bootstrap (pairs within a "
+    "drawn session are retained together). Excluded from PRIMARY_META; not a "
+    "primary confirmatory claim. Report n_matched_pairs and n_session_clusters "
+    "(not participant n)."
 )
 
 
@@ -2735,8 +2743,8 @@ def render_figure3(
                 "",
                 "## Sample size wording",
                 f"- This render: **{primary_inference.sample_size_label}**",
-                "- Do not label n from protocol/session subject_ids (e.g. HIIT "
-                "`01_ph` / `01_ps`).",
+                "- For HIIT, n uses session subject_ids (e.g. `01_ph` / `01_ps`), "
+                "matching Figure 1 Panel B.",
                 "",
                 "## CI method",
                 "Unweighted mean of biological-participant Δ_p within dataset; "

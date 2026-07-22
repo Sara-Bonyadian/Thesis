@@ -51,9 +51,10 @@ def _paired(
 
 
 class HiitSensitivityForestDisplayTests(unittest.TestCase):
-    def test_participant_mean_of_available_then_group_t_ci(self) -> None:
-        # P01: mean(0.10, 0.30, 0.40, 0.20) = 0.25
-        # P02: mean(-0.10, 0.10, 0.00, 0.20) = 0.05
+    def test_session_subject_mean_of_available_then_group_t_ci(self) -> None:
+        # Session units (Panel B-aligned):
+        # 01_ph: mean(0.10, 0.30)=0.20; 01_ps: mean(0.40, 0.20)=0.30
+        # 02_ph: mean(-0.10, 0.10)=0.00; 02_ps: mean(0.00, 0.20)=0.10
         rows = [
             _paired(participant_id="01", contrast_id="ph_pre_rest__tetris", delta=0.10),
             _paired(participant_id="01", contrast_id="ph_post_rest__tetris", delta=0.30),
@@ -68,21 +69,20 @@ class HiitSensitivityForestDisplayTests(unittest.TestCase):
         self.assertEqual(len(out), 1)
         row = out[0]
         self.assertEqual(row["dataset_id"], "hiit")
-        expected = student_t_effect_summary([0.25, 0.05])
-        self.assertEqual(row["n_pairs"], 2)
-        self.assertEqual(row["n_participants"], 2)
-        self.assertEqual(row["n_participant_sessions"], 4)  # 2 participants × PH+PS
+        expected = student_t_effect_summary([0.20, 0.30, 0.00, 0.10])
+        self.assertEqual(row["n_pairs"], 4)
+        self.assertEqual(row["n_participants"], 4)
+        self.assertEqual(row["n_participant_sessions"], 4)
         self.assertAlmostEqual(
             float(row["effect_mean"]), float(expected["effect_mean"]), places=12
         )
         self.assertAlmostEqual(float(row["ci_low"]), float(expected["ci_low"]), places=12)
         self.assertEqual(row["row_type"], ROW_TYPE_SENSITIVITY_DISPLAY)
         self.assertFalse(row["enters_meta"])
+        self.assertEqual(row["aggregation"], "session_subject_mean_of_available_pre_post_delta")
         self.assertIn(HIIT_FOREST_DISPLAY_LABEL, str(row["display_label"]))
-        self.assertEqual(row["display_label"], HIIT_FOREST_DISPLAY_LABEL)
-        self.assertNotIn("unique participants", str(row["display_label"]))
 
-        # Incomplete contrast still contributes at participant level.
+        # Incomplete contrast still contributes at session-subject level.
         incomplete = [
             _paired(participant_id="03", contrast_id="ph_pre_rest__tetris", delta=1.0),
         ]
@@ -292,7 +292,7 @@ class HiitSensitivityForestDisplayTests(unittest.TestCase):
                 self.assertAlmostEqual(float(pooled["effect_mean"]), -0.15, places=12)
             caption1 = (out1 / "figure1_caption.txt").read_text(encoding="utf-8")
             self.assertIn("excluded from the pooled random-effects", caption1)
-            self.assertIn("combined within participant", caption1)
+            self.assertIn("Panel B-aligned", caption1)
             caption2 = (out2 / "figure2_caption.txt").read_text(encoding="utf-8")
             self.assertIn("excluded from the pooled random-effects", caption2)
 

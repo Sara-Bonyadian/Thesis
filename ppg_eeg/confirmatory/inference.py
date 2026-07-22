@@ -558,12 +558,20 @@ def _prepare_subject_frame(
         if not math.isfinite(mean_hr):
             mean_hr = 0.0
         modality = _as_str(raw.get("modality") or raw.get("sensor_modality"), "eeg")
-        participant = _as_str(raw.get("participant_id") or raw.get("subject_id"))
+        unit_id = _panel_b_aligned_unit_id(raw, dataset_id)
+        display_id = _as_str(
+            raw.get("subject_id")
+            or (
+                f"{_as_str(raw.get('participant_id'))}_{_as_str(raw.get('session_id'))}"
+                if _as_str(raw.get("session_id")) not in {"", "single"}
+                else raw.get("participant_id") or raw.get("subject_id")
+            )
+        )
         rows.append(
             {
                 "dataset_id": dataset_id,
-                "participant_id": participant,
-                "participant_uid": f"{dataset_id}::{participant}",
+                "participant_id": display_id,
+                "participant_uid": unit_id,
                 "session_id": _as_str(raw.get("session_id"), "single"),
                 "condition": condition,
                 "state": role,
@@ -1070,20 +1078,36 @@ def _tost_from_normal_mean(
     return ci_low, ci_high, p_lower, p_upper, tost_p, equivalent
 
 
+def _panel_b_aligned_unit_id(raw: Mapping[str, object], dataset_id: str) -> str:
+    """Inferential unit matching Figure 1 Panel B bootstrap keys.
+
+    Panel B resamples session ``subject_id`` (e.g. HIIT ``01_ph`` / ``01_ps``),
+    not biological ``participant_id`` alone. Prefer ``subject_id`` when present;
+    otherwise combine ``participant_id`` + ``session_id``.
+    """
+    subject = _as_str(raw.get("subject_id")).casefold()
+    if subject:
+        return f"{dataset_id}::{subject}"
+    participant = _as_str(raw.get("participant_id")).casefold()
+    session = _as_str(raw.get("session_id"), "single").casefold() or "single"
+    if participant and session not in {"", "single"}:
+        return f"{dataset_id}::{participant}::{session}"
+    return f"{dataset_id}::{participant or 'unknown'}"
+
+
 def _fit_participant_random_intercept(
     values: np.ndarray,
     participant_uids: np.ndarray,
 ) -> dict[str, object]:
-    """Participant-nested mean for Panel F peak parameters (μ, log-FWHM, A).
+    """Session-subject-nested mean for Panel F peak parameters (μ, log-FWHM, A).
 
-    **Primary estimator (production):** equal-weight mean of per-participant
-    means, with one-sample t SE/CI/df on the participant means. This correctly
-    nests HIIT PH/PS (and other repeated low-demand rows) within biological
-    participants and avoids unstable intercept-only MixedLM fits at these n.
+    **Primary estimator (production):** equal-weight mean of per-unit means, with
+    one-sample t SE/CI/df on those unit means. The unit matches Figure 1 Panel B:
+    session ``subject_id`` (HIIT PH/PS counted separately), not biological
+    participant alone.
 
-    **Optional diagnostic:** MixedLM ``value ~ 1`` with participant RE is tried
-    and retained only when the intercept agrees with the participant-mean
-    estimate (sanity gate). Random slopes are not used.
+    **Optional diagnostic:** MixedLM ``value ~ 1`` with unit RE is tried and
+    retained only as a note when it converges. Random slopes are not used.
     """
     values = np.asarray(values, dtype=float)
     participant_uids = np.asarray(participant_uids, dtype=object)
@@ -1126,7 +1150,7 @@ def _fit_participant_random_intercept(
     n_participants = int(part_means_arr.size)
     if n_participants < 2:
         empty["n_participants"] = n_participants
-        empty["notes"] = "Need ≥2 participants with identifiable peaks."
+        empty["notes"] = "Need ≥2 session-subject units with identifiable peaks."
         return empty
 
     mean = float(np.mean(part_means_arr))
@@ -1146,16 +1170,15 @@ def _fit_participant_random_intercept(
         "n": n,
         "n_participants": n_participants,
         "arithmetic_mean": arithmetic_mean,
-        "model_backend": "participant_mean_onesample_t",
+        "model_backend": "session_subject_mean_onesample_t",
         "converged": True,
         "notes": (
-            "Primary: equal-weight mean of per-participant means "
-            "(nests repeated sessions/conditions within participant)."
+            "Primary: equal-weight mean of per-session-subject means "
+            "(Panel B-aligned; HIIT PH/PS are separate units)."
         ),
     }
 
-    # Diagnostic MixedLM only (never replaces production participant-mean).
-    # Intercept-only MixedLM is numerically unreliable here (often Intercept=0).
+    # Diagnostic MixedLM only (never replaces production session-subject mean).
     if int(pd.Series(participant_uids).value_counts().max()) >= 2:
         frame = pd.DataFrame(
             {"value": values, "participant_uid": participant_uids.tolist()}
@@ -1188,7 +1211,7 @@ def _fit_participant_random_intercept(
 def _collect_low_demand_peak_rows(
     subject_rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """Identifiable low-demand peak rows with participant nesting keys."""
+    """Identifiable low-demand peak rows with Panel-B-aligned nesting keys."""
     rows: list[dict[str, object]] = []
     for raw in subject_rows:
         role = _as_str(raw.get("state") or raw.get("condition_role"))
@@ -1200,14 +1223,25 @@ def _collect_low_demand_peak_rows(
             continue
         if not _as_bool(raw.get("has_identifiable_peak")):
             continue
-        participant = _as_str(raw.get("participant_id") or raw.get("subject_id"))
-        if not participant:
+        unit_id = _panel_b_aligned_unit_id(raw, dataset_id)
+        if unit_id.endswith("::") or unit_id.endswith("::unknown"):
+            continue
+        display_id = _as_str(
+            raw.get("subject_id")
+            or (
+                f"{_as_str(raw.get('participant_id'))}_{_as_str(raw.get('session_id'))}"
+                if _as_str(raw.get("session_id"))
+                not in {"", "single"}
+                else raw.get("participant_id")
+            )
+        )
+        if not display_id:
             continue
         rows.append(
             {
                 "dataset_id": dataset_id,
-                "participant_id": participant,
-                "participant_uid": f"{dataset_id}::{participant}",
+                "participant_id": display_id,
+                "participant_uid": unit_id,
                 "session_id": _as_str(raw.get("session_id"), "single"),
                 "endpoint_name": _as_str(raw.get("endpoint_name")).casefold(),
                 "duration_s": _as_int(raw.get("duration_s")),
@@ -1226,9 +1260,10 @@ def _collect_low_demand_peak_rows(
 def hierarchical_peak_parameter_summaries(
     subject_rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """Participant-nested MixedLM summaries for identifiable low-demand peaks.
+    """Session-subject-nested summaries for identifiable low-demand peaks.
 
-    Per dataset×endpoint×duration×band×representation:
+    Inferential unit matches Figure 1 Panel B (session ``subject_id``; HIIT PH/PS
+    are separate). Per dataset×endpoint×duration×band×representation:
     - ``mu`` on the identity scale
     - ``fwhm`` fit on log-FWHM then back-transformed to seconds
     - ``A`` peak height on the identity scale

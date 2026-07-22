@@ -148,13 +148,13 @@ def build_methods_summary(inputs: Mapping[str, Path | None]) -> list[dict[str, o
         {
             "section": "peak_model",
             "item": "group_mu_inference",
-            "value": "participant_mean_nested_tost",
+            "value": "session_subject_mean_nested_tost",
             "source": "inference",
             "notes": (
                 "Identifiable low-demand μ/FWHM/A: equal-weight mean of "
-                "per-participant means (HIIT PH/PS nested within participant), "
-                "then TOST on that mean vs ±2 s for μ. MixedLM RE tried as "
-                "diagnostic only when intercept is sane. FWHM on log scale."
+                "per-session-subject means (Panel B-aligned; HIIT PH/PS are "
+                "separate units), then TOST on that mean vs ±2 s for μ. "
+                "MixedLM RE tried as diagnostic only. FWHM on log scale."
             ),
         },
         {

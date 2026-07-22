@@ -137,6 +137,27 @@ def _primary_slice_ok(row: Mapping[str, object], *, band: str = "alpha") -> bool
     return True
 
 
+def _hiit_session_unit_key(row: Mapping[str, object]) -> str:
+    """Panel-B-aligned HIIT unit: session subject_id (PH/PS separate).
+
+    Prefers ``subject_id`` (``01_ph``). Falls back to ``participant_id`` +
+    ``session_id`` or protocol token from ``condition`` / ``contrast_id``.
+    """
+    subject = _as_str(row.get("subject_id")).casefold()
+    if subject:
+        return subject
+    participant = _as_str(row.get("participant_id")).casefold()
+    session = _as_str(row.get("session_id"), "single").casefold() or "single"
+    if session not in {"", "single"}:
+        return f"{participant}_{session}" if participant else session
+    condition = _as_str(row.get("condition") or row.get("contrast_id")).casefold()
+    if condition.startswith("ph_"):
+        return f"{participant}_ph" if participant else "ph"
+    if condition.startswith("ps_"):
+        return f"{participant}_ps" if participant else "ps"
+    return participant
+
+
 def hiit_session_sensitivity_forest_rows(
     paired_rows: Sequence[Mapping[str, object]],
     *,
@@ -144,11 +165,11 @@ def hiit_session_sensitivity_forest_rows(
 ) -> list[dict[str, object]]:
     """One combined HIIT sensitivity forest row (display-only).
 
-    For each unique participant, average all available Rest–Tetris ΔZLPI contrasts
-    among PH/PS × PRE/POST, then compute Student-t mean/CI across participants.
-    Sessions are never treated as independent participants.
+    Panel-B-aligned: each PH/PS session subject is one unit. Within a session,
+    average available Rest–Tetris ΔZLPI contrasts for that session, then
+    Student-t mean/CI across session subjects (n≈40, not biological n≈20).
     """
-    # participant_id -> {contrast_id: delta}
+    # session_unit -> {contrast_id: delta}
     buckets: dict[str, dict[str, float]] = {}
     for row in paired_rows:
         if _as_str(row.get("dataset_id")).casefold() != HIIT_DATASET_ID:
@@ -161,14 +182,13 @@ def hiit_session_sensitivity_forest_rows(
         delta = _as_float(row.get("delta_endpoint_index"))
         if not math.isfinite(delta):
             continue
-        participant = _as_str(row.get("participant_id"))
-        if not participant:
+        unit = _hiit_session_unit_key(row)
+        if not unit:
             continue
-        buckets.setdefault(participant, {})[contrast] = delta
+        buckets.setdefault(unit, {})[contrast] = delta
 
-    participant_avgs: list[float] = []
-    n_participant_sessions = 0
-    for _participant, by_contrast in sorted(buckets.items()):
+    session_avgs: list[float] = []
+    for _unit, by_contrast in sorted(buckets.items()):
         vals = [
             by_contrast[c]
             for c in sorted(HIIT_ALL_CONTRASTS)
@@ -176,18 +196,11 @@ def hiit_session_sensitivity_forest_rows(
         ]
         if not vals:
             continue
-        participant_avgs.append(float(np.mean(np.asarray(vals, dtype=float))))
-        # Count unique PH/PS sessions with ≥1 contributing Rest–Tetris contrast.
-        sessions = {
-            ("ph" if c.startswith("ph_") else "ps")
-            for c in by_contrast
-            if c in HIIT_ALL_CONTRASTS and math.isfinite(by_contrast[c])
-        }
-        n_participant_sessions += len(sessions)
+        session_avgs.append(float(np.mean(np.asarray(vals, dtype=float))))
 
-    summary = student_t_effect_summary(participant_avgs)
-    n_participants = int(summary["n_pairs"])
-    if n_participants < 1:
+    summary = student_t_effect_summary(session_avgs)
+    n_sessions = int(summary["n_pairs"])
+    if n_sessions < 1:
         return []
     return [
         {
@@ -201,9 +214,9 @@ def hiit_session_sensitivity_forest_rows(
             "effect_se": summary["effect_se"],
             "ci_low": summary["ci_low"],
             "ci_high": summary["ci_high"],
-            "n_pairs": n_participants,
-            "n_participants": n_participants,
-            "n_participant_sessions": int(n_participant_sessions),
+            "n_pairs": n_sessions,
+            "n_participants": n_sessions,
+            "n_participant_sessions": n_sessions,
             "enters_meta": False,
             "cardiac_modality": "",
             "prediction_low": "",
@@ -211,8 +224,8 @@ def hiit_session_sensitivity_forest_rows(
             "n_datasets": "",
             "row_type": ROW_TYPE_SENSITIVITY_DISPLAY,
             "display_label": HIIT_FOREST_DISPLAY_LABEL,
-            "session_id": "ph+ps",
-            "aggregation": "participant_mean_of_available_ph_ps_pre_post_delta",
+            "session_id": "ph|ps",
+            "aggregation": "session_subject_mean_of_available_pre_post_delta",
         }
     ]
 
@@ -225,11 +238,11 @@ def hiit_session_mean_zlpi_cells(
 ) -> list[dict[str, object]]:
     """Figure 1 Panel D: one combined HIIT [S] row.
 
-    For each unique participant × band, average all available low-demand ZLPI
-    among PH/PS × PRE/POST, then mean across participants. Does not treat
-    participant-sessions as independent participants.
+    Panel-B-aligned: each PH/PS session subject is one unit. Within a session,
+    average available low-demand ZLPI for that session, then mean across
+    session subjects (n≈40).
     """
-    # (participant, band) -> {condition: z}
+    # (session_unit, band) -> {condition: z}
     buckets: dict[tuple[str, str], dict[str, float]] = {}
     for row in subject_rows:
         if _as_str(row.get("dataset_id")).casefold() != HIIT_DATASET_ID:
@@ -258,51 +271,55 @@ def hiit_session_mean_zlpi_cells(
         value = _as_float(row.get("endpoint_index"))
         if not math.isfinite(value):
             continue
-        participant = _as_str(row.get("participant_id") or row.get("subject_id"))
-        if not participant:
+        unit = _hiit_session_unit_key(row)
+        if not unit:
             continue
-        buckets.setdefault((participant, band), {})[condition] = value
+        # Restrict conditions to the session's protocol.
+        if unit.endswith("_ph") and not condition.startswith("ph_"):
+            continue
+        if unit.endswith("_ps") and not condition.startswith("ps_"):
+            continue
+        buckets.setdefault((unit, band), {})[condition] = value
 
     out: list[dict[str, object]] = []
     for band in band_order:
         band_key = band.casefold()
-        participant_avgs: list[float] = []
-        n_participant_sessions = 0
-        for (pid, b), by_cond in sorted(buckets.items()):
+        session_avgs: list[float] = []
+        for (unit, b), by_cond in sorted(buckets.items()):
             if b != band_key:
                 continue
+            allowed = (
+                HIIT_PH_LOW_DEMAND
+                if unit.endswith("_ph")
+                else HIIT_PS_LOW_DEMAND
+                if unit.endswith("_ps")
+                else HIIT_ALL_LOW_DEMAND
+            )
             vals = [
                 by_cond[c]
-                for c in sorted(HIIT_ALL_LOW_DEMAND)
+                for c in sorted(allowed)
                 if c in by_cond and math.isfinite(by_cond[c])
             ]
             if not vals:
                 continue
-            participant_avgs.append(float(np.mean(np.asarray(vals, dtype=float))))
-            # Count unique PH/PS sessions with ≥1 contributing low-demand ZLPI.
-            sessions = {
-                ("ph" if c.startswith("ph_") else "ps")
-                for c in by_cond
-                if c in HIIT_ALL_LOW_DEMAND and math.isfinite(by_cond[c])
-            }
-            n_participant_sessions += len(sessions)
-        if not participant_avgs:
+            session_avgs.append(float(np.mean(np.asarray(vals, dtype=float))))
+        if not session_avgs:
             continue
         out.append(
             {
                 "dataset_id": HIIT_DATASET_ID,
                 "source_dataset_id": HIIT_DATASET_ID,
-                "session_id": "ph+ps",
+                "session_id": "ph|ps",
                 "display_label": "HIIT",
                 "dataset_role": "sensitivity",
                 "band": band_key,
-                "mean_zlpi": float(np.mean(np.asarray(participant_avgs, dtype=float))),
-                "n_participants": len(participant_avgs),
-                "n_participant_sessions": int(n_participant_sessions),
+                "mean_zlpi": float(np.mean(np.asarray(session_avgs, dtype=float))),
+                "n_participants": len(session_avgs),
+                "n_participant_sessions": len(session_avgs),
                 "endpoint_name": ENDPOINT_ZLPI,
                 "duration_s": EXPECTED_PRIMARY_DURATION_S,
                 "power_representation": primary_representation,
-                "aggregation": "participant_mean_of_available_ph_ps_pre_post_low_demand_zlpi",
+                "aggregation": "session_subject_mean_of_available_low_demand_zlpi",
             }
         )
     return out

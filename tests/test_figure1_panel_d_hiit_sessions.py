@@ -36,21 +36,21 @@ def _subject(
 
 
 class Figure1PanelDHiitCombinedHeatmapTests(unittest.TestCase):
-    def test_hiit_within_participant_then_group_mean(self) -> None:
+    def test_hiit_session_subject_units_then_group_mean(self) -> None:
         rows = [
-            # P01: mean(0.10, 0.30, 0.40, 0.20) = 0.25
+            # 01_ph: mean(0.10, 0.30) = 0.20; 01_ps: mean(0.40, 0.20) = 0.30
             _subject(participant_id="01", condition="ph_pre_rest", band="alpha", zlpi=0.10),
             _subject(participant_id="01", condition="ph_post_rest", band="alpha", zlpi=0.30),
             _subject(participant_id="01", condition="ps_pre_rest", band="alpha", zlpi=0.40),
             _subject(participant_id="01", condition="ps_post_rest", band="alpha", zlpi=0.20),
-            # P02: mean(-0.10, 0.10, 0.00, 0.20) = 0.05
+            # 02_ph: mean(-0.10, 0.10) = 0.00; 02_ps: mean(0.00, 0.20) = 0.10
             _subject(participant_id="02", condition="ph_pre_rest", band="alpha", zlpi=-0.10),
             _subject(participant_id="02", condition="ph_post_rest", band="alpha", zlpi=0.10),
             _subject(participant_id="02", condition="ps_pre_rest", band="alpha", zlpi=0.00),
             _subject(participant_id="02", condition="ps_post_rest", band="alpha", zlpi=0.20),
             # Effort conditions must not enter Panel D absolute ZLPI cells.
             _subject(participant_id="01", condition="ph_pre_tetris", band="alpha", zlpi=9.0),
-            # Incomplete participant uses available observations only.
+            # Incomplete session uses available observations only.
             _subject(participant_id="03", condition="ph_pre_rest", band="alpha", zlpi=1.0),
             # Primary dataset unchanged path.
             _subject(
@@ -73,13 +73,18 @@ class Figure1PanelDHiitCombinedHeatmapTests(unittest.TestCase):
         self.assertIn(("hiit", "alpha"), by_key)
         self.assertNotIn(("hiit_ph", "alpha"), by_key)
         self.assertNotIn(("hiit_ps", "alpha"), by_key)
-        # Group mean of participant means: (0.25 + 0.05 + 1.0) / 3
+        # 5 session units: 0.20, 0.30, 0.00, 0.10, 1.0
         self.assertAlmostEqual(
-            float(by_key[("hiit", "alpha")]["mean_zlpi"]), (0.25 + 0.05 + 1.0) / 3.0, places=12
+            float(by_key[("hiit", "alpha")]["mean_zlpi"]),
+            (0.20 + 0.30 + 0.00 + 0.10 + 1.0) / 5.0,
+            places=12,
         )
-        self.assertEqual(int(by_key[("hiit", "alpha")]["n_participants"]), 3)
-        # Sessions: P01 PH+PS, P02 PH+PS, P03 PH only → 5 participant-sessions
+        self.assertEqual(int(by_key[("hiit", "alpha")]["n_participants"]), 5)
         self.assertEqual(int(by_key[("hiit", "alpha")]["n_participant_sessions"]), 5)
+        self.assertEqual(
+            by_key[("hiit", "alpha")]["aggregation"],
+            "session_subject_mean_of_available_low_demand_zlpi",
+        )
         self.assertEqual(by_key[("hiit", "alpha")]["display_label"], "HIIT")
         self.assertEqual(by_key[("hiit", "alpha")]["dataset_role"], "sensitivity")
         self.assertAlmostEqual(

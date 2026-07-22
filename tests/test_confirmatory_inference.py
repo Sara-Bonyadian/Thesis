@@ -323,22 +323,21 @@ class TestEquivalence(unittest.TestCase):
         theta = next(r for r in eq if r["band"] == "theta")
         self.assertFalse(theta["equivalent"])
 
-    def test_hierarchical_nests_repeated_sessions_within_participant(self) -> None:
-        """PH/PS repeats must not be treated as independent subjects."""
+    def test_hierarchical_uses_session_subject_units_like_panel_b(self) -> None:
+        """HIIT PH/PS are separate units (aligned with Panel B subject_id)."""
         from ppg_eeg.confirmatory.inference import hierarchical_peak_parameter_summaries
 
         rows = []
-        # 10 participants × 2 sessions; within-participant means near 0,
-        # but session noise would inflate naive SE if rows were i.i.d.
+        # 10 participants × 2 sessions; Panel B treats PH/PS as separate units.
         rng = np.random.default_rng(7)
         for i in range(10):
-            part_mean = float(rng.normal(0.0, 0.3))
             for session, offset in (("ph", -1.5), ("ps", 1.5)):
                 rows.append(
                     {
                         "dataset_id": "hiit",
                         "participant_id": f"{i+1}",
                         "session_id": session,
+                        "subject_id": f"{i+1:02d}_{session}",
                         "condition": f"{session}_pre_rest",
                         "state": "low_demand",
                         "modality": "ppg",
@@ -350,7 +349,7 @@ class TestEquivalence(unittest.TestCase):
                         "endpoint_eligible": True,
                         "endpoint_index": 0.2,
                         "local_prominence": 0.1,
-                        "peak_center_mu_s": part_mean + offset,
+                        "peak_center_mu_s": float(rng.normal(0.0, 0.3)) + offset,
                         "fwhm_s": 8.0,
                         "peak_height_A": 0.3,
                         "has_identifiable_peak": True,
@@ -360,22 +359,16 @@ class TestEquivalence(unittest.TestCase):
         hier = hierarchical_peak_parameter_summaries(rows)
         mu = next(r for r in hier if r["parameter"] == "mu" and r["band"] == "alpha")
         self.assertEqual(int(mu["n"]), 20)
-        self.assertEqual(int(mu["n_participants"]), 10)
-        self.assertEqual(str(mu["model_backend"]), "participant_mean_onesample_t")
-        # Estimand is the mean of per-participant means (not the row-mean).
-        part_means = []
-        for i in range(10):
-            vals = [
-                float(r["peak_center_mu_s"])
-                for r in rows
-                if r["participant_id"] == f"{i+1}"
-            ]
-            part_means.append(float(np.mean(vals)))
-        self.assertAlmostEqual(float(mu["mean"]), float(np.mean(part_means)), places=6)
-        self.assertAlmostEqual(float(mu["df"]), 9.0, places=6)
+        self.assertEqual(int(mu["n_participants"]), 20)
+        self.assertEqual(str(mu["model_backend"]), "session_subject_mean_onesample_t")
+        session_means = [float(r["peak_center_mu_s"]) for r in rows]
+        self.assertAlmostEqual(
+            float(mu["mean"]), float(np.mean(session_means)), places=6
+        )
+        self.assertAlmostEqual(float(mu["df"]), 19.0, places=6)
         eq = tost_peak_center_equivalence(rows)
         alpha = next(r for r in eq if r["band"] == "alpha")
-        self.assertEqual(int(alpha["n_participants"]), 10)
+        self.assertEqual(int(alpha["n_participants"]), 20)
 
 
 class TestLeaveOneOut(unittest.TestCase):

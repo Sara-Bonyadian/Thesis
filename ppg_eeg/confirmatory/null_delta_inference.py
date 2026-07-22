@@ -1,30 +1,29 @@
-"""Biological participant-level observed − null ΔZLPI inference for Figure 3 Panel A.
+"""Participant-level observed − null ΔZLPI inference for Figure 3 Panel A.
 
 Independent unit (prespecified)
 --------------------------------
-The inferential unit is ``dataset_id::participant_id`` — one biological
-participant per dataset. Protocol sessions / modality blocks (e.g. HIIT PH
-vs PS) and task conditions from the same person are repeated measures, not
-independent sampling units.
+The inferential unit is ``dataset_id::participant_id``. For HIIT, that ID is
+the **session subject_id** (e.g. ``01_ph``, ``01_ps``), matching Figure 1 Panel B.
+Other datasets use biological participant_id (protocol-normalized).
 
 Primary estimand (prespecified slice)
 -------------------------------------
 For each eligible matched observation *i* in the slice
-``D240 × absolute_log10 × theta × circular_shift × zlpi``:
+``D240 x absolute_log10 x theta x circular_shift x zlpi``:
 
-    δ_i = observed_endpoint_index_i − null_mean_i
+    delta_i = observed_endpoint_index_i - null_mean_i
 
-For each biological participant *p* and condition *c*:
+For each unit *p* and condition *c*:
 
-    Δ_{p,c} = mean{δ_i : i ∈ (p, c)}
+    Delta_{p,c} = mean{delta_i : i in (p, c)}
 
-For each biological participant *p*:
+For each unit *p*:
 
-    Δ_p = mean{Δ_{p,c} : c ∈ p}
+    Delta_p = mean{Delta_{p,c} : c in p}
 
-Group (dataset) inference uses the unweighted mean of {Δ_p} with a Student-*t*
-interval (df = n_participants − 1). Participants with more conditions or
-observations do **not** receive greater weight.
+Group (dataset) inference uses the unweighted mean of {Delta_p} with a Student-t
+interval (df = n_participants - 1). Units with more conditions or observations
+do **not** receive greater weight.
 
 Main Figure 3 Panel A plots **one row per dataset**. Dataset-specific participant
 forests are **internal QC** artifacts (under ``figures/internal_qc/``), not
@@ -85,10 +84,10 @@ INTERPRETATION_LOWER = "observed is lower than null"
 INTERPRETATION_INSUFFICIENT = "insufficient participant-level data"
 
 INDEPENDENT_UNIT_VERDICT = (
-    "Independent unit = dataset_id::participant_id (biological participant). "
-    "HIIT PH/PS subject_ids (e.g. 01_ph, 01_ps) are repeated modality sessions "
-    "from the same participant, not independent units. External BIDS datasets "
-    "use protocol-normalized participant_id (subject / ses-stripped ID)."
+    "Independent unit = dataset_id::participant_id. For HIIT, participant_id is "
+    "the session subject_id (e.g. 01_ph, 01_ps), matching Figure 1 Panel B — PH/PS "
+    "are separate units. External BIDS datasets use protocol-normalized "
+    "biological participant_id (subject / ses-stripped ID)."
 )
 
 
@@ -238,11 +237,28 @@ def canonicalize_participant_id(participant_id: str) -> str:
 
 
 def resolve_biological_keys(row: Mapping[str, object]) -> dict[str, str]:
-    """Resolve dataset-scoped biological participant and session keys."""
+    """Resolve dataset-scoped participant and session keys.
+
+    For HIIT, the independent unit matches Figure 1 Panel B: session
+    ``subject_id`` (e.g. ``01_ph`` / ``01_ps``), not biological participant
+    alone. Other datasets keep biological ``participant_id``.
+    """
     keys = normalize_keys(row)
-    participant_id = canonicalize_participant_id(keys["participant_id"])
     dataset_id = _as_str(keys["dataset_id"]).casefold()
     session_id = _as_str(keys["session_id"], "single").casefold() or "single"
+    subject_id = _as_str(keys["subject_id"] or row.get("subject_id")).casefold()
+    biological = canonicalize_participant_id(keys["participant_id"])
+
+    if dataset_id == "hiit":
+        if subject_id:
+            participant_id = subject_id
+        elif session_id not in {"", "single"} and biological:
+            participant_id = f"{biological}_{session_id}"
+        else:
+            participant_id = biological
+    else:
+        participant_id = biological
+
     unit_row = {
         "dataset_id": dataset_id,
         "participant_id": participant_id,
@@ -251,7 +267,7 @@ def resolve_biological_keys(row: Mapping[str, object]) -> dict[str, str]:
         "dataset_id": dataset_id,
         "participant_id": participant_id,
         "session_id": session_id,
-        "subject_id": _as_str(keys["subject_id"] or row.get("subject_id")),
+        "subject_id": subject_id or _as_str(row.get("subject_id")),
         "condition": _as_str(keys["condition"] or row.get("condition")),
         "observation_id": _as_str(keys["observation_id"] or row.get("observation_id")),
         "participant_unit_id": observation_unit_id(unit_row, unit_field="participant_id"),
@@ -840,9 +856,9 @@ def independent_unit_verdict_rows() -> list[dict[str, str]]:
             "independent_unit": "dataset_id::participant_id",
             "example_raw_subject_ids": "01_ph, 01_ps",
             "verdict": (
-                "PH and PS are repeated modality sessions from the same "
-                "biological participant; treat as dataset::participant "
-                "(e.g. hiit::1), not dataset::subject_id::condition."
+                "PH and PS are separate session subject_ids (Panel B-aligned); "
+                "treat as dataset::session_subject (e.g. hiit::01_ph), not "
+                "collapsed biological participant alone."
             ),
         },
         {

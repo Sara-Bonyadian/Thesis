@@ -559,7 +559,21 @@ def participant_duration_sensitivity_effects(
         buckets: dict[tuple[str, str, str], list[float]] = {}
         for row in filtered:
             dataset_id = _as_str(row.get("dataset_id")).casefold()
-            participant_id = _as_str(row.get("participant_id") or row.get("subject_id"))
+            # HIIT: Panel-B-aligned session subject unit (PH/PS separate).
+            if dataset_id == "hiit":
+                subject = _as_str(row.get("subject_id")).casefold()
+                session = _as_str(row.get("session_id"), "single").casefold()
+                biological = _as_str(row.get("participant_id")).casefold()
+                if subject:
+                    participant_id = subject
+                elif session not in {"", "single"} and biological:
+                    participant_id = f"{biological}_{session}"
+                else:
+                    participant_id = biological or _as_str(row.get("subject_id"))
+            else:
+                participant_id = _as_str(
+                    row.get("participant_id") or row.get("subject_id")
+                )
             band = _as_str(row.get("band")).casefold()
             delta = _as_float(row.get("delta_endpoint_index"))
             if not participant_id or not math.isfinite(delta):

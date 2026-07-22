@@ -529,7 +529,7 @@ class TestFigure3PanelAForest(unittest.TestCase):
 
 
 class TestBiologicalParticipantUnit(unittest.TestCase):
-    def test_hiit_ph_ps_are_same_biological_participant(self) -> None:
+    def test_hiit_ph_ps_are_separate_session_subjects(self) -> None:
         rows = [
             _null_row(
                 dataset_id="hiit",
@@ -564,9 +564,11 @@ class TestBiologicalParticipantUnit(unittest.TestCase):
         ]
         keys_ph = resolve_biological_keys(rows[0])
         keys_ps = resolve_biological_keys(rows[1])
-        self.assertEqual(keys_ph["participant_id"], keys_ps["participant_id"])
-        self.assertEqual(keys_ph["participant_unit_id"], "hiit::1")
-        self.assertNotEqual(keys_ph["session_id"], keys_ps["session_id"])
+        self.assertEqual(keys_ph["participant_id"], "01_ph")
+        self.assertEqual(keys_ps["participant_id"], "01_ps")
+        self.assertNotEqual(keys_ph["participant_id"], keys_ps["participant_id"])
+        self.assertEqual(keys_ph["participant_unit_id"], "hiit::01_ph")
+        self.assertEqual(keys_ps["participant_unit_id"], "hiit::01_ps")
 
         analysis = analyze_null_slice_full(
             rows,
@@ -574,25 +576,20 @@ class TestBiologicalParticipantUnit(unittest.TestCase):
             null_type=PRIMARY_NULL_TYPE,
             is_primary_slice=True,
         )
-        self.assertEqual(len(analysis.participants), 2)
+        self.assertEqual(len(analysis.participants), 3)
         self.assertEqual(
             {p.participant_id for p in analysis.participants},
-            {"1", "2"},
+            {"01_ph", "01_ps", "02_ph"},
         )
-        # Participant 1 averages two protocol conditions (Δ=0.3 and Δ=0.2).
         by_id = {p.participant_id: p for p in analysis.participants}
-        self.assertAlmostEqual(by_id["1"].delta_p, 0.25, places=12)
-        self.assertEqual(by_id["1"].n_conditions, 2)
-        self.assertEqual(by_id["1"].n_sessions, 2)
-        self.assertEqual(analysis.pooled_inference.n_participants, 2)
+        self.assertAlmostEqual(by_id["01_ph"].delta_p, 0.30, places=12)
+        self.assertAlmostEqual(by_id["01_ps"].delta_p, 0.20, places=12)
+        self.assertAlmostEqual(by_id["02_ph"].delta_p, 0.10, places=12)
+        self.assertEqual(analysis.pooled_inference.n_participants, 3)
         self.assertEqual(analysis.pooled_inference.n_participant_conditions, 3)
-        self.assertEqual(
-            analysis.pooled_inference.sample_size_label,
-            "3 condition estimates from 2 participants",
-        )
-        # Dataset mean from participant-level values: (0.25 + 0.10) / 2.
-        self.assertAlmostEqual(analysis.dataset_inferences[0].mean_delta, 0.175, places=12)
-        self.assertEqual(analysis.dataset_inferences[0].n_participants, 2)
+        # Dataset mean: (0.30 + 0.20 + 0.10) / 3
+        self.assertAlmostEqual(analysis.dataset_inferences[0].mean_delta, 0.20, places=12)
+        self.assertEqual(analysis.dataset_inferences[0].n_participants, 3)
 
     def test_unequal_conditions_do_not_change_participant_weights(self) -> None:
         rows = [
