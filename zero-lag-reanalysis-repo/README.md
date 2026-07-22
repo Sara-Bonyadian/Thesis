@@ -95,6 +95,15 @@ Notes:
 - Optional artifact controls (CFA/QRS, motion/EOG/EMG, …) stay off unless you add
   `--optional-artifact-controls` (typically on C6 / `all`).
 - Full HIIT is a **sensitivity** dataset in `master.yaml` (not a primary meta cohort).
+- **Figure 2 Panel A (C7) HIIT fallback:** when `PRIMARY_META` pairs are absent
+  (e.g., HIIT-only sensitivity runs), Panel A renders a **display-only** HIIT
+  sensitivity view from matched C5 Rest–Tetris pairs linked to C2 lag curves.
+  Each matched PRE and POST pair contributes separately (no PRE/POST or PH/PS
+  averaging before the point estimate). Point estimate is the mean across
+  matched pairs; uncertainty uses PH/PS session-subject cluster bootstrap.
+  Exports report `n_matched_pairs` and `n_session_clusters`. This does **not**
+  change C0–C6 analysis outputs, confirmatory inference, or `PRIMARY_META`
+  membership.
 
 ## Peak model (Figure 1 Panel F)
 
