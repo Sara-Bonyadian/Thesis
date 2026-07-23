@@ -1,7 +1,9 @@
 """Figure 2 six-panel presentation layout (C7 only).
 
-Does not alter C0–C6 analyses. Panels A/B use exact C5 paired-intersection
-participants linked to C2 lag curves via observation IDs. No unpaired fallback.
+Does not alter C0–C6 analyses. Panels A/B/E use exact C5 paired-intersection
+participants linked to C2 lag curves via observation IDs when PRIMARY_META pairs
+are present; HIIT-only runs fall back to display-only Rest–Tetris sensitivity.
+No unpaired fallback. Panel F remains ds003690-graded only.
 """
 
 from __future__ import annotations
@@ -106,7 +108,7 @@ def filter_primary_meta_paired_rows(
 def filter_hiit_sensitivity_paired_rows(
     paired_rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """C5 HIIT Rest–Tetris pairs for display-only Panel A sensitivity curves.
+    """C5 HIIT Rest–Tetris pairs for display-only Panel A/B sensitivity curves.
 
     Uses the locked HIIT contrast set and primary ZLPI / D240 / absolute_log10
     slice. Does not admit HIIT into PRIMARY_META.
@@ -224,11 +226,12 @@ def build_hiit_sensitivity_panel_a_series(
     paired_rows: Sequence[Mapping[str, object]],
     curve_index: Mapping[tuple[str, str], Mapping[int, float]],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Reconstruct matched HIIT lag curves for Panel A observation-level fallback.
+    """Reconstruct matched HIIT lag curves for Panel A/B observation-level fallback.
 
     Each C5 PRE/POST Rest–Tetris pair is retained separately (no PRE/POST or
     PH/PS averaging). ``cluster_id`` marks the PH/PS session subject for
-    clustered bootstrap CIs.
+    clustered bootstrap CIs. Series rows include ``z_low``, ``z_effort``, and
+    ``delta_z`` for Panel A (states) and Panel B (difference).
     """
     f = _fig()
     hiit_pairs = filter_hiit_sensitivity_paired_rows(paired_rows)
@@ -245,6 +248,67 @@ def build_hiit_sensitivity_panel_a_series(
         annotated.append(out)
     return annotated, gaps
 
+
+def build_panel_e_peak_export(
+    paired_rows: Sequence[Mapping[str, object]],
+    *,
+    hiit_sensitivity: bool = False,
+) -> list[dict[str, object]]:
+    """Paired low/effort peak μ and FWHM rows for Figure 2 Panel E.
+
+    PRIMARY_META: one row per (dataset, participant, band).
+    HIIT sensitivity: one row per matched Rest–Tetris pair
+    (participant × session × contrast × band); no PRE/POST or PH/PS collapse.
+    """
+    f = _fig()
+    export: list[dict[str, object]] = []
+    seen: set[tuple[str, ...]] = set()
+    for row in paired_rows:
+        dataset_id = f._as_str(row.get("dataset_id"))
+        participant_id = f._as_str(row.get("participant_id"))
+        session_id = f._as_str(row.get("session_id"), "single")
+        contrast_id = f._as_str(row.get("contrast_id"))
+        band = f._as_str(row.get("band")).casefold()
+        if band not in f.BAND_ORDER:
+            continue
+        if hiit_sensitivity:
+            key: tuple[str, ...] = (
+                dataset_id.casefold(),
+                participant_id,
+                session_id.casefold(),
+                contrast_id.casefold(),
+                band,
+            )
+        else:
+            key = (dataset_id.casefold(), participant_id, band)
+        if key in seen:
+            continue
+        seen.add(key)
+        low_peak = f._as_bool(row.get("low_has_identifiable_peak"))
+        effort_peak = f._as_bool(row.get("effort_has_identifiable_peak"))
+        low_mu = f._as_float(row.get("low_peak_center_mu_s"))
+        effort_mu = f._as_float(row.get("effort_peak_center_mu_s"))
+        low_fwhm = f._as_float(row.get("low_fwhm_s"))
+        effort_fwhm = f._as_float(row.get("effort_fwhm_s"))
+        export.append(
+            {
+                "dataset_id": dataset_id,
+                "participant_id": participant_id,
+                "session_id": session_id,
+                "contrast_id": contrast_id,
+                "band": band,
+                "low_has_identifiable_peak": low_peak,
+                "effort_has_identifiable_peak": effort_peak,
+                "low_peak_center_mu_s": low_mu if low_peak else float("nan"),
+                "effort_peak_center_mu_s": effort_mu if effort_peak else float("nan"),
+                "low_fwhm_s": low_fwhm if low_peak else float("nan"),
+                "effort_fwhm_s": effort_fwhm if effort_peak else float("nan"),
+                "row_type": (
+                    ROW_TYPE_SENSITIVITY_DISPLAY if hiit_sensitivity else "primary"
+                ),
+            }
+        )
+    return export
 
 
 def build_curve_lag_index(
@@ -714,7 +778,7 @@ def render_figure2(
 
     meta_pairs = filter_primary_meta_paired_rows(paired)
     curve_index = build_curve_lag_index(curves)
-    # Panel B–F keep PRIMARY_META series only. Panel A may fall back to HIIT.
+    # Panels C–F keep PRIMARY_META-only inputs. Panels A/B may fall back to HIIT.
     series_rows, wiring_gaps = reconstruct_matched_pair_curves(meta_pairs, curve_index)
     panel_a_series = series_rows
     panel_a_gaps = wiring_gaps
@@ -729,6 +793,10 @@ def render_figure2(
             panel_a_hiit_sensitivity = True
         else:
             panel_a_gaps = hiit_gaps
+    # Panel B uses the same matched series as Panel A (PRIMARY_META or HIIT).
+    panel_b_series = panel_a_series
+    panel_b_gaps = panel_a_gaps
+    panel_b_hiit_sensitivity = panel_a_hiit_sensitivity
 
     fig = plt.figure(figsize=(17.0, 16.0), constrained_layout=False)
     gs = fig.add_gridspec(3, 2, hspace=0.50, wspace=0.36)
@@ -774,42 +842,63 @@ def render_figure2(
                 panel_a_export.append(export)
             if low_ci:
                 lags = np.asarray([r["lag_s"] for r in low_ci], dtype=float)
-                mask = f.display_lag_mask(lags, f.FIGURE1_DISPLAY_LAG_STEP_S)
+                # Plot the full 1 s lag grid so σ=1 s display smooth is visible
+                # (FIGURE1 2 s thinning hides most of a 1-sample smooth).
+                mask = f.display_lag_mask(lags, 1)
                 mean = np.asarray([r["mean"] for r in low_ci], dtype=float)
                 lo = np.asarray([r["ci_low"] for r in low_ci], dtype=float)
                 hi = np.asarray([r["ci_high"] for r in low_ci], dtype=float)
+                # Display-only smooth after CI computation; exports stay unsmoothed.
+                mean_d = f.gaussian_smooth_display_series(
+                    mean, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
+                lo_d = f.gaussian_smooth_display_series(
+                    lo, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
+                hi_d = f.gaussian_smooth_display_series(
+                    hi, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
                 ax.fill_between(
                     lags[mask],
-                    lo[mask],
-                    hi[mask],
+                    lo_d[mask],
+                    hi_d[mask],
                     color=f.PALETTE["green"],
                     alpha=f.FIGURE1_PANEL_B_CI_ALPHA,
                     linewidth=0,
                 )
                 ax.plot(
                     lags[mask],
-                    mean[mask],
+                    mean_d[mask],
                     color=f.PALETTE["green"],
                     lw=f.LINE_WIDTH,
                     label="Low-demand",
                 )
             if effort_ci:
                 lags = np.asarray([r["lag_s"] for r in effort_ci], dtype=float)
-                mask = f.display_lag_mask(lags, f.FIGURE1_DISPLAY_LAG_STEP_S)
+                mask = f.display_lag_mask(lags, 1)
                 mean = np.asarray([r["mean"] for r in effort_ci], dtype=float)
                 lo = np.asarray([r["ci_low"] for r in effort_ci], dtype=float)
                 hi = np.asarray([r["ci_high"] for r in effort_ci], dtype=float)
+                mean_d = f.gaussian_smooth_display_series(
+                    mean, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
+                lo_d = f.gaussian_smooth_display_series(
+                    lo, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
+                hi_d = f.gaussian_smooth_display_series(
+                    hi, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
                 ax.fill_between(
                     lags[mask],
-                    lo[mask],
-                    hi[mask],
+                    lo_d[mask],
+                    hi_d[mask],
                     color=f.PALETTE["vermillion"],
                     alpha=f.FIGURE1_PANEL_B_CI_ALPHA,
                     linewidth=0,
                 )
                 ax.plot(
                     lags[mask],
-                    mean[mask],
+                    mean_d[mask],
                     color=f.PALETTE["vermillion"],
                     lw=f.LINE_WIDTH,
                     label="Effort",
@@ -939,6 +1028,14 @@ def render_figure2(
             + (f.FIGURE2_WIRING_GAP_NOTE if panel_a_gaps and not has_a else "")
         )
         panel_a_panel_title = "Matched low vs effort lag curves (C5 pairs)"
+    panel_a_keys = [
+        *panel_a_keys,
+        f"display_smooth=gaussian_sigma_{f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S:g}s",
+        "source_data=unsmoothed",
+    ]
+    panel_a_notes = (
+        f"{panel_a_notes.rstrip()} {f.LAG_CURVE_DISPLAY_SMOOTH_NOTE}"
+    ).strip()
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure2",
@@ -961,31 +1058,52 @@ def render_figure2(
     panel_b_export: list[dict[str, object]] = []
     ax_b0: plt.Axes | None = None
     has_b_nested = False
-    if series_rows:
+    panel_b_title = (
+        "HIIT Sensitivity: matched lag-difference curves"
+        if panel_b_hiit_sensitivity
+        else "Matched lag-difference curves"
+    )
+    if panel_b_series:
         for bi, band in enumerate(f.BAND_ORDER):
             ax = fig.add_subplot(gs_b[bi // 2, bi % 2])
             if bi == 0:
                 ax_b0 = ax
-            delta_ci = paired_participant_bootstrap_ci(
-                series_rows, band=band, value_field="delta_z"
-            )
+            if panel_b_hiit_sensitivity:
+                delta_ci = hiit_matched_pair_cluster_bootstrap_ci(
+                    panel_b_series, band=band, value_field="delta_z"
+                )
+            else:
+                delta_ci = paired_participant_bootstrap_ci(
+                    panel_b_series, band=band, value_field="delta_z"
+                )
             panel_b_export.extend(delta_ci)
             if delta_ci:
                 lags = np.asarray([r["lag_s"] for r in delta_ci], dtype=float)
-                mask = f.display_lag_mask(lags, f.FIGURE1_DISPLAY_LAG_STEP_S)
+                # Full 1 s lag grid so σ=1 s display smooth is visible.
+                mask = f.display_lag_mask(lags, 1)
                 mean = np.asarray([r["mean"] for r in delta_ci], dtype=float)
                 lo = np.asarray([r["ci_low"] for r in delta_ci], dtype=float)
                 hi = np.asarray([r["ci_high"] for r in delta_ci], dtype=float)
+                # Display-only smooth after CI computation; exports stay unsmoothed.
+                mean_d = f.gaussian_smooth_display_series(
+                    mean, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
+                lo_d = f.gaussian_smooth_display_series(
+                    lo, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
+                hi_d = f.gaussian_smooth_display_series(
+                    hi, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+                )
                 color = f._band_color(band)
                 ax.fill_between(
                     lags[mask],
-                    lo[mask],
-                    hi[mask],
+                    lo_d[mask],
+                    hi_d[mask],
                     color=color,
                     alpha=f.FIGURE1_PANEL_B_CI_ALPHA,
                     linewidth=0,
                 )
-                ax.plot(lags[mask], mean[mask], color=color, lw=f.LINE_WIDTH)
+                ax.plot(lags[mask], mean_d[mask], color=color, lw=f.LINE_WIDTH)
             f._ref_vline(ax, 0.0)
             f._ref_hline(ax, 0.0)
             ax.set_xlim(-60, 60)
@@ -1002,7 +1120,7 @@ def render_figure2(
         panel_b_na_detail = ""
     else:
         ax_b = fig.add_subplot(gs[0, 1])
-        if wiring_gaps:
+        if panel_b_gaps:
             msg = f.FIGURE2_WIRING_GAP_NOTE
             panel_b_expected_na = False
             panel_b_na_detail = ""
@@ -1013,16 +1131,30 @@ def render_figure2(
             panel_b_expected_na = True
             msg = f.primary_meta_expected_na_message(panel_b_na_detail)
         f._mark_empty_panel(ax_b, msg, xlabel=f.LAG_XLABEL, ylabel=f"Δ {f.Z_YLABEL}")
-        f._set_panel_title(ax_b, "Matched lag-difference curves")
+        f._set_panel_title(ax_b, panel_b_title)
         f._add_panel_label(ax_b, "B")
         has_b_nested = False
         ax_b0 = None
 
     panel_b_csv = source_dir / "figure2_panel_b_lag_difference_curves.csv"
-    f.write_source_csv(
-        panel_b_csv,
-        panel_b_export,
+    panel_b_fields = (
         (
+            "lag_s",
+            "band",
+            "value_field",
+            "duration_s",
+            "endpoint_name",
+            "power_representation",
+            "n_matched_pairs",
+            "n_session_clusters",
+            "mean",
+            "ci_low",
+            "ci_high",
+            "ci_method",
+            "n_bootstrap",
+        )
+        if panel_b_hiit_sensitivity
+        else (
             "lag_s",
             "band",
             "value_field",
@@ -1035,14 +1167,64 @@ def render_figure2(
             "ci_high",
             "ci_method",
             "n_bootstrap",
-        ),
+        )
+    )
+    f.write_source_csv(
+        panel_b_csv,
+        panel_b_export,
+        panel_b_fields,
     )
     source_paths.append(panel_b_csv)
+    if panel_b_hiit_sensitivity:
+        panel_b_keys = [
+            "cohort=HIIT_sensitivity_matched_observation_pairs",
+            f"ci={HIIT_CLUSTER_BOOTSTRAP_CI_METHOD}",
+            "cluster_permutation=false",
+            f"aggregation={HIIT_MATCHED_PAIR_AGGREGATION}",
+            f"panel_status={f.PANEL_STATUS_SENSITIVITY_DISPLAY}",
+            "enters_primary_meta=false",
+        ]
+        panel_b_notes = f.FIGURE2_PANEL_B_HIIT_SENSITIVITY_NOTE
+        panel_b_panel_title = "HIIT Sensitivity: matched lag-difference curves"
+    elif panel_b_expected_na:
+        panel_b_keys = [
+            "cohort=PRIMARY_META_C5_pairs",
+            "ci=paired_participant_within_dataset_bootstrap",
+            "cluster_permutation=false",
+            f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",
+        ]
+        panel_b_notes = f.annotate_expected_not_applicable(
+            "Display-only matched Δz(τ). Formal lag-0 attenuation uses "
+            "paired ΔZLPI / PRIMARY_META / C4 surrogates (Panels C/elsewhere). "
+            "No cluster-permutation testing.",
+            detail=panel_b_na_detail,
+        )
+        panel_b_panel_title = "Matched task−rest lag-difference curves"
+    else:
+        panel_b_keys = [
+            "cohort=PRIMARY_META_C5_pairs",
+            "ci=paired_participant_within_dataset_bootstrap",
+            "cluster_permutation=false",
+        ]
+        panel_b_notes = (
+            "Display-only matched Δz(τ). Formal lag-0 attenuation uses "
+            "paired ΔZLPI / PRIMARY_META / C4 surrogates (Panels C/elsewhere). "
+            "No cluster-permutation testing."
+        )
+        panel_b_panel_title = "Matched task−rest lag-difference curves"
+    panel_b_keys = [
+        *panel_b_keys,
+        f"display_smooth=gaussian_sigma_{f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S:g}s",
+        "source_data=unsmoothed",
+    ]
+    panel_b_notes = (
+        f"{panel_b_notes.rstrip()} {f.LAG_CURVE_DISPLAY_SMOOTH_NOTE}"
+    ).strip()
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure2",
             panel_id="matched_lag_difference_curves",
-            title="Matched task−rest lag-difference curves",
+            title=panel_b_panel_title,
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
             input_tables=[
@@ -1050,30 +1232,8 @@ def render_figure2(
                 str(inputs.get("curves_d240") or ""),
             ],
             source_data_csv=str(panel_b_csv),
-            analysis_keys=[
-                "cohort=PRIMARY_META_C5_pairs",
-                "ci=paired_participant_within_dataset_bootstrap",
-                "cluster_permutation=false",
-                *(
-                    [f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}"]
-                    if panel_b_expected_na
-                    else []
-                ),
-            ],
-            notes=(
-                f.annotate_expected_not_applicable(
-                    "Display-only matched Δz(τ). Formal lag-0 attenuation uses "
-                    "paired ΔZLPI / PRIMARY_META / C4 surrogates (Panels C/elsewhere). "
-                    "No cluster-permutation testing.",
-                    detail=panel_b_na_detail,
-                )
-                if panel_b_expected_na
-                else (
-                    "Display-only matched Δz(τ). Formal lag-0 attenuation uses "
-                    "paired ΔZLPI / PRIMARY_META / C4 surrogates (Panels C/elsewhere). "
-                    "No cluster-permutation testing."
-                )
-            ),
+            analysis_keys=panel_b_keys,
+            notes=panel_b_notes,
         )
     )
 
@@ -1091,6 +1251,12 @@ def render_figure2(
         sensitivity_studies=sensitivity_studies,
         pooled=pooled,
     )
+    panel_c_hiit_only = bool(sensitivity_studies) and not studies
+    panel_c_title = (
+        "HIIT Sensitivity: Alpha ΔZLPI"
+        if panel_c_hiit_only
+        else "Alpha PRIMARY_META ΔZLPI"
+    )
     drawn = draw_alpha_meta_forest(
         ax_c,
         primary_studies=studies,
@@ -1101,7 +1267,7 @@ def render_figure2(
         ref_vline_fn=f._ref_vline,
         style_axes_fn=f._style_axes,
         set_panel_title_fn=f._set_panel_title,
-        panel_title="Alpha PRIMARY_META ΔZLPI",
+        panel_title=panel_c_title,
         xlabel=f"Δ {_endpoint_label()} ({f.ZLPI_METRIC})",
         marker_size=f.MARKER_SIZE,
         line_width=f.LINE_WIDTH,
@@ -1121,7 +1287,7 @@ def render_figure2(
             xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
             ylabel="Dataset",
         )
-        f._set_panel_title(ax_c, "Alpha PRIMARY_META ΔZLPI")
+        f._set_panel_title(ax_c, panel_c_title)
     f._add_panel_label(ax_c, "C")
     panel_c_csv = source_dir / "figure2_panel_c_alpha_meta_forest.csv"
     f.write_source_csv(
@@ -1130,11 +1296,51 @@ def render_figure2(
         FOREST_EXPORT_FIELDS,
     )
     source_paths.append(panel_c_csv)
+    if panel_c_hiit_only:
+        panel_c_keys = [
+            "band=alpha",
+            "endpoint=absolute_delta_zlpi",
+            "percent_attenuation=false",
+            "cohort=HIIT_sensitivity_display",
+            "hiit_sensitivity_display=combined_ph_ps_within_participant_mean",
+            "enters_primary_meta=false",
+            f"panel_status={f.PANEL_STATUS_SENSITIVITY_DISPLAY}",
+        ]
+        panel_c_notes = (
+            "HIIT Sensitivity (display-only): one combined alpha ΔZLPI estimate "
+            "(PH/PS session subjects counted separately). Excluded from PRIMARY_META "
+            "RE pooling; not a primary confirmatory claim."
+        )
+        panel_c_panel_title = "HIIT Sensitivity: Alpha absolute ΔZLPI"
+    elif panel_c_expected_na:
+        panel_c_keys = [
+            "band=alpha",
+            "enters_meta=true",
+            "endpoint=absolute_delta_zlpi",
+            "percent_attenuation=false",
+            "hiit_sensitivity_display=combined_ph_ps_within_participant_mean",
+            f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",
+        ]
+        panel_c_notes = f.annotate_expected_not_applicable(
+            f.FIGURE2_PANEL_C_NOTE,
+            detail=panel_c_na_detail,
+        )
+        panel_c_panel_title = "Alpha PRIMARY_META absolute ΔZLPI"
+    else:
+        panel_c_keys = [
+            "band=alpha",
+            "enters_meta=true",
+            "endpoint=absolute_delta_zlpi",
+            "percent_attenuation=false",
+            "hiit_sensitivity_display=combined_ph_ps_within_participant_mean",
+        ]
+        panel_c_notes = f.FIGURE2_PANEL_C_NOTE
+        panel_c_panel_title = "Alpha PRIMARY_META absolute ΔZLPI"
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure2",
             panel_id="alpha_primary_meta_forest",
-            title="Alpha PRIMARY_META absolute ΔZLPI",
+            title=panel_c_panel_title,
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
             input_tables=[
@@ -1144,26 +1350,8 @@ def render_figure2(
                 str(inputs.get("paired_contrasts") or ""),
             ],
             source_data_csv=str(panel_c_csv),
-            analysis_keys=[
-                "band=alpha",
-                "enters_meta=true",
-                "endpoint=absolute_delta_zlpi",
-                "percent_attenuation=false",
-                "hiit_sensitivity_display=combined_ph_ps_within_participant_mean",
-                *(
-                    [f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}"]
-                    if panel_c_expected_na
-                    else []
-                ),
-            ],
-            notes=(
-                f.annotate_expected_not_applicable(
-                    f.FIGURE2_PANEL_C_NOTE,
-                    detail=panel_c_na_detail,
-                )
-                if panel_c_expected_na
-                else f.FIGURE2_PANEL_C_NOTE
-            ),
+            analysis_keys=panel_c_keys,
+            notes=panel_c_notes,
         )
     )
 
@@ -1222,6 +1410,12 @@ def render_figure2(
         return (4, t)
 
     coef_rows = sorted(coef_rows, key=lambda r: _term_sort(str(r["term"])))
+    panel_d_hiit_sensitivity = bool(coef_rows) and panel_a_hiit_sensitivity
+    panel_d_title = (
+        "HIIT Sensitivity: absolute state coefficients"
+        if panel_d_hiit_sensitivity
+        else "Absolute state coefficients"
+    )
     if coef_rows:
         for i, row in enumerate(coef_rows):
             pe = float(row["coef"])
@@ -1250,7 +1444,7 @@ def render_figure2(
         ax_d.set_xlabel("Coefficient (95% CI)", fontsize=f.FS_AXIS - 2)
         f._style_axes(ax_d)
         backend_note = ";".join(sorted(backends)) if backends else "unknown"
-        f._set_panel_title(ax_d, "Absolute state coefficients")
+        f._set_panel_title(ax_d, panel_d_title)
         ax_d.text(
             0.98,
             0.02,
@@ -1269,7 +1463,7 @@ def render_figure2(
             xlabel=f"Coefficient ({f.CI_95_LABEL})",
             ylabel="Term",
         )
-        f._set_panel_title(ax_d, "Absolute state coefficients")
+        f._set_panel_title(ax_d, panel_d_title)
     f._add_panel_label(ax_d, "D")
     panel_d_csv = source_dir / "figure2_panel_d_mixedlm_coefficients.csv"
     f.write_source_csv(
@@ -1290,21 +1484,40 @@ def render_figure2(
         ),
     )
     source_paths.append(panel_d_csv)
+    if panel_d_hiit_sensitivity:
+        panel_d_keys = [
+            "model=absolute_pooled_state",
+            "display=coefficients_not_marginal_means",
+            "vcov_available=false",
+            "cohort=HIIT_sensitivity_display",
+            "enters_primary_meta=false",
+            f"panel_status={f.PANEL_STATUS_SENSITIVITY_DISPLAY}",
+        ]
+        panel_d_notes = (
+            "HIIT Sensitivity (display-only): absolute pooled state model "
+            "coefficients from this sensitivity run. Excluded from PRIMARY_META; "
+            "not a primary confirmatory claim."
+        )
+        panel_d_panel_title = "HIIT Sensitivity: absolute state coefficients"
+    else:
+        panel_d_keys = [
+            "model=absolute_pooled_state",
+            "display=coefficients_not_marginal_means",
+            "vcov_available=false",
+        ]
+        panel_d_notes = f.FIGURE2_PANEL_D_NOTE
+        panel_d_panel_title = "Absolute pooled state model coefficients"
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure2",
             panel_id="mixedlm_coefficients",
-            title="Absolute pooled state model coefficients",
+            title=panel_d_panel_title,
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
             input_tables=[str(inputs.get("mixed_model") or "")],
             source_data_csv=str(panel_d_csv),
-            analysis_keys=[
-                "model=absolute_pooled_state",
-                "display=coefficients_not_marginal_means",
-                "vcov_available=false",
-            ],
-            notes=f.FIGURE2_PANEL_D_NOTE,
+            analysis_keys=panel_d_keys,
+            notes=panel_d_notes,
         )
     )
 
@@ -1312,45 +1525,24 @@ def render_figure2(
     gs_e = GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[2, 0], wspace=0.75)
     ax_e_mu = fig.add_subplot(gs_e[0, 0])
     ax_e_fwhm = fig.add_subplot(gs_e[0, 1])
-    peak_export: list[dict[str, object]] = []
-    # Deduplicate: one row per (dataset, participant, band) from PRIMARY_META pairs.
-    seen_e: set[tuple[str, str, str]] = set()
-    for row in meta_pairs:
-        dataset_id = f._as_str(row.get("dataset_id"))
-        participant_id = f._as_str(row.get("participant_id"))
-        band = f._as_str(row.get("band")).casefold()
-        if band not in f.BAND_ORDER:
-            continue
-        key = (dataset_id.casefold(), participant_id, band)
-        if key in seen_e:
-            continue
-        seen_e.add(key)
-        low_peak = f._as_bool(row.get("low_has_identifiable_peak"))
-        effort_peak = f._as_bool(row.get("effort_has_identifiable_peak"))
-        low_mu = f._as_float(row.get("low_peak_center_mu_s"))
-        effort_mu = f._as_float(row.get("effort_peak_center_mu_s"))
-        low_fwhm = f._as_float(row.get("low_fwhm_s"))
-        effort_fwhm = f._as_float(row.get("effort_fwhm_s"))
-        peak_export.append(
-            {
-                "dataset_id": dataset_id,
-                "participant_id": participant_id,
-                "contrast_id": f._as_str(row.get("contrast_id")),
-                "band": band,
-                "low_has_identifiable_peak": low_peak,
-                "effort_has_identifiable_peak": effort_peak,
-                "low_peak_center_mu_s": low_mu if low_peak else float("nan"),
-                "effort_peak_center_mu_s": effort_mu if effort_peak else float("nan"),
-                "low_fwhm_s": low_fwhm if low_peak else float("nan"),
-                "effort_fwhm_s": effort_fwhm if effort_peak else float("nan"),
-            }
+    panel_e_hiit_sensitivity = False
+    if meta_pairs:
+        peak_export = build_panel_e_peak_export(meta_pairs, hiit_sensitivity=False)
+    else:
+        hiit_peak_pairs = filter_hiit_sensitivity_paired_rows(paired)
+        peak_export = build_panel_e_peak_export(
+            hiit_peak_pairs, hiit_sensitivity=True
         )
+        panel_e_hiit_sensitivity = bool(peak_export)
 
     eq_export: list[dict[str, object]] = []
     for row in equivalence:
         if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
             continue
         if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
+            continue
+        # Equivalence TOST is PRIMARY_META display context; skip on HIIT-only path.
+        if panel_e_hiit_sensitivity:
             continue
         eq_export.append(
             {
@@ -1364,6 +1556,16 @@ def render_figure2(
             }
         )
 
+    panel_e_mu_title = (
+        "HIIT Sensitivity: Peak μ (paired)"
+        if panel_e_hiit_sensitivity
+        else "Peak μ (paired)"
+    )
+    panel_e_fwhm_title = (
+        "HIIT Sensitivity: FWHM (descriptive)"
+        if panel_e_hiit_sensitivity
+        else "FWHM (descriptive)"
+    )
     if peak_export or eq_export:
         ax_e_mu.axvspan(
             -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
@@ -1496,8 +1698,8 @@ def render_figure2(
             xlabel="FWHM (s)",
             ylabel=f.EEG_BAND_YLABEL,
         )
-    f._set_panel_title(ax_e_mu, "Peak μ (paired)")
-    f._set_panel_title(ax_e_fwhm, "FWHM (descriptive)")
+    f._set_panel_title(ax_e_mu, panel_e_mu_title)
+    f._set_panel_title(ax_e_fwhm, panel_e_fwhm_title)
     f._add_panel_label(ax_e_mu, "E")
     panel_e_csv = source_dir / "figure2_panel_e_paired_peaks.csv"
     f.write_source_csv(
@@ -1506,6 +1708,7 @@ def render_figure2(
         (
             "dataset_id",
             "participant_id",
+            "session_id",
             "contrast_id",
             "band",
             "low_has_identifiable_peak",
@@ -1514,36 +1717,52 @@ def render_figure2(
             "effort_peak_center_mu_s",
             "low_fwhm_s",
             "effort_fwhm_s",
+            "row_type",
         ),
     )
     source_paths.append(panel_e_csv)
+    if panel_e_hiit_sensitivity:
+        panel_e_keys = [
+            "cohort=HIIT_sensitivity_matched_observation_pairs",
+            "sampling_unit=matched_rest_tetris_pair",
+            "aggregation=matched_observation_pairs",
+            "fwhm=descriptive",
+            "enters_primary_meta=false",
+            f"panel_status={f.PANEL_STATUS_SENSITIVITY_DISPLAY}",
+        ]
+        panel_e_notes = f.FIGURE2_PANEL_E_HIIT_SENSITIVITY_NOTE
+        panel_e_panel_title = "HIIT Sensitivity: paired low vs effort μ and FWHM"
+    elif panel_e_expected_na:
+        panel_e_keys = [
+            "cohort=PRIMARY_META_C5_pairs",
+            "sampling_unit=dataset_participant",
+            "fwhm=descriptive",
+            f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",
+        ]
+        panel_e_notes = f.annotate_expected_not_applicable(
+            f.FIGURE2_PANEL_E_NOTE,
+            detail=panel_e_na_detail,
+        )
+        panel_e_panel_title = "Paired low vs effort μ and FWHM"
+    else:
+        panel_e_keys = [
+            "cohort=PRIMARY_META_C5_pairs",
+            "sampling_unit=dataset_participant",
+            "fwhm=descriptive",
+        ]
+        panel_e_notes = f.FIGURE2_PANEL_E_NOTE
+        panel_e_panel_title = "Paired low vs effort μ and FWHM"
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure2",
             panel_id="paired_peaks_mu_fwhm",
-            title="Paired low vs effort μ and FWHM",
+            title=panel_e_panel_title,
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
             input_tables=[str(inputs.get("paired_contrasts") or "")],
             source_data_csv=str(panel_e_csv),
-            analysis_keys=[
-                "cohort=PRIMARY_META_C5_pairs",
-                "sampling_unit=dataset_participant",
-                "fwhm=descriptive",
-                *(
-                    [f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}"]
-                    if panel_e_expected_na
-                    else []
-                ),
-            ],
-            notes=(
-                f.annotate_expected_not_applicable(
-                    f.FIGURE2_PANEL_E_NOTE,
-                    detail=panel_e_na_detail,
-                )
-                if panel_e_expected_na
-                else f.FIGURE2_PANEL_E_NOTE
-            ),
+            analysis_keys=panel_e_keys,
+            notes=panel_e_notes,
         )
     )
 
@@ -1641,7 +1860,11 @@ def render_figure2(
         panel_f_na_detail = "ds003690 graded contrasts not present in this run."
         f._mark_empty_panel(
             ax_f,
-            f.primary_meta_expected_na_message(panel_f_na_detail),
+            (
+                f"Expected not applicable — {panel_f_na_detail} "
+                "Panel F requires the prespecified ds003690 graded contrasts "
+                "and is empty by design when that dataset is absent."
+            ),
             xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
             ylabel="Contrast · band",
         )
@@ -1735,7 +1958,7 @@ def render_figure2(
         fig.text(
             pos_b.x0,
             min(pos_b.y1 + 0.010, 0.96),
-            "Matched lag-difference curves",
+            panel_b_title,
             ha="left",
             va="bottom",
             fontsize=f.FS_PANEL_TITLE - 2,
@@ -1759,27 +1982,72 @@ def render_figure2(
             "Wiring-gap note if matched curves cannot be reconstructed "
             "(no unpaired fallback).\n"
         )
+    if panel_b_hiit_sensitivity:
+        panel_b_caption = (
+            "B: HIIT Sensitivity (display-only) — matched Rest–Tetris Δ Fisher-z "
+            "lag-difference curves Δz(τ)=z_effort−z_low on the same C5 pairs as Panel A; "
+            "each PRE and POST pair contributes separately. Point estimate = mean "
+            "across matched pairs; CI = PH/PS session-subject cluster bootstrap. "
+            "Excluded from PRIMARY_META; no cluster-permutation testing. "
+            "Report n_matched_pairs and n_session_clusters.\n"
+        )
+    else:
+        panel_b_caption = (
+            "B: Matched task−rest lag-difference curves on the same pairs; "
+            "display only — no cluster-permutation testing. Formal lag-0 "
+            "attenuation via paired ΔZLPI / PRIMARY_META / C4.\n"
+        )
+    if panel_c_hiit_only:
+        panel_c_caption = (
+            "C: HIIT Sensitivity (display-only) — one combined alpha ΔZLPI estimate "
+            "(PH/PS session subjects counted separately). Excluded from PRIMARY_META "
+            "RE pooling.\n"
+        )
+    else:
+        panel_c_caption = f"C: {f.FIGURE2_PANEL_C_NOTE}\n"
+    if panel_d_hiit_sensitivity:
+        panel_d_caption = (
+            "D: HIIT Sensitivity (display-only) — absolute pooled state model "
+            "coefficients from this sensitivity run; not PRIMARY_META.\n"
+        )
+    else:
+        panel_d_caption = f"D: {f.FIGURE2_PANEL_D_NOTE}\n"
+    if panel_e_hiit_sensitivity:
+        panel_e_caption = (
+            "E: HIIT Sensitivity (display-only) — paired Rest–Tetris peak μ and FWHM "
+            "from C5 matched pairs (PRE/POST each contribute; no PRE/POST or PH/PS "
+            "collapse); FWHM descriptive only.\n"
+        )
+    else:
+        panel_e_caption = f"E: {f.FIGURE2_PANEL_E_NOTE}\n"
     caption_path = output_dir / "figure2_caption.txt"
     caption_path.write_text(
         (
             f"{f.FIGURE2_TITLE}\n\n"
             f"{panel_a_caption}"
-            "B: Matched task−rest lag-difference curves on the same pairs; "
-            "display only — no cluster-permutation testing. Formal lag-0 "
-            "attenuation via paired ΔZLPI / PRIMARY_META / C4.\n"
-            f"C: {f.FIGURE2_PANEL_C_NOTE}\n"
-            f"D: {f.FIGURE2_PANEL_D_NOTE}\n"
-            f"E: {f.FIGURE2_PANEL_E_NOTE}\n"
+            f"{panel_b_caption}"
+            f"{f.LAG_CURVE_DISPLAY_SMOOTH_NOTE}\n"
+            f"{panel_c_caption}"
+            f"{panel_d_caption}"
+            f"{panel_e_caption}"
             f"F: {f.FIGURE2_PANEL_F_NOTE}\n"
         ),
         encoding="utf-8",
     )
     changelog_path = output_dir / "figure2_changelog.md"
+    hiit_fallback = (
+        panel_a_hiit_sensitivity
+        or panel_b_hiit_sensitivity
+        or panel_c_hiit_only
+        or panel_d_hiit_sensitivity
+        or panel_e_hiit_sensitivity
+    )
     changelog_extra = (
-        "- Panel A HIIT-only fallback: observation-level matched Rest–Tetris "
-        "pairs (PRE/POST each contribute); session-subject cluster bootstrap; "
-        "display-only; excluded from PRIMARY_META.\n"
-        if panel_a_hiit_sensitivity
+        "- HIIT-only sensitivity display for Panels A/B/C/D/E: matched Rest–Tetris "
+        "pairs (PRE/POST each contribute where applicable); excluded from "
+        "PRIMARY_META. Panel F remains ds003690-only (expected empty without that "
+        "dataset).\n"
+        if hiit_fallback
         else ""
     )
     changelog_path.write_text(
@@ -1788,6 +2056,10 @@ def render_figure2(
             "- Six-panel manuscript layout (presentation only; C0–C6 frozen).\n"
             "- Panels A/B: exact C5 pairs → C2 curves via observation IDs; "
             "paired bootstrap; no unpaired fallback; no cluster permutation.\n"
+            f"- Panels A/B display-only Gaussian smooth "
+            f"(σ = {f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S:g} s) on plotted mean "
+            "curves and ribbon boundaries; source-data CSVs remain unsmoothed; "
+            "all CIs/tests from original data.\n"
             f"{changelog_extra}"
             "- Panel C: absolute PRIMARY_META α ΔZLPI forest; no percent attenuation; "
             "one combined HIIT display-only sensitivity row never enters RE pooling.\n"
@@ -1817,6 +2089,7 @@ def render_figure2(
 __all__ = [
     "build_curve_lag_index",
     "build_hiit_sensitivity_panel_a_series",
+    "build_panel_e_peak_export",
     "collapse_hiit_session_lag_series",
     "filter_hiit_sensitivity_paired_rows",
     "filter_primary_meta_paired_rows",

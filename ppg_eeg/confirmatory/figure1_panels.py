@@ -647,12 +647,23 @@ def render_figure1(
         mean = np.asarray([r["mean_z"] for r in series], dtype=float)
         lo = np.asarray([r["ci_low"] for r in series], dtype=float)
         hi = np.asarray([r["ci_high"] for r in series], dtype=float)
-        mask = f.display_lag_mask(lags, f.FIGURE1_DISPLAY_LAG_STEP_S)
+        # Full 1 s lag grid so σ display smooth is visible (same as Figure 2 A/B).
+        mask = f.display_lag_mask(lags, 1)
+        # Display-only smooth after CI computation; exports stay unsmoothed.
+        mean_d = f.gaussian_smooth_display_series(
+            mean, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+        )
+        lo_d = f.gaussian_smooth_display_series(
+            lo, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+        )
+        hi_d = f.gaussian_smooth_display_series(
+            hi, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+        )
         color = f._band_color(band)
         ax_b.fill_between(
             lags[mask],
-            lo[mask],
-            hi[mask],
+            lo_d[mask],
+            hi_d[mask],
             color=color,
             alpha=f.FIGURE1_PANEL_B_CI_ALPHA,
             linewidth=0,
@@ -660,7 +671,7 @@ def render_figure1(
         )
         (line,) = ax_b.plot(
             lags[mask],
-            mean[mask],
+            mean_d[mask],
             color=color,
             lw=f.LINE_WIDTH,
             ls=f._band_linestyle(band),
@@ -732,11 +743,14 @@ def render_figure1(
                 f"endpoint={ENDPOINT_ZLPI}",
                 f"representation={f.PRIMARY_REPRESENTATION}",
                 "ci=participant_within_dataset_bootstrap",
+                f"display_smooth=gaussian_sigma_{f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S:g}s",
+                "source_data=unsmoothed",
             ],
             notes=(
                 f"{f.CI_95_METHOD_NOTE}. {f.FIGURE1_DISPLAY_GRID_DISCLOSURE} "
                 f"Four-band overlay with lighter bootstrap ribbons "
-                f"(α={f.FIGURE1_PANEL_B_CI_ALPHA}); small multiples not used."
+                f"(α={f.FIGURE1_PANEL_B_CI_ALPHA}); small multiples not used. "
+                f"{f.LAG_CURVE_DISPLAY_SMOOTH_NOTE}"
             ),
         )
     )
@@ -1420,6 +1434,7 @@ def render_figure1(
             f"B: Low-demand D240 Fisher-z lag curves by band (single overlay; "
             f"lighter bootstrap ribbons for full-dataset readability); "
             f"{f.CI_95_METHOD_NOTE}. {f.FIGURE1_DISPLAY_GRID_DISCLOSURE}\n"
+            f"{f.LAG_CURVE_DISPLAY_SMOOTH_NOTE}\n"
             "C: Participant-level lag-category Fisher-z (lag 0 vs max shoulder vs "
             "combined distant flank); group means ± participant SEM with faint dots.\n"
             f"D: Dataset/session × band subject-level mean ZLPI; {f.FIGURE1_PANEL_D_ASTERISK_LABEL}. "
@@ -1440,6 +1455,8 @@ def render_figure1(
             "- Panel B CIs: participant-within-dataset percentile bootstrap "
             "(not parametric SE); four-band overlay retained with lighter ribbons "
             f"(α={f.FIGURE1_PANEL_B_CI_ALPHA}) instead of small multiples.\n"
+            f"- Panel B display-only Gaussian smooth "
+            f"(σ = {f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S:g} s); source data unsmoothed.\n"
             "- Panel C: group means ± participant SEM; faint dots (no spaghetti lines).\n"
             "- Panel D values: subject-level mean ZLPI; HIIT shown as one combined "
             "sensitivity row (within-participant mean of available PH/PS × PRE/POST "

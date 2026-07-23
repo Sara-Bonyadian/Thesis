@@ -180,6 +180,18 @@ FIGURE1_BOOTSTRAP_CI_PERCENT = 95.0
 # Panel B: lighter ribbons keep four-band overlay readable at full-dataset scale.
 FIGURE1_PANEL_B_CI_ALPHA = 0.12
 FIGURE1_PANEL_B_USE_SMALL_MULTIPLES = False
+# Display-only Gaussian smooth for lag curves (Figure 1 Panel B; Figure 2 Panels A/B).
+# Applied after bootstrap CIs are computed; source-data exports remain unsmoothed.
+LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S = 2.0
+LAG_CURVE_DISPLAY_SMOOTH_NOTE = (
+    "For visualization only, the displayed curves were lightly smoothed using a "
+    f"Gaussian kernel (σ = {LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S:g} s). "
+    "All statistical analyses, hypothesis tests, and "
+    "confidence intervals were computed from the original unsmoothed data."
+)
+# Back-compat aliases used by Figure 2 A/B.
+FIGURE2_PANEL_AB_DISPLAY_SMOOTH_SIGMA_S = LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
+FIGURE2_PANEL_AB_DISPLAY_SMOOTH_NOTE = LAG_CURVE_DISPLAY_SMOOTH_NOTE
 # Panel D: prespecified surrogate mark (display only; not a new inferential family).
 FIGURE1_PANEL_D_SURROGATE_ALPHA = 0.05
 FIGURE1_PANEL_D_SURROGATE_RULE_NOTE = (
@@ -262,6 +274,21 @@ FIGURE2_PANEL_A_HIIT_SENSITIVITY_NOTE = (
     "drawn session are retained together). Excluded from PRIMARY_META; not a "
     "primary confirmatory claim. Report n_matched_pairs and n_session_clusters "
     "(not participant n)."
+)
+FIGURE2_PANEL_B_HIIT_SENSITIVITY_NOTE = (
+    "HIIT Sensitivity (display-only): matched Rest–Tetris Δ Fisher-z lag curves "
+    "Δz(τ)=z_effort(τ)−z_low(τ) from the same C5 pairs as Panel A (PRE and POST "
+    "each contribute; no PRE/POST or PH/PS averaging before the group mean). "
+    "Point estimate = mean across matched pairs; 95% CI = PH/PS session-subject "
+    "cluster bootstrap. Excluded from PRIMARY_META; display only — no "
+    "cluster-permutation testing. Report n_matched_pairs and n_session_clusters "
+    "(not participant n)."
+)
+FIGURE2_PANEL_E_HIIT_SENSITIVITY_NOTE = (
+    "HIIT Sensitivity (display-only): paired Rest–Tetris peak μ and FWHM from "
+    "C5 matched pairs (PRE and POST each contribute; no PRE/POST or PH/PS "
+    "collapse). Suppress μ/FWHM when that state's peak is not identifiable; "
+    "FWHM descriptive only. Excluded from PRIMARY_META."
 )
 
 
@@ -1016,6 +1043,42 @@ def display_lag_mask(lags: np.ndarray, display_lag_step_s: int) -> np.ndarray:
         return np.ones(np.asarray(lags).shape, dtype=bool)
     lags_i = np.rint(np.asarray(lags, dtype=float)).astype(int)
     return (lags_i % step) == 0
+
+
+def gaussian_smooth_display_series(
+    values: np.ndarray | Sequence[float],
+    *,
+    sigma_s: float | None = None,
+    lag_step_s: float = 1.0,
+) -> np.ndarray:
+    """Light 1-D Gaussian smooth for plot series only (not for inference).
+
+    ``sigma_s`` is in seconds; with a 1 s lag grid this equals σ in samples.
+    Defaults to ``LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S``. NaN positions are
+    preserved. Does not mutate the input array.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    if sigma_s is None:
+        sigma_s = float(LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S)
+    arr = np.asarray(values, dtype=float).copy()
+    if arr.size == 0:
+        return arr
+    step = float(lag_step_s) if float(lag_step_s) > 0.0 else 1.0
+    sigma_samples = float(sigma_s) / step
+    if not math.isfinite(sigma_samples) or sigma_samples <= 0.0:
+        return arr
+    finite = np.isfinite(arr)
+    if not finite.any():
+        return arr
+    if bool(finite.all()):
+        return gaussian_filter1d(arr, sigma=sigma_samples, mode="nearest")
+    filled = arr.copy()
+    idx = np.arange(arr.size)
+    filled[~finite] = np.interp(idx[~finite], idx[finite], arr[finite])
+    smoothed = gaussian_filter1d(filled, sigma=sigma_samples, mode="nearest")
+    smoothed[~finite] = np.nan
+    return smoothed
 
 
 def render_figure1(
@@ -2950,9 +3013,15 @@ __all__ = [
     "FIGURE3_INTERNAL_QC_SUBDIR",
     "FIGURE_EXPORT_CATEGORIES_FILENAME",
     "FIGURE_DPI",
+    "FIGURE2_PANEL_AB_DISPLAY_SMOOTH_NOTE",
+    "FIGURE2_PANEL_AB_DISPLAY_SMOOTH_SIGMA_S",
+    "LAG_CURVE_DISPLAY_SMOOTH_NOTE",
+    "LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S",
     "FigureArtifacts",
     "Figure3RenderResult",
     "FiguresResult",
+    "display_lag_mask",
+    "gaussian_smooth_display_series",
     "generate_confirmatory_figures",
     "mean_ci_by_lag",
     "render_figure1",

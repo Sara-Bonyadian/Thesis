@@ -52,6 +52,12 @@ def _paired_row(
     band: str,
     low_id: str,
     effort_id: str,
+    low_has_identifiable_peak: bool = True,
+    effort_has_identifiable_peak: bool = True,
+    low_peak_center_mu_s: float = 0.5,
+    effort_peak_center_mu_s: float = -0.5,
+    low_fwhm_s: float = 4.0,
+    effort_fwhm_s: float = 5.0,
 ) -> dict[str, object]:
     return {
         "dataset_id": dataset_id,
@@ -66,6 +72,12 @@ def _paired_row(
         "low_observation_ids": low_id,
         "effort_observation_ids": effort_id,
         "delta_endpoint_index": -0.1,
+        "low_has_identifiable_peak": low_has_identifiable_peak,
+        "effort_has_identifiable_peak": effort_has_identifiable_peak,
+        "low_peak_center_mu_s": low_peak_center_mu_s,
+        "effort_peak_center_mu_s": effort_peak_center_mu_s,
+        "low_fwhm_s": low_fwhm_s,
+        "effort_fwhm_s": effort_fwhm_s,
     }
 
 
@@ -446,9 +458,69 @@ class Figure2PanelAHiitFallbackRenderTests(unittest.TestCase):
                 for p in artifacts.panels
                 if p.panel_id == "matched_lag_difference_curves"
             )
+            self.assertIn("HIIT Sensitivity", panel_b.title)
             self.assertIn(
+                "cohort=HIIT_sensitivity_matched_observation_pairs",
+                panel_b.analysis_keys,
+            )
+            self.assertIn(
+                f"ci={HIIT_CLUSTER_BOOTSTRAP_CI_METHOD}",
+                panel_b.analysis_keys,
+            )
+            self.assertIn(
+                f"panel_status={PANEL_STATUS_SENSITIVITY_DISPLAY}",
+                panel_b.analysis_keys,
+            )
+            self.assertNotIn(
                 f"panel_status={PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",
                 panel_b.analysis_keys,
+            )
+            delta_out = read_csv_rows(
+                out / "source_data" / "figure2_panel_b_lag_difference_curves.csv"
+            )
+            self.assertTrue(delta_out)
+            self.assertEqual({int(float(r["n_matched_pairs"])) for r in delta_out}, {3})
+            self.assertEqual(
+                {int(float(r["n_session_clusters"])) for r in delta_out}, {2}
+            )
+            self.assertNotIn("n_participants", delta_out[0])
+            self.assertEqual({r["value_field"] for r in delta_out}, {"delta_z"})
+            self.assertIn("lag-difference", caption.casefold())
+            self.assertIn("Δz", caption)
+            self.assertIn("Gaussian kernel", caption)
+            self.assertIn("unsmoothed data", caption.casefold())
+            self.assertIn("display_smooth=gaussian_sigma_2s", panel_a.analysis_keys)
+            self.assertIn("source_data=unsmoothed", panel_a.analysis_keys)
+            self.assertIn("display_smooth=gaussian_sigma_2s", panel_b.analysis_keys)
+
+            panel_c = next(
+                p for p in artifacts.panels if p.panel_id == "alpha_primary_meta_forest"
+            )
+            self.assertIn("HIIT Sensitivity", panel_c.title)
+            self.assertIn(
+                f"panel_status={PANEL_STATUS_SENSITIVITY_DISPLAY}",
+                panel_c.analysis_keys,
+            )
+
+            panel_e = next(
+                p for p in artifacts.panels if p.panel_id == "paired_peaks_mu_fwhm"
+            )
+            self.assertIn("HIIT Sensitivity", panel_e.title)
+            self.assertIn(
+                f"panel_status={PANEL_STATUS_SENSITIVITY_DISPLAY}",
+                panel_e.analysis_keys,
+            )
+            peaks = read_csv_rows(
+                out / "source_data" / "figure2_panel_e_paired_peaks.csv"
+            )
+            self.assertTrue(peaks)
+            self.assertEqual({r["row_type"] for r in peaks}, {"sensitivity_display"})
+            self.assertEqual(len(peaks), 12)  # 3 contrasts × 4 bands
+
+            panel_f = next(p for p in artifacts.panels if p.panel_id == "graded_ds003690")
+            self.assertIn(
+                f"panel_status={PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",
+                panel_f.analysis_keys,
             )
 
     def test_unmatched_effort_excluded(self) -> None:
