@@ -33,6 +33,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+import patsy
 import statsmodels.formula.api as smf
 from scipy import stats
 from statsmodels.stats.meta_analysis import combine_effects
@@ -65,6 +66,66 @@ PRIMARY_POWER_REPRESENTATION = "absolute_log10"
 FDR_ALPHA = 0.05
 FDR_METHOD = "fdr_bh"
 BAND_ORDER = ("delta", "theta", "alpha", "beta")
+
+# Panel D locked band×state display set (internal band keys; export label for
+# low_gamma is "gamma" per prespecified manuscript vocabulary).
+PANEL_D_BANDS = ("theta", "alpha", "beta", "low_gamma")
+PANEL_D_BAND_EXPORT_LABELS = {
+    "theta": "theta",
+    "alpha": "alpha",
+    "beta": "beta",
+    "low_gamma": "gamma",
+}
+PANEL_D_STATES = ("low_demand", "cognitive_effort")
+PANEL_D_STATE_EXPORT_LABELS = {
+    "low_demand": "low cognitive demand",
+    "cognitive_effort": "high cognitive demand",
+}
+MIXED_MODEL_FORMULA_CORE = (
+    "endpoint_index ~ C(state) * C(band) + C(modality) + mean_hr"
+)
+MIXED_MODEL_MARGINAL_ESTIMATES_FILENAME = "mixed_model_marginal_estimates.csv"
+MIXED_MODEL_CONTRASTS_FILENAME = "mixed_model_contrasts.csv"
+MIXED_MODEL_MARGINAL_FIELDS = (
+    "endpoint_name",
+    "duration_s",
+    "power_representation",
+    "is_primary_analysis",
+    "dataset_scope",
+    "band",
+    "state",
+    "estimated_zlpi",
+    "standard_error",
+    "ci_low",
+    "ci_high",
+    "n_participants",
+    "n_observations",
+    "model_formula",
+    "covariance_method",
+    "covariate_prediction_method",
+    "model_backend",
+    "converged",
+    "notes",
+)
+MIXED_MODEL_CONTRAST_FIELDS = (
+    "endpoint_name",
+    "duration_s",
+    "power_representation",
+    "is_primary_analysis",
+    "dataset_scope",
+    "contrast_type",
+    "contrast_name",
+    "contrast_direction",
+    "estimate",
+    "standard_error",
+    "ci_low",
+    "ci_high",
+    "p_value",
+    "covariance_method",
+    "model_backend",
+    "converged",
+    "notes",
+)
 
 # Datasets excluded from primary attenuation meta (protocol / role reasons).
 # ds004582: unpaired single-state; ds003816: no confirmatory paired contrast /
@@ -281,6 +342,8 @@ QC_FIELDS = (
 @dataclass(frozen=True)
 class InferenceResult:
     mixed_model_rows: tuple[dict[str, object], ...]
+    mixed_model_marginal_rows: tuple[dict[str, object], ...]
+    mixed_model_contrast_rows: tuple[dict[str, object], ...]
     dataset_effect_rows: tuple[dict[str, object], ...]
     meta_rows: tuple[dict[str, object], ...]
     loo_rows: tuple[dict[str, object], ...]
@@ -593,6 +656,309 @@ def _prepare_subject_frame(
     return frame
 
 
+def _panel_d_covariance_method(fitted: object, backend: str) -> str:
+    if backend == "ols_cluster_participant":
+        return "participant_cluster_robust"
+    if backend.startswith("mixedlm"):
+        return "mixedlm_fixed_effects_reml"
+    return backend or "unknown"
+
+
+def _panel_d_covariate_defaults(frame: pd.DataFrame) -> dict[str, object]:
+    """Prespecified covariate values for model-estimated ZLPI (population average)."""
+    defaults: dict[str, object] = {
+        "mean_hr": float(frame["mean_hr"].mean()) if not frame.empty else 0.0,
+        "modality": (
+            str(frame["modality"].mode().iloc[0])
+            if not frame.empty and not frame["modality"].mode().empty
+            else "eeg"
+        ),
+    }
+    if "dataset_id" in frame.columns and not frame.empty:
+        defaults["dataset_id"] = str(frame["dataset_id"].mode().iloc[0])
+    defaults["endpoint_index"] = 0.0
+    return defaults
+
+
+def _panel_d_bands_in_frame(frame: pd.DataFrame) -> tuple[str, ...]:
+    present = {str(b).casefold() for b in frame["band"].unique()}
+    return tuple(b for b in PANEL_D_BANDS if b.casefold() in present)
+
+
+def _panel_d_prediction_frame(
+    frame: pd.DataFrame,
+    *,
+    bands: Sequence[str] | None = None,
+    states: Sequence[str] = PANEL_D_STATES,
+) -> pd.DataFrame:
+    if bands is None:
+        bands = _panel_d_bands_in_frame(frame)
+    defaults = _panel_d_covariate_defaults(frame)
+    rows: list[dict[str, object]] = []
+    for band in bands:
+        for state in states:
+            rows.append({"band": band, "state": state, **defaults})
+    return pd.DataFrame(rows)
+
+
+def _fixed_effect_param_vector(fitted: object) -> pd.Series:
+    if hasattr(fitted, "fe_params"):
+        return fitted.fe_params.copy()
+    return fitted.params.copy()
+
+
+def _fixed_effect_covariance(fitted: object) -> pd.DataFrame:
+    return fitted.cov_params().copy()
+
+
+def _align_exog_to_params(
+    fitted: object,
+    pred_frame: pd.DataFrame,
+) -> np.ndarray:
+    """Build design rows aligned to the fitted fixed-effect parameter order."""
+    design_info = fitted.model.data.design_info
+    exog_df = patsy.build_design_matrices(
+        [design_info],
+        pred_frame,
+        return_type="dataframe",
+    )[0]
+    param_names = list(_fixed_effect_param_vector(fitted).index)
+    aligned = exog_df.reindex(columns=param_names, fill_value=0.0)
+    return aligned.to_numpy(dtype=float)
+
+
+def _linear_contrast_inference(
+    fitted: object,
+    contrast: np.ndarray,
+    *,
+    param_names: Sequence[str] | None = None,
+) -> tuple[float, float, float, float, float]:
+    beta = _fixed_effect_param_vector(fitted)
+    if param_names is None:
+        param_names = list(beta.index)
+    c = np.asarray(contrast, dtype=float).reshape(-1)
+    if c.shape[0] != len(param_names):
+        padded = np.zeros(len(param_names), dtype=float)
+        padded[: min(c.shape[0], len(param_names))] = c[: min(c.shape[0], len(param_names))]
+        c = padded
+    try:
+        test = fitted.t_test(c)
+        estimate = float(np.asarray(test.effect).squeeze())
+        stderr = float(np.asarray(test.sd).squeeze())
+        ci = np.asarray(test.conf_int()).squeeze()
+        ci_low = float(ci[0])
+        ci_high = float(ci[1])
+        p_value = float(np.asarray(test.pvalue).squeeze())
+        return estimate, stderr, ci_low, ci_high, p_value
+    except Exception:  # noqa: BLE001
+        cov = _fixed_effect_covariance(fitted).reindex(
+            index=param_names,
+            columns=param_names,
+        ).fillna(0.0)
+        beta_vec = beta.reindex(param_names).fillna(0.0).to_numpy(dtype=float)
+        cov_mat = cov.to_numpy(dtype=float)
+        c_row = c.reshape(1, -1)
+        estimate = float((c_row @ beta_vec.reshape(-1, 1)).squeeze())
+        var = float((c_row @ cov_mat @ c_row.T).squeeze())
+        stderr = math.sqrt(var) if math.isfinite(var) and var >= 0.0 else float("nan")
+        if math.isfinite(stderr) and stderr > 0.0:
+            z = estimate / stderr
+            p_value = float(2.0 * stats.norm.sf(abs(z)))
+            ci_low = estimate - 1.96 * stderr
+            ci_high = estimate + 1.96 * stderr
+        else:
+            p_value = float("nan")
+            ci_low = float("nan")
+            ci_high = float("nan")
+        return estimate, stderr, ci_low, ci_high, p_value
+
+
+def _panel_d_dataset_scope(frame: pd.DataFrame) -> str:
+    datasets = sorted({str(v).casefold() for v in frame["dataset_id"].unique()})
+    if datasets == ["hiit"]:
+        return "HIIT_sensitivity"
+    if set(datasets) <= META_EXCLUDED_DATASETS:
+        return "sensitivity_only"
+    primary = [ds for ds in datasets if ds not in META_EXCLUDED_DATASETS]
+    if primary:
+        return "PRIMARY_META_pooled"
+    return ";".join(datasets)
+
+
+def compute_mixed_model_panel_d_estimates(
+    fitted: object,
+    frame: pd.DataFrame,
+    *,
+    endpoint_name: str,
+    duration_s: int,
+    power_representation: str,
+    is_primary: bool,
+    backend: str,
+    qc_notes: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Model-estimated Fisher-z ZLPI and prespecified contrasts from fitted model."""
+    if frame.empty:
+        return [], []
+
+    panel_bands = _panel_d_bands_in_frame(frame)
+    if not panel_bands:
+        return [], []
+
+    pred_frame = _panel_d_prediction_frame(frame, bands=panel_bands)
+    exog = _align_exog_to_params(fitted, pred_frame)
+    param_names = list(_fixed_effect_param_vector(fitted).index)
+    cov_method = _panel_d_covariance_method(fitted, backend)
+    covariate_method = (
+        "mean_hr=sample_mean;modality=sample_mode;"
+        + (
+            "dataset_id=sample_mode"
+            if "dataset_id" in _panel_d_covariate_defaults(frame)
+            else "dataset_id=not_in_model"
+        )
+    )
+    formula = (
+        MIXED_MODEL_FORMULA_CORE
+        if backend == "mixedlm_subject_re_dataset_vc"
+        else MIXED_MODEL_FORMULA_CORE + " + C(dataset_id)"
+    )
+    dataset_scope = _panel_d_dataset_scope(frame)
+    n_participants = int(frame["participant_uid"].nunique())
+    n_obs = int(len(frame))
+
+    marginal_rows: list[dict[str, object]] = []
+    cell_estimates: dict[tuple[str, str], tuple[float, np.ndarray]] = {}
+    for i, (_, row) in enumerate(pred_frame.iterrows()):
+        band = _as_str(row["band"]).casefold()
+        state = _as_str(row["state"]).casefold()
+        if band not in PANEL_D_BAND_EXPORT_LABELS:
+            continue
+        contrast_vec = exog[i, :]
+        estimate, stderr, ci_low, ci_high, _p = _linear_contrast_inference(
+            fitted,
+            contrast_vec,
+            param_names=param_names,
+        )
+        cell_estimates[(band, state)] = (estimate, contrast_vec)
+        marginal_rows.append(
+            {
+                "endpoint_name": endpoint_name,
+                "duration_s": int(duration_s),
+                "power_representation": power_representation,
+                "is_primary_analysis": is_primary,
+                "dataset_scope": dataset_scope,
+                "band": PANEL_D_BAND_EXPORT_LABELS[band],
+                "state": PANEL_D_STATE_EXPORT_LABELS[state],
+                "estimated_zlpi": estimate,
+                "standard_error": stderr,
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "n_participants": n_participants,
+                "n_observations": n_obs,
+                "model_formula": formula,
+                "covariance_method": cov_method,
+                "covariate_prediction_method": covariate_method,
+                "model_backend": backend,
+                "converged": bool(getattr(fitted, "converged", True)),
+                "notes": qc_notes,
+            }
+        )
+
+    contrast_rows: list[dict[str, object]] = []
+    for band in panel_bands:
+        band_key = band.casefold()
+        low_key = (band_key, "low_demand")
+        high_key = (band_key, "cognitive_effort")
+        if low_key not in cell_estimates or high_key not in cell_estimates:
+            continue
+        low_est, low_vec = cell_estimates[low_key]
+        high_est, high_vec = cell_estimates[high_key]
+        contrast_vec = high_vec - low_vec
+        estimate, stderr, ci_low, ci_high, p_value = _linear_contrast_inference(
+            fitted,
+            contrast_vec,
+            param_names=param_names,
+        )
+        export_band = PANEL_D_BAND_EXPORT_LABELS[band_key]
+        contrast_rows.append(
+            {
+                "endpoint_name": endpoint_name,
+                "duration_s": int(duration_s),
+                "power_representation": power_representation,
+                "is_primary_analysis": is_primary,
+                "dataset_scope": dataset_scope,
+                "contrast_type": "within_band_state_effect",
+                "contrast_name": f"{export_band}_high_minus_low",
+                "contrast_direction": (
+                    f"estimated ZLPI({export_band}, high cognitive demand) "
+                    f"minus estimated ZLPI({export_band}, low cognitive demand)"
+                ),
+                "estimate": estimate,
+                "standard_error": stderr,
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "p_value": p_value,
+                "covariance_method": cov_method,
+                "model_backend": backend,
+                "converged": bool(getattr(fitted, "converged", True)),
+                "notes": qc_notes,
+            }
+        )
+
+    def _state_effect(band_name: str) -> tuple[float, np.ndarray] | None:
+        band_key = band_name.casefold()
+        low_key = (band_key, "low_demand")
+        high_key = (band_key, "cognitive_effort")
+        if low_key not in cell_estimates or high_key not in cell_estimates:
+            return None
+        _, low_vec = cell_estimates[low_key]
+        _, high_vec = cell_estimates[high_key]
+        return float(cell_estimates[high_key][0] - cell_estimates[low_key][0]), high_vec - low_vec
+
+    alpha_effect = _state_effect("alpha")
+    if alpha_effect is not None:
+        for other in ("theta", "beta", "low_gamma"):
+            other_effect = _state_effect(other)
+            if other_effect is None:
+                continue
+            _, alpha_vec = alpha_effect
+            _, other_vec = other_effect
+            contrast_vec = alpha_vec - other_vec
+            estimate, stderr, ci_low, ci_high, p_value = _linear_contrast_inference(
+                fitted,
+                contrast_vec,
+                param_names=param_names,
+            )
+            other_label = PANEL_D_BAND_EXPORT_LABELS[other.casefold()]
+            contrast_rows.append(
+                {
+                    "endpoint_name": endpoint_name,
+                    "duration_s": int(duration_s),
+                    "power_representation": power_representation,
+                    "is_primary_analysis": is_primary,
+                    "dataset_scope": dataset_scope,
+                    "contrast_type": "alpha_vs_other_state_effect",
+                    "contrast_name": f"alpha_minus_{other_label}_state_effect",
+                    "contrast_direction": (
+                        f"(alpha high−low state effect) minus "
+                        f"({other_label} high−low state effect); "
+                        f"negative ⇒ stronger state attenuation in alpha than {other_label} "
+                        f"(attenuation = ZLPI decrease under high demand)"
+                    ),
+                    "estimate": estimate,
+                    "standard_error": stderr,
+                    "ci_low": ci_low,
+                    "ci_high": ci_high,
+                    "p_value": p_value,
+                    "covariance_method": cov_method,
+                    "model_backend": backend,
+                    "converged": bool(getattr(fitted, "converged", True)),
+                    "notes": qc_notes,
+                }
+            )
+
+    return marginal_rows, contrast_rows
+
+
 def fit_mixed_model(
     subject_rows: Sequence[Mapping[str, object]],
     *,
@@ -633,18 +999,24 @@ def fit_mixed_model(
     if frame.empty or frame["participant_uid"].nunique() < 2:
         qc["status"] = "insufficient_data"
         qc["notes"] = "Need eligible rows from ≥2 participants."
+        qc["panel_d_marginal_rows"] = []
+        qc["panel_d_contrast_rows"] = []
         return [], qc
 
     # Ensure categorical levels exist.
     if frame["state"].nunique() < 2:
         qc["status"] = "insufficient_state_levels"
         qc["notes"] = "Need both low_demand and cognitive_effort observations."
+        qc["panel_d_marginal_rows"] = []
+        qc["panel_d_contrast_rows"] = []
         return [], qc
     if frame["band"].nunique() < 1:
         qc["status"] = "missing_bands"
+        qc["panel_d_marginal_rows"] = []
+        qc["panel_d_contrast_rows"] = []
         return [], qc
 
-    formula_core = "endpoint_index ~ C(state) * C(band) + C(modality) + mean_hr"
+    formula_core = MIXED_MODEL_FORMULA_CORE
     notes: list[str] = []
     fitted = None
     backend = ""
@@ -706,6 +1078,8 @@ def fit_mixed_model(
         except Exception as exc:  # noqa: BLE001
             qc["status"] = "fit_failed"
             qc["notes"] = ";".join(notes + [f"ols_failed:{type(exc).__name__}:{exc}"])
+            qc["panel_d_marginal_rows"] = []
+            qc["panel_d_contrast_rows"] = []
             return [], qc
 
     qc["model_backend"] = backend
@@ -758,6 +1132,18 @@ def fit_mixed_model(
                 "notes": qc["notes"],
             }
         )
+    marginal_rows, contrast_rows = compute_mixed_model_panel_d_estimates(
+        fitted,
+        frame,
+        endpoint_name=endpoint_name,
+        duration_s=duration_s,
+        power_representation=power_representation,
+        is_primary=is_primary,
+        backend=backend,
+        qc_notes=qc["notes"],
+    )
+    qc["panel_d_marginal_rows"] = marginal_rows
+    qc["panel_d_contrast_rows"] = contrast_rows
     return rows, qc
 
 
@@ -1685,6 +2071,8 @@ def run_confirmatory_inference(
 ) -> InferenceResult:
     """Run the full M10 inference stack with endpoint families kept separate."""
     mixed_rows: list[dict[str, object]] = []
+    mixed_marginal_rows: list[dict[str, object]] = []
+    mixed_contrast_rows: list[dict[str, object]] = []
     qc_rows: list[dict[str, object]] = []
 
     endpoint_duration = {
@@ -1702,6 +2090,8 @@ def run_confirmatory_inference(
             power_representation=PRIMARY_POWER_REPRESENTATION,
         )
         mixed_rows.extend(coef_rows)
+        mixed_marginal_rows.extend(list(qc.get("panel_d_marginal_rows") or []))
+        mixed_contrast_rows.extend(list(qc.get("panel_d_contrast_rows") or []))
         qc_rows.append(qc)
         # Explicit guardrail: D120/D60 never marked primary.
         if endpoint_name != ENDPOINT_ZLPI:
@@ -1782,6 +2172,8 @@ def run_confirmatory_inference(
 
     return InferenceResult(
         mixed_model_rows=tuple(mixed_rows),
+        mixed_model_marginal_rows=tuple(mixed_marginal_rows),
+        mixed_model_contrast_rows=tuple(mixed_contrast_rows),
         dataset_effect_rows=tuple(dataset_effects),
         meta_rows=tuple(meta_rows),
         loo_rows=tuple(loo_rows),
@@ -1821,6 +2213,9 @@ def write_inference_outputs(
     output_path.mkdir(parents=True, exist_ok=True)
     paths = {
         "mixed_model_results": output_path / MIXED_MODEL_RESULTS_FILENAME,
+        "mixed_model_marginal_estimates": output_path
+        / MIXED_MODEL_MARGINAL_ESTIMATES_FILENAME,
+        "mixed_model_contrasts": output_path / MIXED_MODEL_CONTRASTS_FILENAME,
         "dataset_effects": output_path / DATASET_EFFECTS_FILENAME,
         "meta_analysis_results": output_path / META_ANALYSIS_RESULTS_FILENAME,
         "leave_one_dataset_out": output_path / LEAVE_ONE_DATASET_OUT_FILENAME,
@@ -1858,6 +2253,16 @@ def write_inference_outputs(
             }
         ]
     _write_csv(paths["mixed_model_results"], result.mixed_model_rows, MIXED_MODEL_FIELDS)
+    _write_csv(
+        paths["mixed_model_marginal_estimates"],
+        result.mixed_model_marginal_rows,
+        MIXED_MODEL_MARGINAL_FIELDS,
+    )
+    _write_csv(
+        paths["mixed_model_contrasts"],
+        result.mixed_model_contrast_rows,
+        MIXED_MODEL_CONTRAST_FIELDS,
+    )
     _write_csv(paths["dataset_effects"], result.dataset_effect_rows, DATASET_EFFECT_FIELDS)
     _write_csv(paths["meta_analysis_results"], result.meta_rows, META_FIELDS)
     _write_csv(paths["leave_one_dataset_out"], loo_rows, LOO_FIELDS)
@@ -1904,7 +2309,13 @@ __all__ = [
     "LEAVE_ONE_DATASET_OUT_FILENAME",
     "META_ANALYSIS_RESULTS_FILENAME",
     "META_EXCLUDED_DATASETS",
+    "MIXED_MODEL_CONTRASTS_FILENAME",
+    "MIXED_MODEL_FORMULA_CORE",
+    "MIXED_MODEL_MARGINAL_ESTIMATES_FILENAME",
     "MIXED_MODEL_RESULTS_FILENAME",
+    "PANEL_D_BANDS",
+    "PANEL_D_BAND_EXPORT_LABELS",
+    "PANEL_D_STATE_EXPORT_LABELS",
     "PRIMARY_META_CONTRASTS",
     "PRIMARY_PAIRED_DATASETS",
     "PRIMARY_STATE_CONTRASTS",
@@ -1914,6 +2325,7 @@ __all__ = [
     "InferenceResult",
     "apply_multiplicity",
     "bh_fdr",
+    "compute_mixed_model_panel_d_estimates",
     "estimate_dataset_effects",
     "fit_mixed_model",
     "hierarchical_peak_parameter_summaries",

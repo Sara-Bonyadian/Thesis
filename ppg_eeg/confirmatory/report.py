@@ -379,10 +379,10 @@ def build_visual_review_checklist() -> list[dict[str, object]]:
             "status": "pending_review",
         },
         {
-            "item_id": "fig2_mixedlm_coefs",
+            "item_id": "fig2_mixedlm_band_state",
             "figure_id": "figure2",
             "export_category": "manuscript",
-            "check": "Panel D shows absolute-model coefficients (not approximated marginal means)",
+            "check": "Panel D shows Fisher-z ZLPI band×state interaction with alpha-versus-other contrasts",
             "status": "pending_review",
         },
         {

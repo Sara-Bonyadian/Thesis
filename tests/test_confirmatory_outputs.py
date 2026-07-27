@@ -309,6 +309,85 @@ def _seed_frozen_outputs(root: Path) -> None:
     ]
     _write_csv(root / "mixed_model_results.csv", mixed_rows)
 
+    marginal_rows = []
+    for band in ("theta", "alpha", "beta", "gamma"):
+        for state, est in (
+            ("low cognitive demand", 0.40),
+            ("high cognitive demand", 0.25),
+        ):
+            marginal_rows.append(
+                {
+                    "endpoint_name": ENDPOINT_ZLPI,
+                    "duration_s": 240,
+                    "power_representation": "absolute_log10",
+                    "is_primary_analysis": True,
+                    "dataset_scope": "PRIMARY_META_pooled",
+                    "band": band,
+                    "state": state,
+                    "estimated_zlpi": est + (0.02 if band == "alpha" else 0.0),
+                    "standard_error": 0.04,
+                    "ci_low": est - 0.08,
+                    "ci_high": est + 0.08,
+                    "n_participants": 12,
+                    "n_observations": 48,
+                    "model_formula": (
+                        "endpoint_index ~ C(state) * C(band) + C(modality) + mean_hr"
+                    ),
+                    "covariance_method": "participant_cluster_robust",
+                    "covariate_prediction_method": "mean_hr=sample_mean;modality=sample_mode",
+                    "model_backend": "ols_cluster_participant",
+                    "converged": True,
+                    "notes": "seed",
+                }
+            )
+    _write_csv(root / "mixed_model_marginal_estimates.csv", marginal_rows)
+
+    contrast_rows = [
+        {
+            "endpoint_name": ENDPOINT_ZLPI,
+            "duration_s": 240,
+            "power_representation": "absolute_log10",
+            "is_primary_analysis": True,
+            "dataset_scope": "PRIMARY_META_pooled",
+            "contrast_type": "within_band_state_effect",
+            "contrast_name": f"{band}_high_minus_low",
+            "contrast_direction": f"estimated ZLPI({band}, high) minus low",
+            "estimate": -0.15,
+            "standard_error": 0.03,
+            "ci_low": -0.21,
+            "ci_high": -0.09,
+            "p_value": 0.01,
+            "covariance_method": "participant_cluster_robust",
+            "model_backend": "ols_cluster_participant",
+            "converged": True,
+            "notes": "seed",
+        }
+        for band in ("theta", "alpha", "beta", "gamma")
+    ]
+    for other in ("theta", "beta", "gamma"):
+        contrast_rows.append(
+            {
+                "endpoint_name": ENDPOINT_ZLPI,
+                "duration_s": 240,
+                "power_representation": "absolute_log10",
+                "is_primary_analysis": True,
+                "dataset_scope": "PRIMARY_META_pooled",
+                "contrast_type": "alpha_vs_other_state_effect",
+                "contrast_name": f"alpha_minus_{other}_state_effect",
+                "contrast_direction": f"(alpha high−low) minus ({other} high−low)",
+                "estimate": -0.02,
+                "standard_error": 0.02,
+                "ci_low": -0.06,
+                "ci_high": 0.02,
+                "p_value": 0.4,
+                "covariance_method": "participant_cluster_robust",
+                "model_backend": "ols_cluster_participant",
+                "converged": True,
+                "notes": "seed",
+            }
+        )
+    _write_csv(root / "mixed_model_contrasts.csv", contrast_rows)
+
     equivalence = [
         {
             "dataset_id": "ds003838",
@@ -709,6 +788,8 @@ class TestFigures(unittest.TestCase):
                 "figure2_panel_a_wiring_gaps.csv",
                 "figure2_panel_b_lag_difference_curves.csv",
                 "figure2_panel_c_alpha_meta_forest.csv",
+                "figure2_panel_d_marginal_estimates.csv",
+                "figure2_panel_d_contrasts.csv",
                 "figure2_panel_d_mixedlm_coefficients.csv",
                 "figure2_panel_e_paired_peaks.csv",
                 "figure2_panel_f_graded_ds003690.csv",
@@ -737,11 +818,17 @@ class TestFigures(unittest.TestCase):
             self.assertIn("no percent attenuation", caption2)
             self.assertIn("no cluster-permutation", caption2)
             self.assertNotIn("% attenuation", caption2)
-            with (out / "source_data" / "figure2_panel_d_mixedlm_coefficients.csv").open(
+            with (out / "source_data" / "figure2_panel_d_marginal_estimates.csv").open(
                 encoding="utf-8", newline=""
             ) as handle:
                 f2_d = list(csv.DictReader(handle))
-            self.assertTrue(any("state" in row["term"].casefold() for row in f2_d))
+            self.assertEqual(len(f2_d), 8)
+            self.assertEqual({row["band"] for row in f2_d}, {"theta", "alpha", "beta", "gamma"})
+            with (out / "source_data" / "figure2_panel_d_contrasts.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                f2_d_contrasts = list(csv.DictReader(handle))
+            self.assertEqual(len(f2_d_contrasts), 7)
             with (out / "source_data" / "figure2_panel_f_graded_ds003690.csv").open(
                 encoding="utf-8", newline=""
             ) as handle:

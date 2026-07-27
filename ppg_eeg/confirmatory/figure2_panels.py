@@ -34,7 +34,12 @@ from .forest_display import (
     hiit_session_sensitivity_forest_rows,
     primary_meta_alpha_forest_rows,
 )
-from .inference import PRIMARY_META_CONTRASTS
+from .inference import (
+    MIXED_MODEL_CONTRAST_FIELDS,
+    MIXED_MODEL_MARGINAL_FIELDS,
+    PRIMARY_META_CONTRASTS,
+    fit_mixed_model,
+)
 from .manifest import FigurePanelSource
 from .protocol_audit import PROTOCOL_SPECS
 
@@ -44,6 +49,19 @@ HIIT_COMBINED_CONTRAST_ID = "hiit_combined_ph_ps_pre_post_mean"
 HIIT_SESSION_LAG_AGGREGATION = "session_subject_mean_of_available_pre_post_curves"
 HIIT_MATCHED_PAIR_AGGREGATION = "matched_observation_pairs"
 HIIT_CLUSTER_BOOTSTRAP_CI_METHOD = "session_subject_cluster_bootstrap"
+
+PANEL_D_DISPLAY_BANDS = ("theta", "alpha", "beta", "gamma")
+PANEL_D_STATE_SHORT = {
+    "low cognitive demand": "Low",
+    "high cognitive demand": "High",
+}
+PANEL_D_MARGINAL_EXPORT_FIELDS = MIXED_MODEL_MARGINAL_FIELDS
+PANEL_D_CONTRAST_EXPORT_FIELDS = MIXED_MODEL_CONTRAST_FIELDS
+# Contrast-strip layout (display only; top → bottom).
+PANEL_D_ALPHA_CONTRAST_ORDER = ("gamma", "beta", "theta")
+PANEL_D_CONTRAST_ROW_SPACING = 1.75
+PANEL_D_MAIN_CONTRAST_HEIGHT_RATIOS = (2.15, 1.85)
+PANEL_D_MAIN_CONTRAST_HSPACE = 0.72
 
 
 def _fig():
@@ -743,6 +761,292 @@ def _endpoint_label() -> str:
     return f._endpoint_display(ENDPOINT_ZLPI)
 
 
+def _filter_primary_panel_d_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    f = _fig()
+    selected: list[dict[str, object]] = []
+    for row in rows:
+        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold() != ENDPOINT_ZLPI:
+            continue
+        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
+            continue
+        if (
+            f._as_str(row.get("power_representation"), f.PRIMARY_REPRESENTATION).casefold()
+            != f.PRIMARY_REPRESENTATION
+        ):
+            continue
+        if str(row.get("is_primary_analysis", "true")).lower() not in {
+            "true",
+            "1",
+            "yes",
+            "",
+        }:
+            continue
+        selected.append(dict(row))
+    return selected
+
+
+def _load_panel_d_tables(
+    inputs: Mapping[str, Path | None],
+    *,
+    panel_a_hiit_sensitivity: bool,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    """Load or compute Panel D marginal estimates, contrasts, and coefficient rows."""
+    f = _fig()
+    mixed = f.read_csv_rows(inputs.get("mixed_model"))
+    marginal = _filter_primary_panel_d_rows(
+        f.read_csv_rows(inputs.get("mixed_model_marginal"))
+    )
+    contrasts = _filter_primary_panel_d_rows(
+        f.read_csv_rows(inputs.get("mixed_model_contrasts"))
+    )
+    coef_rows: list[dict[str, object]] = []
+    for row in mixed:
+        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold() != ENDPOINT_ZLPI:
+            continue
+        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
+            continue
+        if (
+            f._as_str(row.get("power_representation"), f.PRIMARY_REPRESENTATION).casefold()
+            != f.PRIMARY_REPRESENTATION
+        ):
+            continue
+        if str(row.get("is_primary_analysis", "true")).lower() not in {
+            "true",
+            "1",
+            "yes",
+            "",
+        }:
+            continue
+        term = f._as_str(row.get("term"))
+        coef = f._as_float(row.get("coef"))
+        if term and math.isfinite(coef):
+            coef_rows.append(dict(row))
+
+    if not marginal:
+        subject_rows = f.read_csv_rows(inputs.get("subject_level"))
+        if subject_rows:
+            coef_rows, qc = fit_mixed_model(subject_rows, endpoint_name=ENDPOINT_ZLPI)
+            marginal = list(qc.get("panel_d_marginal_rows") or [])
+            contrasts = list(qc.get("panel_d_contrast_rows") or [])
+            if panel_a_hiit_sensitivity and marginal:
+                for row in marginal:
+                    row["dataset_scope"] = "HIIT_sensitivity_display"
+                for row in contrasts:
+                    row["dataset_scope"] = "HIIT_sensitivity_display"
+
+    return marginal, contrasts, coef_rows
+
+
+def _panel_d_band_index(band: str) -> int:
+    key = str(band).strip().casefold()
+    try:
+        return PANEL_D_DISPLAY_BANDS.index(key)
+    except ValueError:
+        return len(PANEL_D_DISPLAY_BANDS)
+
+
+def _panel_d_alpha_contrast_other_band(contrast_name: str) -> str:
+    return (
+        str(contrast_name)
+        .replace("alpha_minus_", "")
+        .replace("_state_effect", "")
+        .strip()
+        .casefold()
+    )
+
+
+def _panel_d_alpha_contrast_sort_key(row: Mapping[str, object]) -> int:
+    other = _panel_d_alpha_contrast_other_band(str(row.get("contrast_name", "")))
+    try:
+        return PANEL_D_ALPHA_CONTRAST_ORDER.index(other)
+    except ValueError:
+        return len(PANEL_D_ALPHA_CONTRAST_ORDER)
+
+
+def _render_panel_d_estimation_plot(
+    ax_main: plt.Axes,
+    ax_contrast: plt.Axes,
+    marginal_rows: Sequence[Mapping[str, object]],
+    contrast_rows: Sequence[Mapping[str, object]],
+    *,
+    panel_d_hiit_sensitivity: bool,
+) -> tuple[str, list[plt.Line2D]]:
+    """Draw Panel D estimates/contrasts. Title/legend are placed by the caller."""
+    f = _fig()
+    title = (
+        "HIIT Sensitivity: band × state interaction"
+        if panel_d_hiit_sensitivity
+        else "Band × state interaction"
+    )
+    legend_handles = [
+        plt.Line2D([0], [0], color=f.PALETTE["blue"], marker="o", linestyle="", label="Low demand"),
+        plt.Line2D(
+            [0], [0], color=f.PALETTE["vermillion"], marker="o", linestyle="", label="High demand"
+        ),
+    ]
+
+    if not marginal_rows:
+        f._mark_empty_panel(
+            ax_main,
+            "No model-estimated Fisher-z ZLPI for primary D240 ZLPI.",
+            xlabel="Frequency band",
+            ylabel=f.FIGURE2_PANEL_D_OUTCOME_LABEL,
+        )
+        ax_contrast.set_visible(False)
+        return title, legend_handles
+
+    low_color = f.PALETTE["blue"]
+    high_color = f.PALETTE["vermillion"]
+    alpha_fill = (*plt.matplotlib.colors.to_rgb(f.PALETTE["orange"]), 0.12)
+    x_positions = np.arange(len(PANEL_D_DISPLAY_BANDS), dtype=float)
+    offset = 0.16
+
+    for row in sorted(
+        marginal_rows,
+        key=lambda r: (
+            _panel_d_band_index(str(r.get("band", ""))),
+            0 if "low" in str(r.get("state", "")).casefold() else 1,
+        ),
+    ):
+        band = f._as_str(row.get("band")).casefold()
+        state = f._as_str(row.get("state")).casefold()
+        if band not in PANEL_D_DISPLAY_BANDS:
+            continue
+        xi = float(PANEL_D_DISPLAY_BANDS.index(band))
+        is_low = "low" in state
+        xpos = xi - offset if is_low else xi + offset
+        est = f._as_float(row.get("estimated_zlpi"))
+        lo = f._as_float(row.get("ci_low"))
+        hi = f._as_float(row.get("ci_high"))
+        color = low_color if is_low else high_color
+        lw = f.LINE_WIDTH + (0.6 if band == "alpha" else 0.0)
+        ms = f.MARKER_SIZE + (1 if band == "alpha" else 0)
+        alpha_m = 1.0 if band == "alpha" else 0.88
+        if math.isfinite(lo) and math.isfinite(hi):
+            yerr = [[est - lo], [hi - est]]
+        else:
+            yerr = None
+        ax_main.errorbar(
+            xpos,
+            est,
+            yerr=yerr,
+            fmt="o",
+            color=color,
+            markersize=ms,
+            capsize=3,
+            elinewidth=lw,
+            alpha=alpha_m,
+            zorder=4 if band == "alpha" else 3,
+        )
+
+    alpha_idx = PANEL_D_DISPLAY_BANDS.index("alpha")
+    ax_main.axvspan(
+        alpha_idx - 0.45,
+        alpha_idx + 0.45,
+        color=alpha_fill,
+        zorder=1,
+    )
+    ax_main.set_xticks(x_positions)
+    ax_main.set_xticklabels(
+        [b.capitalize() if b != "gamma" else "Gamma" for b in PANEL_D_DISPLAY_BANDS],
+        fontsize=f.FS_TICK - 1,
+    )
+    # Omit bottom xlabel when the contrast strip is present — it collides with
+    # the contrast subtitle; band names on the ticks are already sufficient.
+    ax_main.set_ylabel(f.FIGURE2_PANEL_D_OUTCOME_LABEL, fontsize=f.FS_AXIS - 2)
+    f._style_axes(ax_main)
+
+    alpha_contrasts = [
+        row
+        for row in contrast_rows
+        if f._as_str(row.get("contrast_type")) == "alpha_vs_other_state_effect"
+    ]
+    alpha_contrasts = sorted(alpha_contrasts, key=_panel_d_alpha_contrast_sort_key)
+    if not alpha_contrasts:
+        ax_main.set_xlabel("Frequency band", fontsize=f.FS_AXIS - 2)
+        ax_contrast.set_visible(False)
+        return title, legend_handles
+
+    n_contrast = len(alpha_contrasts)
+    y_positions = [
+        (n_contrast - 1 - i) * PANEL_D_CONTRAST_ROW_SPACING
+        for i in range(n_contrast)
+    ]
+    ci_highs: list[float] = []
+    p_value_labels: list[tuple[float, float, float]] = []
+    for ypos, row in zip(y_positions, alpha_contrasts, strict=True):
+        est = f._as_float(row.get("estimate"))
+        lo = f._as_float(row.get("ci_low"))
+        hi = f._as_float(row.get("ci_high"))
+        p_value = f._as_float(row.get("p_value"))
+        xerr = None
+        if math.isfinite(lo) and math.isfinite(hi):
+            xerr = [[est - lo], [hi - est]]
+            ci_highs.append(hi)
+        ax_contrast.errorbar(
+            est,
+            ypos,
+            xerr=xerr,
+            fmt="D",
+            color=f.PALETTE["orange"],
+            markersize=f.MARKER_SIZE - 2,
+            capsize=3,
+            elinewidth=f.LINE_WIDTH,
+            zorder=3,
+        )
+        if math.isfinite(p_value):
+            p_value_labels.append((ypos, hi if math.isfinite(hi) else est, p_value))
+    f._ref_vline(ax_contrast, 0.0)
+    ax_contrast.set_yticks(y_positions)
+    ax_contrast.set_yticklabels(
+        [
+            f._as_str(r.get("contrast_name"))
+            .replace("alpha_minus_", "α − ")
+            .replace("_state_effect", "")
+            .replace("_", " ")
+            for r in alpha_contrasts
+        ],
+        fontsize=f.FS_TICK - 4,
+    )
+    ax_contrast.set_xlabel("Contrast (95% CI)", fontsize=f.FS_AXIS - 3, labelpad=6)
+    # Keep title pad small; main-panel "Frequency band" xlabel is omitted above
+    # so this caption no longer collides with the upper axis label.
+    ax_contrast.set_title(
+        "Alpha vs other-band state-effect contrasts\n"
+        "(negative = stronger alpha attenuation)",
+        fontsize=f.FS_TICK - 3,
+        loc="left",
+        pad=8,
+    )
+    f._style_axes(ax_contrast)
+    y_pad = 0.70 * PANEL_D_CONTRAST_ROW_SPACING
+    ax_contrast.set_ylim(
+        -y_pad,
+        (n_contrast - 1) * PANEL_D_CONTRAST_ROW_SPACING + y_pad,
+    )
+    xmin, xmax = ax_contrast.get_xlim()
+    data_xmax = max(ci_highs) if ci_highs else xmax
+    x_span = max(xmax - xmin, 1e-6)
+    ax_contrast.set_xlim(xmin, max(xmax, data_xmax + 0.32 * x_span))
+    xmin, xmax = ax_contrast.get_xlim()
+    x_span = max(xmax - xmin, 1e-6)
+    for ypos, anchor, p_value in p_value_labels:
+        text_x = anchor + 0.12 * x_span
+        ax_contrast.text(
+            text_x,
+            ypos,
+            f"p={p_value:.3g}",
+            va="center",
+            ha="left",
+            fontsize=f.FS_TICK - 5,
+            color=f.PALETTE["dark_gray"],
+            clip_on=False,
+        )
+    return title, legend_handles
+
+
 def render_figure2(
     inputs: Mapping[str, Path | None],
     output_dir: Path,
@@ -798,11 +1102,18 @@ def render_figure2(
     panel_b_gaps = panel_a_gaps
     panel_b_hiit_sensitivity = panel_a_hiit_sensitivity
 
-    fig = plt.figure(figsize=(17.0, 16.0), constrained_layout=False)
-    gs = fig.add_gridspec(3, 2, hspace=0.50, wspace=0.36)
+    fig = plt.figure(figsize=(17.0, 17.8), constrained_layout=False)
+    gs = fig.add_gridspec(3, 2, hspace=0.68, wspace=0.38)
 
     # ----- Panel A: matched low vs effort lag curves -----
-    gs_a = GridSpecFromSubplotSpec(2, 2, subplot_spec=gs[0, 0], hspace=0.35, wspace=0.28)
+    gs_a_wrap = GridSpecFromSubplotSpec(
+        2, 1, subplot_spec=gs[0, 0], height_ratios=[0.18, 1.0], hspace=0.06
+    )
+    ax_a_title = fig.add_subplot(gs_a_wrap[0, 0])
+    ax_a_title.axis("off")
+    gs_a = GridSpecFromSubplotSpec(
+        2, 2, subplot_spec=gs_a_wrap[1, 0], hspace=0.40, wspace=0.28
+    )
     panel_a_export: list[dict[str, object]] = []
     has_a = False
     panel_a_expected_na = False
@@ -812,6 +1123,17 @@ def render_figure2(
         "HIIT Sensitivity: matched low vs effort curves"
         if panel_a_hiit_sensitivity
         else "Matched low vs effort curves"
+    )
+    ax_a_title.text(
+        0.0,
+        0.40,
+        panel_a_title,
+        transform=ax_a_title.transAxes,
+        ha="left",
+        va="center",
+        fontsize=f.FS_PANEL_TITLE - 1,
+        fontweight="bold",
+        color="black",
     )
     if panel_a_series:
         for bi, band in enumerate(f.BAND_ORDER):
@@ -905,14 +1227,24 @@ def render_figure2(
                 )
             f._ref_vline(ax, 0.0)
             ax.set_xlim(-60, 60)
-            ax.set_title(f._band_display(band), fontsize=f.FS_TICK)
+            ax.set_title(f._band_display(band), fontsize=f.FS_TICK - 1, pad=3)
             if bi >= 2:
                 ax.set_xlabel(f.LAG_XLABEL, fontsize=f.FS_AXIS - 4)
             if bi % 2 == 0:
                 ax.set_ylabel(f.Z_YLABEL, fontsize=f.FS_AXIS - 4)
             f._style_axes(ax)
             if bi == 0:
-                ax.legend(fontsize=f.FS_LEGEND - 4, loc="upper right", frameon=False)
+                ax.legend(
+                    fontsize=f.FS_LEGEND - 3,
+                    loc="upper right",
+                    frameon=True,
+                    fancybox=False,
+                    edgecolor="#CCCCCC",
+                    framealpha=0.95,
+                    borderpad=0.35,
+                    handletextpad=0.35,
+                    labelspacing=0.25,
+                )
         assert ax_a0 is not None
         f._add_panel_label(ax_a0, "A")
         # Exterior title placed after subplots_adjust (see below).
@@ -1054,7 +1386,14 @@ def render_figure2(
     )
 
     # ----- Panel B: matched lag-difference curves -----
-    gs_b = GridSpecFromSubplotSpec(2, 2, subplot_spec=gs[0, 1], hspace=0.35, wspace=0.28)
+    gs_b_wrap = GridSpecFromSubplotSpec(
+        2, 1, subplot_spec=gs[0, 1], height_ratios=[0.18, 1.0], hspace=0.06
+    )
+    ax_b_title = fig.add_subplot(gs_b_wrap[0, 0])
+    ax_b_title.axis("off")
+    gs_b = GridSpecFromSubplotSpec(
+        2, 2, subplot_spec=gs_b_wrap[1, 0], hspace=0.40, wspace=0.28
+    )
     panel_b_export: list[dict[str, object]] = []
     ax_b0: plt.Axes | None = None
     has_b_nested = False
@@ -1062,6 +1401,17 @@ def render_figure2(
         "HIIT Sensitivity: matched lag-difference curves"
         if panel_b_hiit_sensitivity
         else "Matched lag-difference curves"
+    )
+    ax_b_title.text(
+        0.0,
+        0.40,
+        panel_b_title,
+        transform=ax_b_title.transAxes,
+        ha="left",
+        va="center",
+        fontsize=f.FS_PANEL_TITLE - 1,
+        fontweight="bold",
+        color="black",
     )
     if panel_b_series:
         for bi, band in enumerate(f.BAND_ORDER):
@@ -1107,7 +1457,7 @@ def render_figure2(
             f._ref_vline(ax, 0.0)
             f._ref_hline(ax, 0.0)
             ax.set_xlim(-60, 60)
-            ax.set_title(f._band_display(band), fontsize=f.FS_TICK)
+            ax.set_title(f._band_display(band), fontsize=f.FS_TICK - 1, pad=3)
             if bi >= 2:
                 ax.set_xlabel(f.LAG_XLABEL, fontsize=f.FS_AXIS - 4)
             if bi % 2 == 0:
@@ -1355,120 +1705,62 @@ def render_figure2(
         )
     )
 
-    # ----- Panel D: MixedLM coefficient forest -----
-    ax_d = fig.add_subplot(gs[1, 1])
-    coef_rows: list[dict[str, object]] = []
-    backends: set[str] = set()
-    for row in mixed:
-        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold() != ENDPOINT_ZLPI:
-            continue
-        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
-            continue
-        if (
-            f._as_str(row.get("power_representation"), f.PRIMARY_REPRESENTATION).casefold()
-            != f.PRIMARY_REPRESENTATION
-        ):
-            continue
-        if str(row.get("is_primary_analysis", "true")).lower() not in {
-            "true",
-            "1",
-            "yes",
-            "",
-        }:
-            continue
-        term = f._as_str(row.get("term"))
-        coef = f._as_float(row.get("coef"))
-        if not term or not math.isfinite(coef):
-            continue
-        backends.add(f._as_str(row.get("model_backend"), "unknown"))
-        coef_rows.append(
-            {
-                "term": term,
-                "coef": coef,
-                "stderr": f._as_float(row.get("stderr")),
-                "ci_low": f._as_float(row.get("ci_low")),
-                "ci_high": f._as_float(row.get("ci_high")),
-                "p_value": f._as_float(row.get("p_value")),
-                "model_backend": f._as_str(row.get("model_backend")),
-                "converged": f._as_str(row.get("converged")),
-                "n_obs": f._as_int(row.get("n_obs")),
-                "n_groups": f._as_int(row.get("n_groups")),
-                "notes": f._as_str(row.get("notes")),
-            }
-        )
-    # Prefer interaction / state / band terms first for readability.
-    def _term_sort(term: str) -> tuple[int, str]:
-        t = term.casefold()
-        if t == "intercept":
-            return (0, t)
-        if "state" in t and "band" in t:
-            return (1, t)
-        if "state" in t:
-            return (2, t)
-        if "band" in t:
-            return (3, t)
-        return (4, t)
-
-    coef_rows = sorted(coef_rows, key=lambda r: _term_sort(str(r["term"])))
-    panel_d_hiit_sensitivity = bool(coef_rows) and panel_a_hiit_sensitivity
-    panel_d_title = (
-        "HIIT Sensitivity: absolute state coefficients"
-        if panel_d_hiit_sensitivity
-        else "Absolute state coefficients"
+    # ----- Panel D: band × state model-estimated ZLPI -----
+    # Title/legend placed after subplots_adjust so "D" + title share one baseline
+    # and the legend sits directly under the title (left-aligned).
+    gs_d = GridSpecFromSubplotSpec(
+        2,
+        1,
+        subplot_spec=gs[1, 1],
+        height_ratios=list(PANEL_D_MAIN_CONTRAST_HEIGHT_RATIOS),
+        hspace=PANEL_D_MAIN_CONTRAST_HSPACE,
     )
-    if coef_rows:
-        for i, row in enumerate(coef_rows):
-            pe = float(row["coef"])
-            lo = float(row["ci_low"])
-            hi = float(row["ci_high"])
-            xerr = None
-            if math.isfinite(lo) and math.isfinite(hi):
-                xerr = [[pe - lo], [hi - pe]]
-            ax_d.errorbar(
-                pe,
-                i,
-                xerr=xerr,
-                fmt="s",
-                color=f.PALETTE["dark_gray"],
-                markersize=f.MARKER_SIZE - 1,
-                capsize=3,
-                elinewidth=f.LINE_WIDTH,
-                zorder=3,
-            )
-        f._ref_vline(ax_d, 0.0)
-        ax_d.set_yticks(range(len(coef_rows)))
-        ax_d.set_yticklabels(
-            [_short_mixedlm_term_label(str(r["term"])) for r in coef_rows],
-            fontsize=f.FS_TICK - 3,
-        )
-        ax_d.set_xlabel("Coefficient (95% CI)", fontsize=f.FS_AXIS - 2)
-        f._style_axes(ax_d)
-        backend_note = ";".join(sorted(backends)) if backends else "unknown"
-        f._set_panel_title(ax_d, panel_d_title)
-        ax_d.text(
-            0.98,
-            0.02,
-            backend_note,
-            transform=ax_d.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=f.FS_TICK - 5,
-            color=f.PALETTE["dark_gray"],
-            style="italic",
-        )
-    else:
-        f._mark_empty_panel(
-            ax_d,
-            "No mixed_model_results for primary D240 ZLPI.",
-            xlabel=f"Coefficient ({f.CI_95_LABEL})",
-            ylabel="Term",
-        )
-        f._set_panel_title(ax_d, panel_d_title)
-    f._add_panel_label(ax_d, "D")
-    panel_d_csv = source_dir / "figure2_panel_d_mixedlm_coefficients.csv"
+    ax_d_main = fig.add_subplot(gs_d[0, 0])
+    ax_d_contrast = fig.add_subplot(gs_d[1, 0])
+    marginal_rows, contrast_rows, coef_rows = _load_panel_d_tables(
+        inputs,
+        panel_a_hiit_sensitivity=panel_a_hiit_sensitivity,
+    )
+    panel_d_hiit_sensitivity = bool(marginal_rows) and panel_a_hiit_sensitivity
+    panel_d_title, panel_d_legend_handles = _render_panel_d_estimation_plot(
+        ax_d_main,
+        ax_d_contrast,
+        marginal_rows,
+        contrast_rows,
+        panel_d_hiit_sensitivity=panel_d_hiit_sensitivity,
+    )
+    panel_d_marginal_csv = source_dir / "figure2_panel_d_marginal_estimates.csv"
+    panel_d_contrast_csv = source_dir / "figure2_panel_d_contrasts.csv"
+    panel_d_coef_csv = source_dir / "figure2_panel_d_mixedlm_coefficients.csv"
     f.write_source_csv(
-        panel_d_csv,
-        coef_rows,
+        panel_d_marginal_csv,
+        marginal_rows,
+        PANEL_D_MARGINAL_EXPORT_FIELDS,
+    )
+    f.write_source_csv(
+        panel_d_contrast_csv,
+        contrast_rows,
+        PANEL_D_CONTRAST_EXPORT_FIELDS,
+    )
+    coef_export = [
+        {
+            "term": f._as_str(row.get("term")),
+            "coef": f._as_float(row.get("coef")),
+            "stderr": f._as_float(row.get("stderr")),
+            "ci_low": f._as_float(row.get("ci_low")),
+            "ci_high": f._as_float(row.get("ci_high")),
+            "p_value": f._as_float(row.get("p_value")),
+            "model_backend": f._as_str(row.get("model_backend")),
+            "converged": f._as_str(row.get("converged")),
+            "n_obs": f._as_int(row.get("n_obs")),
+            "n_groups": f._as_int(row.get("n_groups")),
+            "notes": f._as_str(row.get("notes")),
+        }
+        for row in coef_rows
+    ]
+    f.write_source_csv(
+        panel_d_coef_csv,
+        coef_export,
         (
             "term",
             "coef",
@@ -1483,46 +1775,50 @@ def render_figure2(
             "notes",
         ),
     )
-    source_paths.append(panel_d_csv)
+    source_paths.extend([panel_d_marginal_csv, panel_d_contrast_csv, panel_d_coef_csv])
     if panel_d_hiit_sensitivity:
         panel_d_keys = [
             "model=absolute_pooled_state",
-            "display=coefficients_not_marginal_means",
-            "vcov_available=false",
+            "display=model_estimated_zlpi",
+            "vcov_available=true",
             "cohort=HIIT_sensitivity_display",
             "enters_primary_meta=false",
             f"panel_status={f.PANEL_STATUS_SENSITIVITY_DISPLAY}",
         ]
         panel_d_notes = (
-            "HIIT Sensitivity (display-only): absolute pooled state model "
-            "coefficients from this sensitivity run. Excluded from PRIMARY_META; "
-            "not a primary confirmatory claim."
+            "HIIT Sensitivity (display-only): model-estimated Fisher-z ZLPI under "
+            "low and high cognitive demand by band from this sensitivity run. "
+            "Excluded from PRIMARY_META; not a primary confirmatory claim."
         )
-        panel_d_panel_title = "HIIT Sensitivity: absolute state coefficients"
+        panel_d_panel_title = "HIIT Sensitivity: band × state interaction"
     else:
         panel_d_keys = [
             "model=absolute_pooled_state",
-            "display=coefficients_not_marginal_means",
-            "vcov_available=false",
+            "display=model_estimated_zlpi",
+            "vcov_available=true",
         ]
         panel_d_notes = f.FIGURE2_PANEL_D_NOTE
-        panel_d_panel_title = "Absolute pooled state model coefficients"
+        panel_d_panel_title = "Band × state interaction"
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure2",
-            panel_id="mixedlm_coefficients",
+            panel_id="mixedlm_band_state_estimation",
             title=panel_d_panel_title,
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
-            input_tables=[str(inputs.get("mixed_model") or "")],
-            source_data_csv=str(panel_d_csv),
+            input_tables=[
+                str(inputs.get("mixed_model_marginal") or inputs.get("mixed_model") or ""),
+                str(inputs.get("mixed_model_contrasts") or ""),
+                str(inputs.get("subject_level") or ""),
+            ],
+            source_data_csv=str(panel_d_marginal_csv),
             analysis_keys=panel_d_keys,
             notes=panel_d_notes,
         )
     )
 
     # ----- Panel E: paired low vs effort μ and FWHM -----
-    gs_e = GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[2, 0], wspace=0.75)
+    gs_e = GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[2, 0], wspace=0.95)
     ax_e_mu = fig.add_subplot(gs_e[0, 0])
     ax_e_fwhm = fig.add_subplot(gs_e[0, 1])
     panel_e_hiit_sensitivity = False
@@ -1556,15 +1852,13 @@ def render_figure2(
             }
         )
 
-    panel_e_mu_title = (
-        "HIIT Sensitivity: Peak μ (paired)"
+    # Short subplot titles avoid collision; HIIT context is in the panel letter/caption.
+    panel_e_mu_title = "Peak μ (paired)"
+    panel_e_fwhm_title = "FWHM (descriptive)"
+    panel_e_shared_title = (
+        "HIIT Sensitivity: paired peaks"
         if panel_e_hiit_sensitivity
-        else "Peak μ (paired)"
-    )
-    panel_e_fwhm_title = (
-        "HIIT Sensitivity: FWHM (descriptive)"
-        if panel_e_hiit_sensitivity
-        else "FWHM (descriptive)"
+        else ""
     )
     if peak_export or eq_export:
         ax_e_mu.axvspan(
@@ -1698,8 +1992,8 @@ def render_figure2(
             xlabel="FWHM (s)",
             ylabel=f.EEG_BAND_YLABEL,
         )
-    f._set_panel_title(ax_e_mu, panel_e_mu_title)
-    f._set_panel_title(ax_e_fwhm, panel_e_fwhm_title)
+    f._set_panel_title(ax_e_mu, panel_e_mu_title, fontsize=f.FS_PANEL_TITLE - 4, pad=8)
+    f._set_panel_title(ax_e_fwhm, panel_e_fwhm_title, fontsize=f.FS_PANEL_TITLE - 4, pad=8)
     f._add_panel_label(ax_e_mu, "E")
     panel_e_csv = source_dir / "figure2_panel_e_paired_peaks.csv"
     f.write_source_csv(
@@ -1861,9 +2155,9 @@ def render_figure2(
         f._mark_empty_panel(
             ax_f,
             (
-                f"Expected not applicable — {panel_f_na_detail} "
-                "Panel F requires the prespecified ds003690 graded contrasts "
-                "and is empty by design when that dataset is absent."
+                "Expected not applicable\n"
+                "(ds003690 graded contrasts absent)\n"
+                "Empty by design for this run."
             ),
             xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
             ylabel="Contrast · band",
@@ -1920,17 +2214,17 @@ def render_figure2(
         )
     )
 
-    fig.suptitle(f.FIGURE2_TITLE, fontsize=f.FS_SUPTITLE - 2, fontweight="bold", y=0.988)
+    fig.suptitle(f.FIGURE2_TITLE, fontsize=f.FS_SUPTITLE - 2, fontweight="bold", y=0.992)
     # Compact footer below axes; keep detailed prose in caption/changelog.
     fig.text(
         0.5,
-        0.012,
+        0.010,
         "\n".join(
             (
                 f.LAG_CONVENTION_NOTE,
-                "A/B: C5 pairs; paired bootstrap; no unpaired fallback; no cluster permutation. "
+                "A/B: C5 pairs; paired bootstrap; no unpaired fallback; no cluster permutation.",
                 "C: absolute α PRIMARY_META ΔZLPI (no % attenuation). "
-                "D: absolute-model coefficients (not marginal means). "
+                "D: Fisher-z ZLPI band×state interaction (low/high demand by band).",
                 "F: prespecified ds003690 graded contrasts only.",
             )
         ),
@@ -1938,31 +2232,63 @@ def render_figure2(
         va="bottom",
         fontsize=f.FS_TICK - 6,
         color=f.PALETTE["dark_gray"],
-        linespacing=1.35,
+        linespacing=1.40,
     )
-    fig.subplots_adjust(left=0.11, right=0.98, top=0.945, bottom=0.165)
-    # Nested A/B titles after layout so positions clear band subplot titles.
-    if has_a and ax_a0 is not None:
-        pos_a = gs[0, 0].get_position(fig)
+    # Extra top margin for the figure title; A/B panel titles live in reserved rows.
+    fig.subplots_adjust(left=0.11, right=0.98, top=0.945, bottom=0.145)
+    # Panel D: place "D" + title on one baseline above the axes; legend under title.
+    pos_d = gs[1, 1].get_position(fig)
+    title_y = pos_d.y1 + 0.034
+    # loc="lower left" keeps the legend box above this anchor (outside the axes).
+    legend_y = pos_d.y1 + 0.006
+    fig.text(
+        pos_d.x0 - 0.024,
+        title_y,
+        "D",
+        ha="left",
+        va="bottom",
+        fontsize=f.FS_PANEL_LABEL,
+        fontweight="bold",
+        fontfamily="sans-serif",
+        color=f.PALETTE["dark_gray"],
+        clip_on=False,
+        zorder=20,
+    )
+    fig.text(
+        pos_d.x0,
+        title_y,
+        panel_d_title,
+        ha="left",
+        va="bottom",
+        fontsize=f.FS_PANEL_TITLE - 1,
+        fontweight="bold",
+        color="black",
+        clip_on=False,
+        zorder=20,
+    )
+    fig.legend(
+        handles=panel_d_legend_handles,
+        loc="lower left",
+        bbox_to_anchor=(pos_d.x0, legend_y),
+        bbox_transform=fig.transFigure,
+        ncol=2,
+        fontsize=f.FS_TICK - 2,
+        frameon=False,
+        borderaxespad=0.0,
+        handletextpad=0.35,
+        columnspacing=1.2,
+    )
+    if panel_e_shared_title:
+        pos_e = gs[2, 0].get_position(fig)
         fig.text(
-            pos_a.x0,
-            min(pos_a.y1 + 0.010, 0.96),
-            panel_a_title,
+            pos_e.x0,
+            pos_e.y1 + 0.012,
+            panel_e_shared_title,
             ha="left",
             va="bottom",
             fontsize=f.FS_PANEL_TITLE - 2,
-            color=f.PALETTE["dark_gray"],
-        )
-    if has_b_nested and ax_b0 is not None:
-        pos_b = gs[0, 1].get_position(fig)
-        fig.text(
-            pos_b.x0,
-            min(pos_b.y1 + 0.010, 0.96),
-            panel_b_title,
-            ha="left",
-            va="bottom",
-            fontsize=f.FS_PANEL_TITLE - 2,
-            color=f.PALETTE["dark_gray"],
+            fontweight="bold",
+            color="black",
         )
 
     if panel_a_hiit_sensitivity:
@@ -2007,8 +2333,11 @@ def render_figure2(
         panel_c_caption = f"C: {f.FIGURE2_PANEL_C_NOTE}\n"
     if panel_d_hiit_sensitivity:
         panel_d_caption = (
-            "D: HIIT Sensitivity (display-only) — absolute pooled state model "
-            "coefficients from this sensitivity run; not PRIMARY_META.\n"
+            "D: HIIT Sensitivity (display-only) — band×state interaction; "
+            "model-estimated Fisher-z ZLPI under low and high cognitive demand by "
+            "band (endpoint_index on the Fisher-z reporting scale); "
+            "alpha-versus-other-band state-effect contrasts below main panel "
+            "(negative ⇒ stronger alpha attenuation); not PRIMARY_META.\n"
         )
     else:
         panel_d_caption = f"D: {f.FIGURE2_PANEL_D_NOTE}\n"
@@ -2063,13 +2392,15 @@ def render_figure2(
             f"{changelog_extra}"
             "- Panel C: absolute PRIMARY_META α ΔZLPI forest; no percent attenuation; "
             "one combined HIIT display-only sensitivity row never enters RE pooling.\n"
-            "- Panel D: MixedLM coefficient forest (not marginal means).\n"
+            "- Panel D: Fisher-z ZLPI band×state interaction (low/high demand); "
+            "alpha-versus-other-band state-effect contrasts "
+            "(negative ⇒ stronger alpha attenuation).\n"
             "- Panel E: paired low/effort μ and FWHM; FWHM descriptive.\n"
             "- Panel F: prespecified ds003690 graded contrasts only.\n"
             "- Replaces prior 2×2 layout (paired scatter / all-band meta / "
             "D180 / μ-TOST).\n"
-            "- Viz refinement: shorter panel titles; shortened Panel D coefficient "
-            "display labels; wider Panel E μ–FWHM gap; footer cleared from axes.\n"
+            "- Viz refinement: shorter panel titles; Panel D estimation plot with "
+            "alpha emphasis; wider Panel E μ–FWHM gap; footer cleared from axes.\n"
         ),
         encoding="utf-8",
     )

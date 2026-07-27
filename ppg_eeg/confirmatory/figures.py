@@ -240,10 +240,14 @@ FIGURE2_PANEL_C_NOTE = (
     "(PH/PS session subjects counted separately, Panel B-aligned) and is excluded "
     "from the pooled random-effects meta-analysis."
 )
+FIGURE2_PANEL_D_OUTCOME_LABEL = "Model-estimated Fisher-z ZLPI"
 FIGURE2_PANEL_D_NOTE = (
-    "Absolute pooled state model — MixedLM/OLS coefficients with stored CIs "
-    "(not paired Δ; not approximated state×band marginal means; frozen output "
-    "lacks parameter covariance)."
+    "Band×state interaction — model-estimated Fisher-z ZLPI (endpoint_index on "
+    "the Fisher-z reporting scale; absolute log10 power representation) under low "
+    "and high cognitive demand for theta, alpha, beta, and gamma; estimates and "
+    "95% CIs from the fixed-effects covariance matrix with mean HR held at the "
+    "sample mean; alpha-versus-other-band state-effect contrasts shown in-panel "
+    "(negative contrast ⇒ stronger alpha attenuation under high demand)."
 )
 FIGURE2_PANEL_E_NOTE = (
     "Paired low-demand vs effort μ and FWHM from C5; one PRIMARY_META contrast "
@@ -946,6 +950,8 @@ def resolve_reporting_inputs(confirmatory_root: str | Path) -> dict[str, Path | 
         "duration_sensitivity": "duration_sensitivity.csv",
         "eligibility": "eligibility_by_duration.csv",
         "mixed_model": "mixed_model_results.csv",
+        "mixed_model_marginal": "mixed_model_marginal_estimates.csv",
+        "mixed_model_contrasts": "mixed_model_contrasts.csv",
     }
     return {key: discover_named_file(root, name) for key, name in names.items()}
 
