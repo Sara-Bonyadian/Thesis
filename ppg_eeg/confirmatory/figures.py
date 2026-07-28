@@ -53,6 +53,12 @@ from .null_delta_inference import (
     leave_one_participant_out,
     secondary_band_null_fdr_table,
 )
+from .nulls import (
+    NULL_SURROGATE_VALUES_FILENAME,
+    NULL_TYPE_BLOCK_SHUFFLE,
+    NULL_TYPE_CIRCULAR_SHIFT,
+    NULL_TYPE_PHASE_RANDOMIZATION,
+)
 from .paired_delta_inference import infer_paired_deltas_cluster_aware
 
 FIGURE_DPI = 300
@@ -113,6 +119,11 @@ ENDPOINT_DISPLAY: dict[str, str] = {
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX: "SWPI",
 }
 PRIMARY_REPRESENTATION = "absolute_log10"
+PANEL_A_REQUIRED_NULL_TYPES: tuple[str, ...] = (
+    NULL_TYPE_CIRCULAR_SHIFT,
+    NULL_TYPE_PHASE_RANDOMIZATION,
+    NULL_TYPE_BLOCK_SHUFFLE,
+)
 
 # Typography (pt).
 FS_SUPTITLE = 22
@@ -250,9 +261,12 @@ FIGURE2_PANEL_D_NOTE = (
     "(negative contrast ⇒ stronger alpha attenuation under high demand)."
 )
 FIGURE2_PANEL_E_NOTE = (
-    "Paired low-demand vs effort μ and FWHM from C5; one PRIMARY_META contrast "
-    "per dataset; suppress μ when that state's peak is not identifiable; "
-    "FWHM descriptive only."
+    "State-specific Gaussian peak centers (μ) and widths (FWHM) for Rest and Task "
+    "by dataset and frequency band. Estimates and participant-clustered 95% CIs "
+    "are conditional on an identifiable peak in the corresponding state; Rest and "
+    "Task may have different sample sizes. Sample-size labels (R / T) report "
+    "identifiable observations / unique biological participants. Descriptive "
+    "only — not a formal paired Rest–Task test."
 )
 FIGURE2_PANEL_F_NOTE = (
     "Prespecified graded ds003690 contrasts (passive__simplert, "
@@ -289,10 +303,13 @@ FIGURE2_PANEL_B_HIIT_SENSITIVITY_NOTE = (
     "(not participant n)."
 )
 FIGURE2_PANEL_E_HIIT_SENSITIVITY_NOTE = (
-    "HIIT Sensitivity (display-only): paired Rest–Tetris peak μ and FWHM from "
-    "C5 matched pairs (PRE and POST each contribute; no PRE/POST or PH/PS "
-    "collapse). Suppress μ/FWHM when that state's peak is not identifiable; "
-    "FWHM descriptive only. Excluded from PRIMARY_META."
+    "HIIT Sensitivity (display-only): state-specific Rest and Task Gaussian peak "
+    "μ and FWHM from C5 matched pairs (PRE/POST each contribute; no PRE/POST or "
+    "PH/PS collapse). Suppress μ/FWHM independently when that state's peak is not "
+    "identifiable. Summaries = mean of biological-participant means with "
+    "participant-clustered percentile bootstrap 95% CIs. Sample-size labels "
+    "(R / T) report identifiable observations / unique biological participants. "
+    "Descriptive only; excluded from PRIMARY_META."
 )
 
 
@@ -337,13 +354,15 @@ FIGURE3_PANEL_B_FOOTNOTE_SHORT = (
 )
 FIGURE3_FIGSIZE = (15.5, 13.6)
 FIGURE3_SUBPLOT_ADJUST = {
-    "left": 0.12,
-    "right": 0.84,
-    "top": 0.925,
-    "bottom": 0.10,
+    "left": 0.14,
+    "right": 0.97,
+    "top": 0.90,
+    "bottom": 0.11,
     "wspace": 0.36,
-    "hspace": 0.42,
+    "hspace": 0.58,
 }
+PANEL_A_XLABEL = "Standardized ZLPI\nrelative to observation-specific null"
+PANEL_A_TITLE = "Observed theta ZLPI relative to autocorrelation-preserving nulls"
 FIGURE3_SUPPLEMENT_FIGSIZE = (14.5, 13.8)
 FIGURE3_SUPPLEMENT_SUBPLOT_ADJUST = {
     "left": 0.15,
@@ -943,6 +962,7 @@ def resolve_reporting_inputs(confirmatory_root: str | Path) -> dict[str, Path | 
         "peak_equivalence": "peak_center_equivalence.csv",
         "peak_hierarchical": "peak_hierarchical_summaries.csv",
         "null_subject": "null_subject_results.csv",
+        "null_surrogate_values": NULL_SURROGATE_VALUES_FILENAME,
         "null_summary": "null_summary.csv",
         "protocol_audit": "protocol_audit.csv",
         "sensitivity": "sensitivity_results.csv",
@@ -1272,6 +1292,597 @@ def _plot_dataset_null_forest(
     _set_panel_title(ax, title, fontsize=FS_PANEL_TITLE - 2, pad=10)
     if panel_label:
         _add_panel_label(ax, panel_label)
+
+
+def _null_display_label(null_type: str) -> str:
+    mapping = {
+        NULL_TYPE_CIRCULAR_SHIFT: "Circular shift",
+        NULL_TYPE_PHASE_RANDOMIZATION: "Phase randomized",
+        NULL_TYPE_BLOCK_SHUFFLE: "Block shuffled",
+    }
+    return mapping.get(_as_str(null_type).casefold(), _as_str(null_type).replace("_", " "))
+
+
+def _dataset_role_lookup(protocol_rows: Sequence[Mapping[str, object]]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for row in protocol_rows:
+        dataset_id = _as_str(row.get("dataset_id")).casefold()
+        role = _as_str(row.get("dataset_role")).casefold()
+        if dataset_id and role:
+            out[dataset_id] = role
+    return out
+
+
+def _panel_a_slice_null_row(row: Mapping[str, object]) -> bool:
+    return (
+        _as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold() == ENDPOINT_ZLPI
+        and _as_int(row.get("duration_s"), PRIMARY_DURATION_S) == PRIMARY_DURATION_S
+        and _as_str(row.get("band")).casefold() == PRIMARY_BAND
+        and _as_str(row.get("power_representation"), PRIMARY_REPRESENTATION).casefold()
+        == PRIMARY_REPRESENTATION
+    )
+
+
+def _panel_a_slice_surrogate_row(row: Mapping[str, object]) -> bool:
+    return (
+        _as_str(row.get("endpoint"), ENDPOINT_ZLPI).casefold() == ENDPOINT_ZLPI
+        and _as_int(row.get("duration"), PRIMARY_DURATION_S) == PRIMARY_DURATION_S
+        and _as_str(row.get("band")).casefold() == PRIMARY_BAND
+        and _as_str(row.get("representation"), PRIMARY_REPRESENTATION).casefold()
+        == PRIMARY_REPRESENTATION
+    )
+
+
+def _panel_a_surrogate_counts_complete(
+    surrogate_rows: Sequence[Mapping[str, object]],
+) -> bool:
+    """True when each observation×null block has the full requested surrogate count."""
+    from .nulls import surrogate_export_is_complete
+
+    sliced = [
+        r
+        for r in surrogate_rows
+        if _panel_a_slice_surrogate_row(r)
+        and _as_str(r.get("null_type")).casefold() in PANEL_A_REQUIRED_NULL_TYPES
+    ]
+    return surrogate_export_is_complete(sliced)
+
+
+def _biological_participant_standardized_means(
+    observation_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Aggregate standardized observed ZLPI to biological participants.
+
+    Hierarchy (equal weight at each level):
+    observation → condition → participant-session → biological participant.
+    """
+    # observation-level rows keyed by bio/session/condition
+    obs_buckets: dict[tuple[str, str, str, str], list[float]] = {}
+    meta: dict[tuple[str, str], dict[str, object]] = {}
+    for row in observation_rows:
+        bio = _as_str(row.get("biological_participant_id")).casefold()
+        session = _as_str(row.get("session_id"), "single").casefold() or "single"
+        condition = _as_str(row.get("condition"), "unknown").casefold() or "unknown"
+        dataset_id = _as_str(row.get("dataset_id")).casefold()
+        val = _as_float(row.get("standardized_observed_value"))
+        if not bio or not math.isfinite(val):
+            continue
+        key = (dataset_id, bio, session, condition)
+        obs_buckets.setdefault(key, []).append(val)
+        meta[(dataset_id, bio)] = {
+            "dataset_id": dataset_id,
+            "dataset_role": _as_str(row.get("dataset_role")),
+            "biological_participant_id": bio,
+            "null_type": _as_str(row.get("null_type")).casefold(),
+            "band": _as_str(row.get("band")).casefold(),
+        }
+
+    # condition means within participant-session
+    cond_means: dict[tuple[str, str, str], list[float]] = {}
+    for (dataset_id, bio, session, _condition), vals in obs_buckets.items():
+        cond_means.setdefault((dataset_id, bio, session), []).append(float(np.mean(vals)))
+
+    # session means within biological participant
+    session_means: dict[tuple[str, str], list[float]] = {}
+    for (dataset_id, bio, _session), vals in cond_means.items():
+        session_means.setdefault((dataset_id, bio), []).append(float(np.mean(vals)))
+
+    out: list[dict[str, object]] = []
+    for (dataset_id, bio), vals in sorted(session_means.items()):
+        info = meta.get((dataset_id, bio), {})
+        out.append(
+            {
+                **info,
+                "dataset_id": dataset_id,
+                "biological_participant_id": bio,
+                "n_sessions": len(vals),
+                "standardized_observed_value": float(np.mean(vals)),
+                "aggregation_level": "biological_participant",
+                "aggregation_order": (
+                    "observation->condition->session->biological_participant"
+                ),
+            }
+        )
+    return out
+
+
+def _surrogate_rows_fallback_from_null_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Legacy fallback when C4 surrogate-value export is unavailable."""
+    from .group_tables import normalize_keys
+
+    out: list[dict[str, object]] = []
+    for row in rows:
+        if not _panel_a_slice_null_row(row):
+            continue
+        null_type = _as_str(row.get("null_type")).casefold()
+        if null_type not in PANEL_A_REQUIRED_NULL_TYPES:
+            continue
+        keys = normalize_keys(
+            {
+                "dataset_id": row.get("dataset_id"),
+                "subject_id": row.get("subject_id"),
+                "observation_id": row.get("observation_id"),
+                "condition": row.get("condition"),
+                "task": row.get("task"),
+                "participant_id": row.get("participant_id"),
+                "session_id": row.get("session_id"),
+            }
+        )
+        out.append(
+            {
+                "dataset_id": _as_str(row.get("dataset_id")).casefold(),
+                "dataset_role": "",
+                "biological_participant_id": _as_str(keys.get("participant_id")),
+                "analysis_unit_id": (
+                    f"{_as_str(keys.get('dataset_id')).casefold()}|"
+                    f"{_as_str(keys.get('participant_id'))}|"
+                    f"{_as_str(keys.get('session_id'), 'single')}"
+                ),
+                "subject_id": _as_str(row.get("subject_id")),
+                "session_id": _as_str(keys.get("session_id"), "single"),
+                "observation_id": _as_str(row.get("observation_id")),
+                "condition": _as_str(row.get("condition")),
+                "period": "",
+                "state": "",
+                "task": _as_str(row.get("task")),
+                "band": _as_str(row.get("band")).casefold(),
+                "duration": _as_int(row.get("duration_s"), PRIMARY_DURATION_S),
+                "representation": PRIMARY_REPRESENTATION,
+                "endpoint": ENDPOINT_ZLPI,
+                "null_type": null_type,
+                "surrogate_index": 0,
+                "surrogate_endpoint_index": _as_float(row.get("null_mean")),
+                "observed_endpoint_index": _as_float(row.get("observed_endpoint_index")),
+                "standardized_surrogate_value": 0.0,
+                "standardized_observed_value": _as_float(row.get("effect_size_surrogate_z")),
+                "null_mean": _as_float(row.get("null_mean")),
+                "null_median": _as_float(row.get("null_median")),
+                "null_std": _as_float(row.get("null_std")),
+                "empirical_p": _as_float(row.get("empirical_p")),
+                "rng_seed_u64": _as_str(row.get("rng_seed_u64")),
+                "n_surrogates": _as_int(row.get("n_surrogates_requested"), 1),
+                "eligibility_status": (
+                    "eligible" if _as_bool(row.get("observed_eligible"), True) else "ineligible"
+                ),
+                "qc_status": "fallback_summary_only",
+            }
+        )
+    return out
+
+
+def _plot_panel_a_empirical_nulls(
+    ax: plt.Axes,
+    surrogate_rows: Sequence[Mapping[str, object]],
+    *,
+    dataset_roles: Mapping[str, str],
+    panel_label: str = "A",
+    full_surrogate_distributions: bool = True,
+) -> list[dict[str, object]]:
+    """Plot pooled surrogate densities with biological-participant overlays.
+
+    Returns plot-layer audit rows describing each geometry.
+    """
+    layer_rows: list[dict[str, object]] = []
+    rows = [r for r in surrogate_rows if _panel_a_slice_surrogate_row(r)]
+    rows = [
+        r
+        for r in rows
+        if _as_str(r.get("null_type")).casefold() in PANEL_A_REQUIRED_NULL_TYPES
+    ]
+    title = PANEL_A_TITLE
+    xlabel = PANEL_A_XLABEL
+    if not rows:
+        _mark_empty_panel(ax, MSG_NOT_INCLUDED, xlabel=xlabel, ylabel="")
+        _add_panel_label(ax, panel_label)
+        ax.text(
+            0.0,
+            1.06,
+            title,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=FS_PANEL_TITLE - 4,
+            color=PALETTE["dark_gray"],
+            clip_on=False,
+        )
+        return layer_rows
+
+    datasets = sorted(
+        {_as_str(r.get("dataset_id")).casefold() for r in rows},
+        key=lambda d: (_as_str(dataset_roles.get(d)) != "primary", d),
+    )
+    single_dataset = len(datasets) == 1
+    null_order = list(PANEL_A_REQUIRED_NULL_TYPES)
+    labels: list[str] = []
+    distributions: list[np.ndarray] = []
+    bio_point_sets: list[np.ndarray] = []
+    dataset_means: list[float] = []
+    row_meta: list[dict[str, object]] = []
+
+    for dataset_id in datasets:
+        role = _as_str(dataset_roles.get(dataset_id), "unknown")
+        for null_type in null_order:
+            cell = [
+                r
+                for r in rows
+                if _as_str(r.get("dataset_id")).casefold() == dataset_id
+                and _as_str(r.get("null_type")).casefold() == null_type
+            ]
+            if not cell:
+                continue
+            sur = np.asarray(
+                [_as_float(r.get("standardized_surrogate_value")) for r in cell],
+                dtype=float,
+            )
+            sur = sur[np.isfinite(sur)]
+            if sur.size == 0:
+                continue
+
+            # One standardized observed value per observation (first surrogate row).
+            obs_by_id: dict[str, dict[str, object]] = {}
+            for r in cell:
+                oid = _as_str(r.get("observation_id")).casefold()
+                if not oid or oid in obs_by_id:
+                    continue
+                obs_by_id[oid] = {
+                    "dataset_id": dataset_id,
+                    "dataset_role": role,
+                    "biological_participant_id": _as_str(
+                        r.get("biological_participant_id")
+                    ).casefold(),
+                    "session_id": _as_str(r.get("session_id"), "single").casefold()
+                    or "single",
+                    "condition": _as_str(r.get("condition"), "unknown").casefold()
+                    or "unknown",
+                    "null_type": null_type,
+                    "band": PRIMARY_BAND,
+                    "standardized_observed_value": _as_float(
+                        r.get("standardized_observed_value")
+                    ),
+                }
+            bio_rows = _biological_participant_standardized_means(list(obs_by_id.values()))
+            bio_vals = np.asarray(
+                [_as_float(r.get("standardized_observed_value")) for r in bio_rows],
+                dtype=float,
+            )
+            bio_vals = bio_vals[np.isfinite(bio_vals)]
+            ds_mean = float(np.mean(bio_vals)) if bio_vals.size else float("nan")
+
+            n_obs = len(obs_by_id)
+            n_surr_req = {
+                _as_int(r.get("n_surrogates"))
+                for r in cell
+                if _as_int(r.get("n_surrogates")) > 0
+            }
+            n_surr_per = int(min(n_surr_req)) if n_surr_req else 0
+            n_sessions = len(
+                {
+                    _as_str(r.get("session_id")).casefold()
+                    for r in cell
+                    if _as_str(r.get("session_id"))
+                }
+            )
+            # Prefer analysis_unit count when present; else unique bio×session.
+            analysis_units = {
+                _as_str(r.get("analysis_unit_id")).casefold()
+                for r in cell
+                if _as_str(r.get("analysis_unit_id"))
+            }
+            if not analysis_units:
+                analysis_units = {
+                    f"{_as_str(r.get('biological_participant_id')).casefold()}|"
+                    f"{_as_str(r.get('session_id'), 'single').casefold()}"
+                    for r in cell
+                    if _as_str(r.get("biological_participant_id"))
+                }
+
+            distributions.append(sur)
+            bio_point_sets.append(bio_vals)
+            dataset_means.append(ds_mean)
+            label = _null_display_label(null_type) if single_dataset else (
+                f"{_null_display_label(null_type)}"
+            )
+            labels.append(label)
+            row_meta.append(
+                {
+                    "dataset_id": dataset_id,
+                    "dataset_role": role,
+                    "null_type": null_type,
+                    "n_biological_participants": int(bio_vals.size),
+                    "n_analysis_units": len(analysis_units),
+                    "n_sessions": n_sessions,
+                    "n_eligible_observations": n_obs,
+                    "n_surrogates_per_observation": n_surr_per,
+                    "n_surrogate_values": int(sur.size),
+                    "full_distributions": bool(
+                        full_surrogate_distributions and n_surr_per >= 2 and sur.size == n_obs * n_surr_per
+                    ),
+                }
+            )
+
+            layer_rows.extend(
+                [
+                    {
+                        "dataset_id": dataset_id,
+                        "null_type": null_type,
+                        "layer": "null_density_violin",
+                        "source_file": "figure3_panel_a_null_distributions.csv",
+                        "source_column": "standardized_surrogate_value",
+                        "aggregation_level": "pooled_observation_specific_surrogates",
+                        "n_rows_available": int(sur.size),
+                        "n_rows_plotted": int(sur.size),
+                        "weighting": "unweighted_pooled_descriptive",
+                        "description": (
+                            "Horizontal half-violin / density of all standardized "
+                            "surrogate ZLPI values pooled across eligible observations "
+                            "(descriptive; not a dataset-level sampling distribution)."
+                        ),
+                    },
+                    {
+                        "dataset_id": dataset_id,
+                        "null_type": null_type,
+                        "layer": "participant_observed_points",
+                        "source_file": "figure3_panel_a_null_distributions.csv",
+                        "source_column": "standardized_observed_value",
+                        "aggregation_level": "biological_participant",
+                        "n_rows_available": int(bio_vals.size),
+                        "n_rows_plotted": int(bio_vals.size),
+                        "weighting": (
+                            "observation->condition->session->"
+                            "biological_participant equal-weight means"
+                        ),
+                        "description": (
+                            "Jittered points: biological-participant summaries of "
+                            "standardized observed ZLPI (not session units)."
+                        ),
+                    },
+                    {
+                        "dataset_id": dataset_id,
+                        "null_type": null_type,
+                        "layer": "dataset_mean_diamond",
+                        "source_file": "figure3_panel_a_null_distributions.csv",
+                        "source_column": "standardized_observed_value",
+                        "aggregation_level": "dataset",
+                        "n_rows_available": int(bio_vals.size),
+                        "n_rows_plotted": 1 if math.isfinite(ds_mean) else 0,
+                        "weighting": "equal_weight_across_biological_participants",
+                        "description": (
+                            "Orange diamond: equal-weight mean of biological-participant "
+                            "standardized observed values."
+                        ),
+                    },
+                    {
+                        "dataset_id": dataset_id,
+                        "null_type": null_type,
+                        "layer": "zero_reference_line",
+                        "source_file": "",
+                        "source_column": "",
+                        "aggregation_level": "observation_specific_null_center",
+                        "n_rows_available": 1,
+                        "n_rows_plotted": 1,
+                        "weighting": "n/a",
+                        "description": (
+                            "Vertical dashed line at 0 = center of each "
+                            "observation-specific null on the standardized scale."
+                        ),
+                    },
+                ]
+            )
+
+    if not distributions:
+        _mark_empty_panel(ax, MSG_NOT_INCLUDED, xlabel=xlabel, ylabel="")
+        _add_panel_label(ax, panel_label)
+        ax.text(
+            0.0,
+            1.06,
+            title,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=FS_PANEL_TITLE - 4,
+            color=PALETTE["dark_gray"],
+            clip_on=False,
+        )
+        return layer_rows
+
+    y = np.arange(len(distributions), dtype=float)
+    # Full empirical null geometry (all surrogate values; no downsampling).
+    vio = ax.violinplot(
+        distributions,
+        positions=y,
+        orientation="horizontal",
+        showmeans=False,
+        showmedians=False,
+        showextrema=False,
+        widths=0.78,
+    )
+    for body, meta in zip(vio["bodies"], row_meta, strict=True):
+        null_type = _as_str(meta.get("null_type")).casefold()
+        if null_type == NULL_TYPE_CIRCULAR_SHIFT:
+            color = PALETTE["blue"]
+        elif null_type == NULL_TYPE_PHASE_RANDOMIZATION:
+            color = PALETTE["orange"]
+        else:
+            color = PALETTE["green"]
+        body.set_facecolor(color)
+        body.set_edgecolor(PALETTE["dark_gray"])
+        body.set_alpha(0.28)
+        body.set_linewidth(0.5)
+        # Keep the lower half of each horizontal violin so observed points remain readable.
+        path = body.get_paths()[0]
+        vertices = path.vertices
+        y_center = float(np.mean(vertices[:, 1]))
+        vertices[:, 1] = np.clip(vertices[:, 1], None, y_center)
+
+    for idx, bio_vals in enumerate(bio_point_sets):
+        if bio_vals.size:
+            rng = np.random.default_rng(
+                int(
+                    hashlib.md5(
+                        f"{row_meta[idx]['dataset_id']}|{row_meta[idx]['null_type']}".encode()
+                    ).hexdigest()[:8],
+                    16,
+                )
+            )
+            jitter = rng.uniform(-0.12, 0.12, size=bio_vals.size)
+            ax.scatter(
+                bio_vals,
+                y[idx] + jitter,
+                s=22,
+                color=PALETTE["dark_gray"],
+                alpha=0.75,
+                linewidths=0.0,
+                zorder=4,
+                label="Participant observed" if idx == 0 else None,
+            )
+        if math.isfinite(dataset_means[idx]):
+            ax.scatter(
+                [dataset_means[idx]],
+                [y[idx]],
+                s=42,
+                marker="D",
+                color=PALETTE["vermillion"],
+                edgecolors=PALETTE["dark_gray"],
+                linewidths=0.45,
+                zorder=5,
+                label="Dataset mean" if idx == 0 else None,
+            )
+
+    _ref_vline(ax, 0.0)
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(labels, fontsize=FS_TICK - 2)
+    ax.set_xlabel(
+        xlabel,
+        fontsize=FS_AXIS - 3,
+        labelpad=8,
+        linespacing=1.15,
+    )
+    ax.set_ylabel("")
+    ax.tick_params(axis="x", pad=3)
+    ax.tick_params(axis="y", pad=2)
+    ax.margins(x=0.04)
+
+    # Subtitle with hierarchy counts (HIIT-style when single dataset).
+    first = row_meta[0]
+    role_disp = _as_str(first.get("dataset_role"), "unknown").title()
+    if single_dataset:
+        subtitle = (
+            f"{_dataset_display(_as_str(first.get('dataset_id')))} — {role_disp} | "
+            f"D{PRIMARY_DURATION_S} | "
+            f"{int(first['n_biological_participants'])} biological participants | "
+            f"{int(first['n_analysis_units'])} sessions | "
+            f"{int(first['n_eligible_observations'])} observations | "
+            f"{int(first['n_surrogates_per_observation'])} surrogates/observation"
+        )
+    else:
+        subtitle = (
+            f"Primary + sensitivity | D{PRIMARY_DURATION_S} | "
+            "rows = null method; see eligibility/hierarchy exports for per-dataset counts"
+        )
+    if not full_surrogate_distributions or not all(
+        bool(m.get("full_distributions")) for m in row_meta
+    ):
+        subtitle += " | incomplete surrogate export"
+
+    _style_axes(ax)
+    _add_panel_label(ax, panel_label)
+    ax.text(
+        0.0,
+        1.10,
+        title,
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=FS_PANEL_TITLE - 4,
+        color=PALETTE["dark_gray"],
+        clip_on=False,
+    )
+    ax.text(
+        0.0,
+        1.02,
+        subtitle,
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=FS_TICK - 4,
+        color=PALETTE["dark_gray"],
+        alpha=0.88,
+        clip_on=False,
+    )
+    # Legend explaining layers (proxy artists when first-row labels missing).
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    handles = [
+        Patch(
+            facecolor=PALETTE["light_gray"],
+            edgecolor=PALETTE["dark_gray"],
+            alpha=0.55,
+            label="Null distribution",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=PALETTE["dark_gray"],
+            markersize=5.5,
+            label="Participant observed",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            color="w",
+            markerfacecolor=PALETTE["vermillion"],
+            markeredgecolor=PALETTE["dark_gray"],
+            markersize=6.5,
+            label="Dataset mean",
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=REF_LINE_COLOR,
+            lw=FIGURE3_REF_LINEWIDTH,
+            ls="--",
+            label="Null center (0)",
+        ),
+    ]
+    ax.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.20),
+        ncol=2,
+        fontsize=FS_LEGEND - 3,
+        frameon=False,
+        handlelength=1.5,
+        handletextpad=0.45,
+        columnspacing=1.1,
+        borderaxespad=0.0,
+    )
+    return layer_rows
 
 
 def _plot_participant_null_forest(
@@ -1807,6 +2418,16 @@ def render_figure3(
 ) -> Figure3RenderResult:
     """Figure 3: nulls, duration robustness, broadband sensitivity, LOO."""
     null_rows = read_csv_rows(inputs.get("null_subject"))
+    protocol_rows = read_csv_rows(inputs.get("protocol_audit"))
+    surrogate_rows = read_csv_rows(inputs.get("null_surrogate_values"))
+    used_surrogate_fallback = False
+    if not surrogate_rows:
+        surrogate_rows = _surrogate_rows_fallback_from_null_rows(null_rows)
+        used_surrogate_fallback = True
+    full_surrogate_distributions = (
+        not used_surrogate_fallback and _panel_a_surrogate_counts_complete(surrogate_rows)
+    )
+    dataset_roles = _dataset_role_lookup(protocol_rows)
     duration = read_csv_rows(inputs.get("duration_sensitivity"))
     paired_rows = read_csv_rows(inputs.get("paired_contrasts"))
     sensitivity_detail = read_csv_rows(inputs.get("sensitivity"))
@@ -1824,7 +2445,7 @@ def render_figure3(
     fig = plt.figure(figsize=FIGURE3_FIGSIZE, constrained_layout=False)
     gs = fig.add_gridspec(2, 2, hspace=FIGURE3_SUBPLOT_ADJUST["hspace"], wspace=FIGURE3_SUBPLOT_ADJUST["wspace"])
 
-    # Panel A: dataset-level forest (biological-participant mean Δ ± CI).
+    # Panel A: observed-over-empirical-null distributions (required null triplet).
     ax_a = fig.add_subplot(gs[0, 0])
     primary_analysis = analyze_null_slice_full(
         null_rows,
@@ -1839,11 +2460,12 @@ def render_figure3(
         else primary_analysis.pooled_inference
     )
     primary_matched = primary_analysis.matched
-    _plot_dataset_null_forest(
+    panel_a_layer_rows = _plot_panel_a_empirical_nulls(
         ax_a,
-        primary_analysis.dataset_inferences,
-        title=f"Circular-shift null (θ {_endpoint_display(ENDPOINT_ZLPI)}, D{PRIMARY_DURATION_S})",
+        surrogate_rows,
+        dataset_roles=dataset_roles,
         panel_label="A",
+        full_surrogate_distributions=full_surrogate_distributions,
     )
 
     delta_rows = [
@@ -2105,34 +2727,528 @@ def render_figure3(
     )
     source_paths.append(matched_csv)
 
+    # Panel A distribution exports (all datasets, required null methods only).
+    required_nulls = set(PANEL_A_REQUIRED_NULL_TYPES)
+    panel_a_null_rows = [
+        r
+        for r in null_rows
+        if _panel_a_slice_null_row(r)
+        and _as_str(r.get("null_type")).casefold() in required_nulls
+    ]
+    panel_a_surrogates = [
+        r
+        for r in surrogate_rows
+        if _panel_a_slice_surrogate_row(r)
+        and _as_str(r.get("null_type")).casefold() in required_nulls
+    ]
+    all_dataset_ids = sorted(
+        set(dataset_roles) | {_as_str(r.get("dataset_id")).casefold() for r in panel_a_null_rows}
+    )
+    eligibility_rows: list[dict[str, object]] = []
+    hierarchy_rows: list[dict[str, object]] = []
+    observation_rows: list[dict[str, object]] = []
+    dataset_summary_rows: list[dict[str, object]] = []
+
+    for dataset_id in all_dataset_ids:
+        ds_role = _as_str(dataset_roles.get(dataset_id), "unknown")
+        ds_rows = [
+            r
+            for r in panel_a_null_rows
+            if _as_str(r.get("dataset_id")).casefold() == dataset_id
+        ]
+        ds_sur = [
+            r
+            for r in panel_a_surrogates
+            if _as_str(r.get("dataset_id")).casefold() == dataset_id
+        ]
+        nulls_present = {
+            _as_str(r.get("null_type")).casefold()
+            for r in ds_rows
+            if _as_bool(r.get("observed_eligible"), True)
+        }
+        required_nulls_available = all(n in nulls_present for n in required_nulls)
+        by_null_obs: dict[str, set[str]] = {}
+        for r in ds_rows:
+            if not _as_bool(r.get("observed_eligible"), True):
+                continue
+            nt = _as_str(r.get("null_type")).casefold()
+            by_null_obs.setdefault(nt, set()).add(_as_str(r.get("observation_id")))
+        obs_intersection: set[str] = set()
+        if by_null_obs:
+            obs_intersection = set.intersection(*by_null_obs.values()) if len(by_null_obs) >= 3 else set()
+        included = required_nulls_available and bool(obs_intersection)
+        exclusion_reason = ""
+        if not ds_rows:
+            exclusion_reason = "No D240/absolute_log10/theta/ZLPI rows."
+        elif not required_nulls_available:
+            missing = sorted(required_nulls - nulls_present)
+            exclusion_reason = f"Missing required null methods: {', '.join(missing)}."
+        elif not obs_intersection:
+            exclusion_reason = "No observation overlap across required null methods."
+
+        eligibility_rows.append(
+            {
+                "dataset_id": dataset_id,
+                "dataset_role": ds_role,
+                "included": included,
+                "duration_available": bool(ds_rows),
+                "endpoint_available": bool(ds_rows),
+                "band_available": bool(ds_rows),
+                "required_nulls_available": required_nulls_available,
+                "n_eligible_observations": len(obs_intersection),
+                "exclusion_reason": exclusion_reason,
+            }
+        )
+
+        bio_ids = {
+            _as_str(r.get("biological_participant_id")).casefold()
+            for r in ds_sur
+            if _as_str(r.get("biological_participant_id"))
+        }
+        analysis_ids = {
+            _as_str(r.get("analysis_unit_id")).casefold()
+            for r in ds_sur
+            if _as_str(r.get("analysis_unit_id"))
+        }
+        session_ids = {
+            _as_str(r.get("session_id")).casefold()
+            for r in ds_sur
+            if _as_str(r.get("session_id"))
+        }
+        obs_ids = {_as_str(r.get("observation_id")).casefold() for r in ds_rows}
+        hierarchy_rows.append(
+            {
+                "dataset_id": dataset_id,
+                "dataset_role": ds_role,
+                "n_biological_participants": len(bio_ids),
+                "n_analysis_units": len(analysis_ids),
+                "n_sessions": len(session_ids),
+                "n_observations": len(obs_ids),
+                "n_eligible_observations": len(obs_intersection),
+                "participant_identifier": "biological_participant_id",
+                "session_identifier": "session_id",
+                "condition_identifier": "condition",
+                "aggregation_order": "observation->condition->session->biological_participant->dataset",
+            }
+        )
+
+        for row in ds_rows:
+            from .group_tables import normalize_keys
+
+            keys = normalize_keys(
+                {
+                    "dataset_id": row.get("dataset_id"),
+                    "subject_id": row.get("subject_id"),
+                    "observation_id": row.get("observation_id"),
+                    "condition": row.get("condition"),
+                    "task": row.get("task"),
+                    "participant_id": row.get("participant_id"),
+                    "session_id": row.get("session_id"),
+                }
+            )
+            null_type = _as_str(row.get("null_type")).casefold()
+            percentile = float("nan")
+            p = _as_float(row.get("empirical_p"))
+            if math.isfinite(p):
+                percentile = max(0.0, min(1.0, 1.0 - p))
+            obs_id = _as_str(row.get("observation_id")).casefold()
+            std_obs = float("nan")
+            if ds_sur:
+                for s in ds_sur:
+                    if (
+                        _as_str(s.get("observation_id")).casefold() == obs_id
+                        and _as_str(s.get("null_type")).casefold() == null_type
+                    ):
+                        std_obs = _as_float(s.get("standardized_observed_value"))
+                        break
+            observation_rows.append(
+                {
+                    "dataset_id": dataset_id,
+                    "dataset_role": ds_role,
+                    "biological_participant_id": _as_str(keys.get("participant_id")),
+                    "analysis_unit_id": (
+                        f"{_as_str(keys.get('dataset_id')).casefold()}|"
+                        f"{_as_str(keys.get('participant_id'))}|"
+                        f"{_as_str(keys.get('session_id'), 'single')}"
+                    ),
+                    "session_id": _as_str(keys.get("session_id"), "single"),
+                    "observation_id": _as_str(row.get("observation_id")),
+                    "condition": _as_str(row.get("condition")),
+                    "period": "",
+                    "state": "",
+                    "band": _as_str(row.get("band")).casefold(),
+                    "null_type": null_type,
+                    "observed_endpoint_index": _as_float(row.get("observed_endpoint_index")),
+                    "null_mean": _as_float(row.get("null_mean")),
+                    "null_median": _as_float(row.get("null_median")),
+                    "null_std": _as_float(row.get("null_std")),
+                    "delta_obs_minus_null": _as_float(row.get("observed_endpoint_index"))
+                    - _as_float(row.get("null_mean")),
+                    "standardized_observed_value": std_obs,
+                    "empirical_percentile": percentile,
+                    "empirical_p": p,
+                    "n_surrogates": _as_int(row.get("n_surrogates_requested")),
+                    "eligibility_status": (
+                        "eligible" if _as_bool(row.get("observed_eligible"), True) else "ineligible"
+                    ),
+                    "exclusion_reason": exclusion_reason if not included else "",
+                }
+            )
+
+        for null_type in PANEL_A_REQUIRED_NULL_TYPES:
+            ds_obs_rows = [
+                r
+                for r in observation_rows
+                if r["dataset_id"] == dataset_id and _as_str(r["null_type"]).casefold() == null_type
+            ]
+            ds_sur_rows = [
+                r
+                for r in ds_sur
+                if _as_str(r.get("null_type")).casefold() == null_type
+            ]
+            bio_rows = _biological_participant_standardized_means(ds_obs_rows)
+            bio_means = np.asarray(
+                [
+                    _as_float(r.get("standardized_observed_value"))
+                    for r in bio_rows
+                    if math.isfinite(_as_float(r.get("standardized_observed_value")))
+                ],
+                dtype=float,
+            )
+            estimate = float(np.mean(bio_means)) if bio_means.size else float("nan")
+            ci_low = float("nan")
+            ci_high = float("nan")
+            p_value = float("nan")
+            if bio_means.size >= 2:
+                sd = float(np.std(bio_means, ddof=1))
+                se = sd / math.sqrt(float(bio_means.size))
+                t_crit = float(stats.t.ppf(0.975, df=int(bio_means.size - 1)))
+                ci_low = estimate - t_crit * se
+                ci_high = estimate + t_crit * se
+                _t_stat, p2 = stats.ttest_1samp(bio_means, popmean=0.0)
+                p_value = float(p2)
+            n_surrogates_values = {
+                _as_int(r.get("n_surrogates")) for r in ds_sur_rows if _as_int(r.get("n_surrogates")) > 0
+            }
+            n_surr_per = min(n_surrogates_values) if n_surrogates_values else 0
+            n_eligible = sum(
+                1 for r in ds_obs_rows if _as_str(r.get("eligibility_status")) == "eligible"
+            )
+            dataset_summary_rows.append(
+                {
+                    "dataset_id": dataset_id,
+                    "dataset_role": ds_role,
+                    "null_type": null_type,
+                    "band": PRIMARY_BAND,
+                    "n_biological_participants": len(bio_rows),
+                    "n_analysis_units": len(analysis_ids),
+                    "n_sessions": len(session_ids),
+                    "n_observations": len(ds_obs_rows),
+                    "n_eligible_observations": n_eligible,
+                    "n_surrogates_per_observation": n_surr_per,
+                    "n_total_surrogate_values": len(ds_sur_rows),
+                    "display_scale": "standardized_observation_specific_null",
+                    "aggregation_method": (
+                        "biological_participant_mean_of_standardized_observed_"
+                        "observation_condition_session_hierarchy"
+                    ),
+                    "estimate": estimate,
+                    "ci_low": ci_low,
+                    "ci_high": ci_high,
+                    "p_value": p_value,
+                    "inference_method": "student_t_on_biological_participant_means",
+                }
+            )
+
+    # Inject dataset_role into full surrogate export.
+    for row in panel_a_surrogates:
+        ds = _as_str(row.get("dataset_id")).casefold()
+        if not _as_str(row.get("dataset_role")):
+            row["dataset_role"] = _as_str(dataset_roles.get(ds), "unknown")
+
+    null_dist_csv = source_dir / "figure3_panel_a_null_distributions.csv"
+    write_source_csv(
+        null_dist_csv,
+        panel_a_surrogates,
+        (
+            "dataset_id",
+            "dataset_role",
+            "biological_participant_id",
+            "analysis_unit_id",
+            "subject_id",
+            "session_id",
+            "observation_id",
+            "condition",
+            "period",
+            "state",
+            "task",
+            "band",
+            "duration",
+            "representation",
+            "endpoint",
+            "null_type",
+            "surrogate_index",
+            "surrogate_endpoint_index",
+            "observed_endpoint_index",
+            "standardized_surrogate_value",
+            "standardized_observed_value",
+            "null_mean",
+            "null_median",
+            "null_std",
+            "empirical_p",
+            "rng_seed_u64",
+            "n_surrogates",
+            "eligibility_status",
+            "qc_status",
+        ),
+    )
+    source_paths.append(null_dist_csv)
+
+    # Preferred parquet; always keep CSV as fallback.
+    null_dist_parquet = source_dir / "figure3_panel_a_null_distributions.parquet"
+    global_parquet = output_dir.parent / "null_surrogate_values.parquet"
+    try:
+        import pandas as pd  # type: ignore
+
+        frame = pd.DataFrame(panel_a_surrogates)
+        frame.to_parquet(null_dist_parquet, index=False)
+        frame.to_parquet(global_parquet, index=False)
+        source_paths.append(null_dist_parquet)
+        source_paths.append(global_parquet)
+    except Exception:
+        pass
+
+    obs_summary_csv = source_dir / "figure3_panel_a_observation_summary.csv"
+    write_source_csv(
+        obs_summary_csv,
+        observation_rows,
+        (
+            "dataset_id",
+            "dataset_role",
+            "biological_participant_id",
+            "analysis_unit_id",
+            "session_id",
+            "observation_id",
+            "condition",
+            "period",
+            "state",
+            "band",
+            "null_type",
+            "observed_endpoint_index",
+            "null_mean",
+            "null_median",
+            "null_std",
+            "delta_obs_minus_null",
+            "standardized_observed_value",
+            "empirical_percentile",
+            "empirical_p",
+            "n_surrogates",
+            "eligibility_status",
+            "exclusion_reason",
+        ),
+    )
+    source_paths.append(obs_summary_csv)
+
+    dataset_summary_csv = source_dir / "figure3_panel_a_dataset_summary.csv"
+    write_source_csv(
+        dataset_summary_csv,
+        dataset_summary_rows,
+        (
+            "dataset_id",
+            "dataset_role",
+            "null_type",
+            "band",
+            "n_biological_participants",
+            "n_analysis_units",
+            "n_sessions",
+            "n_observations",
+            "n_eligible_observations",
+            "n_surrogates_per_observation",
+            "n_total_surrogate_values",
+            "display_scale",
+            "aggregation_method",
+            "estimate",
+            "ci_low",
+            "ci_high",
+            "p_value",
+            "inference_method",
+        ),
+    )
+    source_paths.append(dataset_summary_csv)
+
+    eligibility_csv = source_dir / "figure3_panel_a_dataset_eligibility.csv"
+    write_source_csv(
+        eligibility_csv,
+        eligibility_rows,
+        (
+            "dataset_id",
+            "dataset_role",
+            "included",
+            "duration_available",
+            "endpoint_available",
+            "band_available",
+            "required_nulls_available",
+            "n_eligible_observations",
+            "exclusion_reason",
+        ),
+    )
+    source_paths.append(eligibility_csv)
+
+    hierarchy_csv = source_dir / "figure3_panel_a_dataset_hierarchy.csv"
+    write_source_csv(
+        hierarchy_csv,
+        hierarchy_rows,
+        (
+            "dataset_id",
+            "dataset_role",
+            "n_biological_participants",
+            "n_analysis_units",
+            "n_sessions",
+            "n_observations",
+            "n_eligible_observations",
+            "participant_identifier",
+            "session_identifier",
+            "condition_identifier",
+            "aggregation_order",
+        ),
+    )
+    source_paths.append(hierarchy_csv)
+
+    # Plot-layer audit + distribution completeness validation.
+    if not panel_a_layer_rows:
+        # Ensure required audit table exists even for empty panels.
+        for dataset_id in all_dataset_ids:
+            for null_type in PANEL_A_REQUIRED_NULL_TYPES:
+                panel_a_layer_rows.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "null_type": null_type,
+                        "layer": "missing",
+                        "source_file": "",
+                        "source_column": "",
+                        "aggregation_level": "",
+                        "n_rows_available": 0,
+                        "n_rows_plotted": 0,
+                        "weighting": "",
+                        "description": "No Panel A geometry rendered for this cell.",
+                    }
+                )
+    plot_layers_csv = source_dir / "figure3_panel_a_plot_layers.csv"
+    write_source_csv(
+        plot_layers_csv,
+        panel_a_layer_rows,
+        (
+            "dataset_id",
+            "null_type",
+            "layer",
+            "source_file",
+            "source_column",
+            "aggregation_level",
+            "n_rows_available",
+            "n_rows_plotted",
+            "weighting",
+            "description",
+        ),
+    )
+    source_paths.append(plot_layers_csv)
+
+    distribution_validation_rows: list[dict[str, object]] = []
+    for dataset_id in all_dataset_ids:
+        for null_type in PANEL_A_REQUIRED_NULL_TYPES:
+            ds_obs = [
+                r
+                for r in observation_rows
+                if r["dataset_id"] == dataset_id
+                and _as_str(r["null_type"]).casefold() == null_type
+                and _as_str(r.get("eligibility_status")) == "eligible"
+            ]
+            ds_sur = [
+                r
+                for r in panel_a_surrogates
+                if _as_str(r.get("dataset_id")).casefold() == dataset_id
+                and _as_str(r.get("null_type")).casefold() == null_type
+            ]
+            n_eligible = len({_as_str(r.get("observation_id")).casefold() for r in ds_obs})
+            n_surr_vals = {
+                _as_int(r.get("n_surrogates")) for r in ds_sur if _as_int(r.get("n_surrogates")) > 0
+            }
+            n_per = int(min(n_surr_vals)) if n_surr_vals else 0
+            expected = int(n_eligible * n_per) if n_per > 0 else 0
+            available = len(ds_sur)
+            complete = (
+                full_surrogate_distributions
+                and n_per >= 2
+                and available == expected
+                and expected > 0
+            )
+            distribution_validation_rows.append(
+                {
+                    "dataset_id": dataset_id,
+                    "null_type": null_type,
+                    "n_eligible_observations": n_eligible,
+                    "n_surrogates_per_observation": n_per,
+                    "expected_surrogate_values": expected,
+                    "available_surrogate_values": available,
+                    "values_used_for_density": available if complete else available,
+                    "complete": complete,
+                    "used_fallback_summary": used_surrogate_fallback,
+                    "downsampling": "none",
+                }
+            )
+    dist_val_csv = source_dir / "figure3_panel_a_distribution_validation.csv"
+    write_source_csv(
+        dist_val_csv,
+        distribution_validation_rows,
+        (
+            "dataset_id",
+            "null_type",
+            "n_eligible_observations",
+            "n_surrogates_per_observation",
+            "expected_surrogate_values",
+            "available_surrogate_values",
+            "values_used_for_density",
+            "complete",
+            "used_fallback_summary",
+            "downsampling",
+        ),
+    )
+    source_paths.append(dist_val_csv)
+
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure3",
             panel_id="null_dataset_forest",
-            title="Dataset-level observed − circular-shift null Δ",
+            title="Observed theta ZLPI relative to autocorrelation-preserving nulls",
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=PRIMARY_DURATION_S,
-            input_tables=[str(inputs.get("null_subject") or "")],
-            source_data_csv=str(dataset_csv),
+            input_tables=[
+                str(inputs.get("null_subject") or ""),
+                str(inputs.get("null_surrogate_values") or ""),
+            ],
+            source_data_csv=str(null_dist_csv),
             analysis_keys=[
                 "endpoint=zlpi",
                 f"duration={PRIMARY_DURATION_S}",
                 f"representation={PRIMARY_REPRESENTATION}",
                 f"band={PRIMARY_BAND}",
-                f"null_type={PRIMARY_NULL_TYPE}",
-                "unit=biological_participant",
-                "aggregation=dataset_mean_of_participant_deltas",
-                "pooled_estimate_plotted=false",
-                f"run_class={primary_inference.run_class}",
-                f"interpretation={primary_inference.interpretation}",
+                "null_types=circular_shift;phase_randomization;block_shuffle",
+                "display_scale=standardized_observation_specific_null",
+                "null_geometry=standardized_surrogate_value_violin",
+                "observed_overlay=biological_participant_means",
+                "dataset_mean=equal_weight_biological_participants",
+                f"full_surrogate_distributions={str(full_surrogate_distributions).lower()}",
+                "dataset_roles=primary_and_sensitivity",
             ],
             notes=(
-                "Primary confirmatory null panel. One row per dataset = "
-                "unweighted mean of biological-participant Δ_p with Student-t "
-                "95% CI (df=n_participants−1). Annotated n = unique biological "
-                "participants. Cross-dataset pooled estimate is not plotted "
-                "(no prespecified Panel A meta-analytic weighting). "
-                + INDEPENDENT_UNIT_VERDICT
+                "Panel A: gray/colored violin = pooled standardized_surrogate_value "
+                "(descriptive pooled observation-specific nulls, not a dataset-level "
+                "sampling distribution); gray points = biological-participant means of "
+                "standardized_observed_value "
+                "(observation→condition→session→biological participant); orange diamond "
+                "= equal-weight dataset mean across biological participants; dashed "
+                "zero = observation-specific null center. All three nulls use the "
+                "configured surrogate count per observation when the C4 surrogate "
+                "export is complete."
             ),
         )
     )
@@ -2752,9 +3868,19 @@ def render_figure3(
     caption_path.write_text(
         (
             f"{FIGURE3_TITLE}\n\n"
-            "A: Dataset-level mean of biological-participant Δ (observed − circular-shift "
-            "null) for D240 absolute-log10 theta ZLPI, with Student-t 95% CIs. Secondary "
-            "nulls appear in the Figure 3 supplement.\n"
+            "A: Observed theta ZLPI relative to autocorrelation-preserving nulls "
+            "(circular shift, phase randomized, block shuffled) at D240 absolute-log10.\n"
+            "  - Violin/density = pooled standardized_surrogate_value across eligible "
+            "observations (descriptive pooled observation-specific nulls; not a "
+            "dataset-level sampling distribution).\n"
+            "  - Gray points = biological-participant summaries of "
+            "standardized_observed_value (observation→condition→session→biological "
+            "participant); not participant-session units.\n"
+            "  - Orange diamond = equal-weight mean across biological participants.\n"
+            "  - Dashed zero = center of each observation-specific null.\n"
+            "  - When the C4 surrogate export is complete, each null uses 500 "
+            "surrogates per eligible observation (HIIT: 157×500 = 78,500 values per "
+            "null method).\n"
             "B: Duration sensitivity (ZLPI at 240/180 s; MWPI at 120 s; SWPI at 60 s). "
             "Color encodes EEG band; marker shape encodes endpoint index. Shorter "
             "windows cannot rescue primary D240 ZLPI; overlapping CIs are not "
@@ -2764,7 +3890,12 @@ def render_figure3(
             "D: Specification matrix of default sensitivity controls (optional "
             "CFA/nuisance rows appear only when enabled). Dual ECG–PPG comparison is "
             "not part of this figure.\n"
-            "Source data: figures/source_data/figure3_panel_*.csv.\n"
+            "Legacy participant-mean observed-minus-null forest is retained as internal "
+            "QC and supplementary diagnostics only.\n"
+            "Source data: figures/source_data/figure3_panel_*.csv, "
+            "figure3_panel_a_plot_layers.csv, "
+            "figure3_panel_a_distribution_validation.csv, and "
+            "figure3_panel_a_null_distributions.parquet.\n"
         ),
         encoding="utf-8",
     )
@@ -2795,6 +3926,22 @@ def render_figure3(
         "\n".join(
             [
                 "# Figure 3 Panel A — estimand note",
+                "",
+                "## Main panel display",
+                "Main Figure 3 Panel A displays pooled observation-specific empirical null",
+                "distributions (standardized_surrogate_value) for circular_shift,",
+                "phase_randomization, and block_shuffle (D240/theta/absolute_log10/ZLPI).",
+                "Observed overlays are biological-participant means of",
+                "standardized_observed_value; the orange diamond is the equal-weight",
+                "mean across biological participants. Pooled surrogate densities are",
+                "descriptive and are not dataset-level sampling distributions.",
+                "See `figure3_panel_a_plot_layers.csv` and",
+                "`figure3_panel_a_distribution_validation.csv`.",
+                "",
+                "## Retained contrast forest (not main Panel A)",
+                "The prior observed-minus-null participant-mean contrast forest is retained in",
+                f"`{FIGURE3_INTERNAL_QC_SUBDIR}/{FIGURE3_QC_PARTICIPANT_FOREST_STEM}_*` and supplementary diagnostics,",
+                "and remains valid for its own estimand.",
                 "",
                 "## Independent unit (final verdict)",
                 INDEPENDENT_UNIT_VERDICT,

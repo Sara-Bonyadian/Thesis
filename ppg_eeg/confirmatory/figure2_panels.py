@@ -267,18 +267,91 @@ def build_hiit_sensitivity_panel_a_series(
     return annotated, gaps
 
 
+PANEL_E_STATE_LONG_FIELDS = (
+    "dataset_id",
+    "dataset_role",
+    "participant_id",
+    "session_id",
+    "period",
+    "contrast_id",
+    "state",
+    "band",
+    "endpoint",
+    "duration_s",
+    "representation",
+    "peak_identifiable",
+    "peak_center_mu_s",
+    "peak_fwhm_s",
+    "fit_status",
+    "exclusion_reason",
+    "amplitude",
+    "rmse",
+    "amplitude_to_rmse",
+    "amplitude_se",
+    "r_squared",
+    "row_type",
+)
+
+PANEL_E_SUMMARY_FIELDS = (
+    "dataset_id",
+    "dataset_role",
+    "band",
+    "state",
+    "parameter",
+    "estimate",
+    "ci_lower_95",
+    "ci_upper_95",
+    "candidate_n",
+    "identifiable_n",
+    "identifiable_percent",
+    "unique_session_n",
+    "unique_participant_n",
+    "bootstrap_draws",
+    "bootstrap_seed",
+    "bootstrap_cluster_field",
+    "bootstrap_estimand",
+    "ci_method",
+    "ci_note",
+)
+
+PANEL_E_BOOTSTRAP_ESTIMAND = "mean_of_participant_means"
+PANEL_E_BOOTSTRAP_CLUSTER_FIELD = "participant_id"
+PANEL_E_CI_METHOD = "percentile_cluster_bootstrap"
+
+
+def _panel_e_period_from_contrast(contrast_id: str) -> str:
+    text = str(contrast_id or "").casefold()
+    if "pre" in text:
+        return "pre"
+    if "post" in text:
+        return "post"
+    return "single"
+
+
+def _panel_e_dataset_role(*, hiit_sensitivity: bool, dataset_id: str) -> str:
+    if hiit_sensitivity or dataset_id.casefold() == HIIT_DATASET_ID:
+        return "sensitivity"
+    return "primary_meta"
+
+
 def build_panel_e_peak_export(
     paired_rows: Sequence[Mapping[str, object]],
     *,
     hiit_sensitivity: bool = False,
+    peak_params_rows: Sequence[Mapping[str, object]] | None = None,
 ) -> list[dict[str, object]]:
-    """Paired low/effort peak μ and FWHM rows for Figure 2 Panel E.
+    """State-long Panel E rows: one row per matched pair × band × state.
 
-    PRIMARY_META: one row per (dataset, participant, band).
-    HIIT sensitivity: one row per matched Rest–Tetris pair
-    (participant × session × contrast × band); no PRE/POST or PH/PS collapse.
+    μ and FWHM are state-specific (shown when that state's peak is identifiable).
+    Joint identifiability is not required to display one state.
     """
     f = _fig()
+    peak_by_obs: dict[str, Mapping[str, object]] = {}
+    for prow in peak_params_rows or ():
+        obs = f._as_str(prow.get("observation_id"))
+        if obs:
+            peak_by_obs[obs] = prow
+
     export: list[dict[str, object]] = []
     seen: set[tuple[str, ...]] = set()
     for row in paired_rows:
@@ -302,31 +375,223 @@ def build_panel_e_peak_export(
         if key in seen:
             continue
         seen.add(key)
-        low_peak = f._as_bool(row.get("low_has_identifiable_peak"))
-        effort_peak = f._as_bool(row.get("effort_has_identifiable_peak"))
-        low_mu = f._as_float(row.get("low_peak_center_mu_s"))
-        effort_mu = f._as_float(row.get("effort_peak_center_mu_s"))
-        low_fwhm = f._as_float(row.get("low_fwhm_s"))
-        effort_fwhm = f._as_float(row.get("effort_fwhm_s"))
-        export.append(
-            {
-                "dataset_id": dataset_id,
-                "participant_id": participant_id,
-                "session_id": session_id,
-                "contrast_id": contrast_id,
-                "band": band,
-                "low_has_identifiable_peak": low_peak,
-                "effort_has_identifiable_peak": effort_peak,
-                "low_peak_center_mu_s": low_mu if low_peak else float("nan"),
-                "effort_peak_center_mu_s": effort_mu if effort_peak else float("nan"),
-                "low_fwhm_s": low_fwhm if low_peak else float("nan"),
-                "effort_fwhm_s": effort_fwhm if effort_peak else float("nan"),
-                "row_type": (
-                    ROW_TYPE_SENSITIVITY_DISPLAY if hiit_sensitivity else "primary"
-                ),
-            }
+
+        period = _panel_e_period_from_contrast(contrast_id)
+        dataset_role = _panel_e_dataset_role(
+            hiit_sensitivity=hiit_sensitivity, dataset_id=dataset_id
         )
+        endpoint = f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold()
+        duration_s = f._as_int(row.get("duration_s"), EXPECTED_PRIMARY_DURATION_S)
+        representation = f._as_str(
+            row.get("power_representation"), f.PRIMARY_REPRESENTATION
+        ).casefold()
+        row_type = (
+            ROW_TYPE_SENSITIVITY_DISPLAY if hiit_sensitivity else "primary"
+        )
+
+        state_specs = (
+            (
+                "rest",
+                f._as_bool(row.get("low_has_identifiable_peak")),
+                f._as_float(row.get("low_peak_center_mu_s")),
+                f._as_float(row.get("low_fwhm_s")),
+                f._as_float(row.get("low_peak_height_A")),
+                f._as_str(row.get("low_observation_ids")),
+            ),
+            (
+                "task",
+                f._as_bool(row.get("effort_has_identifiable_peak")),
+                f._as_float(row.get("effort_peak_center_mu_s")),
+                f._as_float(row.get("effort_fwhm_s")),
+                f._as_float(row.get("effort_peak_height_A")),
+                f._as_str(row.get("effort_observation_ids")),
+            ),
+        )
+        for state, identifiable, mu, fwhm, amplitude, obs_ids in state_specs:
+            first_obs = obs_ids.split(";")[0].strip() if obs_ids else ""
+            peak = peak_by_obs.get(first_obs, {})
+            rmse = f._as_float(peak.get("rmse")) if peak else float("nan")
+            amp_se = f._as_float(peak.get("se_peak_height_A")) if peak else float("nan")
+            amp_to_rmse = (
+                float(amplitude / rmse)
+                if math.isfinite(amplitude) and math.isfinite(rmse) and rmse > 0
+                else float("nan")
+            )
+            exclusion = ""
+            fit_status = "identifiable" if identifiable else "not_identifiable"
+            if identifiable:
+                exclusion = ""
+            elif peak:
+                exclusion = f._as_str(peak.get("exclusion_reason")) or (
+                    "no_identifiable_positive_peak"
+                )
+            else:
+                exclusion = "missing_peak_fit"
+            export.append(
+                {
+                    "dataset_id": dataset_id,
+                    "dataset_role": dataset_role,
+                    "participant_id": participant_id,
+                    "session_id": session_id,
+                    "period": period,
+                    "contrast_id": contrast_id,
+                    "state": state,
+                    "band": band,
+                    "endpoint": endpoint,
+                    "duration_s": duration_s,
+                    "representation": representation,
+                    "peak_identifiable": identifiable,
+                    "peak_center_mu_s": mu if identifiable else float("nan"),
+                    "peak_fwhm_s": fwhm if identifiable else float("nan"),
+                    "fit_status": fit_status,
+                    "exclusion_reason": exclusion,
+                    "amplitude": amplitude,
+                    "rmse": rmse,
+                    "amplitude_to_rmse": amp_to_rmse,
+                    "amplitude_se": amp_se,
+                    "r_squared": float("nan"),
+                    "row_type": row_type,
+                }
+            )
     return export
+
+
+def _panel_e_point_estimates_match(
+    current: Sequence[Mapping[str, object]],
+    prior: Sequence[Mapping[str, object]],
+) -> bool:
+    """True when dataset×band×state×parameter point estimates agree."""
+    f = _fig()
+
+    def _key(row: Mapping[str, object]) -> tuple[str, str, str, str]:
+        return (
+            f._as_str(row.get("dataset_id")),
+            f._as_str(row.get("band")).casefold(),
+            f._as_str(row.get("state")).casefold(),
+            f._as_str(row.get("parameter")).casefold(),
+        )
+
+    current_map = {_key(r): r for r in current}
+    prior_map = {_key(r): r for r in prior}
+    if set(current_map) != set(prior_map):
+        return False
+    for key, crow in current_map.items():
+        prow = prior_map[key]
+        if int(crow.get("identifiable_n") or 0) != int(prow.get("identifiable_n") or 0):
+            return False
+        if int(crow.get("unique_participant_n") or 0) != int(
+            prow.get("unique_participant_n") or 0
+        ):
+            return False
+        c_est = f._as_float(crow.get("estimate"))
+        p_est = f._as_float(prow.get("estimate"))
+        if math.isfinite(c_est) != math.isfinite(p_est):
+            return False
+        if math.isfinite(c_est) and abs(c_est - p_est) > 1e-12:
+            return False
+    return True
+
+
+def _panel_e_participant_mean_bootstrap(
+    values_by_participant: Mapping[str, Sequence[float]],
+    *,
+    n_draws: int,
+    seed: int,
+) -> tuple[float, float, float, str]:
+    """Mean of participant means with percentile cluster bootstrap CI."""
+    unit_ids = sorted(values_by_participant)
+    unit_means = np.asarray(
+        [float(np.mean(values_by_participant[uid])) for uid in unit_ids],
+        dtype=float,
+    )
+    n_units = int(unit_means.size)
+    if n_units == 0:
+        return float("nan"), float("nan"), float("nan"), "no_identifiable_observations"
+    point = float(np.mean(unit_means))
+    if n_units < 2:
+        return point, float("nan"), float("nan"), "n_participants_lt_2"
+    rng = np.random.default_rng(int(seed) & 0xFFFFFFFF)
+    boots = np.empty(int(n_draws), dtype=float)
+    for i in range(int(n_draws)):
+        idx = rng.integers(0, n_units, size=n_units)
+        boots[i] = float(np.mean(unit_means[idx]))
+    lo, hi = np.quantile(boots, [0.025, 0.975])
+    return point, float(lo), float(hi), ""
+
+
+def build_panel_e_state_summaries(
+    state_rows: Sequence[Mapping[str, object]],
+    *,
+    n_bootstrap: int | None = None,
+    seed: int | None = None,
+) -> list[dict[str, object]]:
+    """Dataset×band×state×parameter summaries (mean of participant means)."""
+    f = _fig()
+    n_bootstrap = int(n_bootstrap if n_bootstrap is not None else f.FIGURE1_BOOTSTRAP_N)
+    seed = int(seed if seed is not None else f.FIGURE1_BOOTSTRAP_SEED)
+
+    groups: dict[tuple[str, str, str, str], list[Mapping[str, object]]] = {}
+    for row in state_rows:
+        dataset_id = f._as_str(row.get("dataset_id"))
+        band = f._as_str(row.get("band")).casefold()
+        state = f._as_str(row.get("state")).casefold()
+        if band not in f.BAND_ORDER or state not in {"rest", "task"}:
+            continue
+        key = (dataset_id, band, state, f._as_str(row.get("dataset_role"), "primary_meta"))
+        groups.setdefault(key, []).append(row)
+
+    summaries: list[dict[str, object]] = []
+    for (dataset_id, band, state, dataset_role), rows in sorted(groups.items()):
+        candidate_n = len(rows)
+        for parameter, value_field in (
+            ("mu", "peak_center_mu_s"),
+            ("fwhm", "peak_fwhm_s"),
+        ):
+            by_participant: dict[str, list[float]] = {}
+            id_sessions: set[tuple[str, str]] = set()
+            identifiable_n = 0
+            for row in rows:
+                if not bool(row.get("peak_identifiable")):
+                    continue
+                value = f._as_float(row.get(value_field))
+                if not math.isfinite(value):
+                    continue
+                identifiable_n += 1
+                pid = f._as_str(row.get("participant_id"))
+                by_participant.setdefault(pid, []).append(value)
+                id_sessions.add((pid, f._as_str(row.get("session_id"), "single")))
+            estimate, ci_lo, ci_hi, ci_note = _panel_e_participant_mean_bootstrap(
+                by_participant,
+                n_draws=n_bootstrap,
+                seed=seed + abs(hash((dataset_id, band, state, parameter))) % 10_000,
+            )
+            summaries.append(
+                {
+                    "dataset_id": dataset_id,
+                    "dataset_role": dataset_role,
+                    "band": band,
+                    "state": state,
+                    "parameter": parameter,
+                    "estimate": estimate,
+                    "ci_lower_95": ci_lo,
+                    "ci_upper_95": ci_hi,
+                    "candidate_n": candidate_n,
+                    "identifiable_n": identifiable_n,
+                    "identifiable_percent": (
+                        100.0 * identifiable_n / candidate_n if candidate_n else float("nan")
+                    ),
+                    "unique_session_n": len(id_sessions),
+                    "unique_participant_n": len(by_participant),
+                    "bootstrap_draws": n_bootstrap,
+                    "bootstrap_seed": seed,
+                    "bootstrap_cluster_field": PANEL_E_BOOTSTRAP_CLUSTER_FIELD,
+                    "bootstrap_estimand": PANEL_E_BOOTSTRAP_ESTIMAND,
+                    "ci_method": PANEL_E_CI_METHOD,
+                    "ci_note": ci_note,
+                }
+            )
+    return summaries
+
 
 
 def build_curve_lag_index(
@@ -1817,169 +2082,312 @@ def render_figure2(
         )
     )
 
-    # ----- Panel E: paired low vs effort μ and FWHM -----
-    gs_e = GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[2, 0], wspace=0.95)
+    # ----- Panel E: state-specific μ and FWHM (visualization layout) -----
+    gs_e_wrap = GridSpecFromSubplotSpec(
+        2,
+        1,
+        subplot_spec=gs[2, 0],
+        height_ratios=[0.40, 1.0],
+        hspace=0.30,
+    )
+    ax_e_title = fig.add_subplot(gs_e_wrap[0, 0])
+    ax_e_title.axis("off")
+    # μ | shared sample-size column | FWHM — avoids n-label / outlier collisions.
+    gs_e = GridSpecFromSubplotSpec(
+        1,
+        3,
+        subplot_spec=gs_e_wrap[1, 0],
+        width_ratios=[1.2, 0.40, 1.2],
+        wspace=0.30,
+    )
     ax_e_mu = fig.add_subplot(gs_e[0, 0])
-    ax_e_fwhm = fig.add_subplot(gs_e[0, 1])
+    ax_e_n = fig.add_subplot(gs_e[0, 1], sharey=ax_e_mu)
+    ax_e_fwhm = fig.add_subplot(gs_e[0, 2], sharey=ax_e_mu)
     panel_e_hiit_sensitivity = False
+    peak_params = f.read_csv_rows(inputs.get("peak_params"))
     if meta_pairs:
-        peak_export = build_panel_e_peak_export(meta_pairs, hiit_sensitivity=False)
+        peak_export = build_panel_e_peak_export(
+            meta_pairs,
+            hiit_sensitivity=False,
+            peak_params_rows=peak_params,
+        )
     else:
         hiit_peak_pairs = filter_hiit_sensitivity_paired_rows(paired)
         peak_export = build_panel_e_peak_export(
-            hiit_peak_pairs, hiit_sensitivity=True
+            hiit_peak_pairs,
+            hiit_sensitivity=True,
+            peak_params_rows=peak_params,
         )
         panel_e_hiit_sensitivity = bool(peak_export)
+    panel_e_summaries = build_panel_e_state_summaries(peak_export)
+    # Visualization regenerations must not churn bootstrap CIs when the
+    # underlying state-long observations and point estimates are unchanged.
+    prior_summary_csv = source_dir / "figure2_panel_e_state_summaries.csv"
+    if prior_summary_csv.is_file():
+        prior_summaries = f.read_csv_rows(prior_summary_csv)
+        if prior_summaries and _panel_e_point_estimates_match(
+            panel_e_summaries, prior_summaries
+        ):
+            panel_e_summaries = prior_summaries
 
-    eq_export: list[dict[str, object]] = []
-    for row in equivalence:
-        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
-            continue
-        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
-            continue
-        # Equivalence TOST is PRIMARY_META display context; skip on HIIT-only path.
-        if panel_e_hiit_sensitivity:
-            continue
-        eq_export.append(
-            {
-                "dataset_id": f._as_str(row.get("dataset_id")),
-                "band": f._as_str(row.get("band")).casefold(),
-                "mean_mu": f._as_float(row.get("mean_mu")),
-                "ci_low": f._as_float(row.get("ci_low")),
-                "ci_high": f._as_float(row.get("ci_high")),
-                "equivalent": f._as_str(row.get("equivalent")),
-                "tost_p": f._as_float(row.get("tost_p")),
-            }
-        )
+    panel_e_mu_title = "Peak center, μ"
+    panel_e_fwhm_title = "Peak width, FWHM"
+    panel_e_rest_color = f.PALETTE["green"]
+    panel_e_task_color = f.PALETTE["vermillion"]
+    panel_e_legend_handles: list[object] = []
 
-    # Short subplot titles avoid collision; HIIT context is in the panel letter/caption.
-    panel_e_mu_title = "Peak μ (paired)"
-    panel_e_fwhm_title = "FWHM (descriptive)"
-    panel_e_shared_title = (
-        "HIIT Sensitivity: paired peaks"
-        if panel_e_hiit_sensitivity
-        else ""
-    )
-    if peak_export or eq_export:
-        ax_e_mu.axvspan(
-            -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
-            EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
-            facecolor=f.PALETTE["orange"],
-            alpha=0.25,
-            zorder=0,
-            label=f.MU_EQUIVALENCE_LABEL,
-        )
-        for bi, band in enumerate(f.BAND_ORDER):
-            low_mus = [
-                float(r["low_peak_center_mu_s"])
-                for r in peak_export
-                if r["band"] == band
-                and math.isfinite(float(r["low_peak_center_mu_s"]))
-            ]
-            effort_mus = [
-                float(r["effort_peak_center_mu_s"])
-                for r in peak_export
-                if r["band"] == band
-                and math.isfinite(float(r["effort_peak_center_mu_s"]))
-            ]
-            rng = np.random.default_rng(bi + 21)
-            if low_mus:
-                jitter = (rng.random(len(low_mus)) - 0.5) * 0.15
-                ax_e_mu.scatter(
-                    low_mus,
-                    np.full(len(low_mus), bi) - 0.15 + jitter,
-                    color=f.PALETTE["green"],
-                    s=28,
-                    alpha=0.55,
-                    edgecolors=f.PALETTE["dark_gray"],
-                    linewidths=0.4,
-                    zorder=2,
+    def _panel_e_summary_lookup(
+        band: str, state: str, parameter: str
+    ) -> dict[str, object] | None:
+        for row in panel_e_summaries:
+            if (
+                f._as_str(row.get("band")).casefold() == band
+                and f._as_str(row.get("state")).casefold() == state
+                and f._as_str(row.get("parameter")).casefold() == parameter
+            ):
+                return row
+        return None
+
+    def _plot_panel_e_parameter(
+        ax: plt.Axes,
+        *,
+        parameter: str,
+        value_field: str,
+        xlabel: str,
+        show_zero: bool,
+        show_ylabels: bool,
+    ) -> None:
+        from matplotlib.ticker import MaxNLocator
+
+        rest_color = panel_e_rest_color
+        task_color = panel_e_task_color
+        all_values: list[float] = []
+        y_rest, y_task = -0.22, 0.22
+
+        # Soft band separators (behind everything).
+        for bi in range(len(f.BAND_ORDER)):
+            if bi % 2 == 1:
+                ax.axhspan(
+                    bi - 0.48,
+                    bi + 0.48,
+                    facecolor="#F3F3F3",
+                    edgecolor="none",
+                    zorder=0,
+                    alpha=1.0,
                 )
-                ax_e_mu.scatter(
-                    [float(np.mean(low_mus))],
-                    [bi - 0.15],
-                    color=f.PALETTE["green"],
-                    s=80,
-                    marker="D",
-                    edgecolors="black",
-                    linewidths=0.8,
+
+        # Pass 1: faint observation cloud.
+        for bi, band in enumerate(f.BAND_ORDER):
+            for state, y_off, color in (
+                ("rest", y_rest, rest_color),
+                ("task", y_task, task_color),
+            ):
+                values = [
+                    float(r[value_field])
+                    for r in peak_export
+                    if r["band"] == band
+                    and r["state"] == state
+                    and bool(r.get("peak_identifiable"))
+                    and math.isfinite(float(r[value_field]))
+                ]
+                all_values.extend(values)
+                rng = np.random.default_rng(bi + (21 if state == "rest" else 41))
+                if values:
+                    jitter = (rng.random(len(values)) - 0.5) * 0.08
+                    ax.scatter(
+                        values,
+                        np.full(len(values), bi) + y_off + jitter,
+                        color=color,
+                        s=5,
+                        alpha=0.12,
+                        edgecolors="none",
+                        zorder=2,
+                    )
+
+        # Pass 2: dominant summary diamonds + CIs.
+        for bi, band in enumerate(f.BAND_ORDER):
+            for state, y_off, color in (
+                ("rest", y_rest, rest_color),
+                ("task", y_task, task_color),
+            ):
+                summary = _panel_e_summary_lookup(band, state, parameter)
+                if summary is None:
+                    continue
+                est = f._as_float(summary.get("estimate"))
+                lo = f._as_float(summary.get("ci_lower_95"))
+                hi = f._as_float(summary.get("ci_upper_95"))
+                if not math.isfinite(est):
+                    continue
+                if math.isfinite(lo) and math.isfinite(hi):
+                    ax.errorbar(
+                        est,
+                        bi + y_off,
+                        xerr=[[est - lo], [hi - est]],
+                        fmt="D",
+                        color=color,
+                        markersize=5.5,
+                        markeredgecolor="black",
+                        markeredgewidth=0.6,
+                        ecolor=color,
+                        elinewidth=f.LINE_WIDTH + 0.6,
+                        capsize=3.5,
+                        capthick=f.LINE_WIDTH + 0.3,
+                        zorder=8,
+                        clip_on=False,
+                    )
+                else:
+                    ax.scatter(
+                        [est],
+                        [bi + y_off],
+                        color=color,
+                        s=55,
+                        marker="D",
+                        edgecolors="black",
+                        linewidths=0.9,
+                        zorder=8,
+                        clip_on=False,
+                    )
+
+        if all_values:
+            lo_v = float(min(all_values))
+            hi_v = float(max(all_values))
+            span = max(hi_v - lo_v, 1.0)
+            pad = 0.04 * span
+            ax.set_xlim(lo_v - pad, hi_v + pad)
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+
+        ax.set_yticks(range(len(f.BAND_ORDER)))
+        if show_ylabels:
+            ax.set_yticklabels([f._band_display(b) for b in f.BAND_ORDER])
+        else:
+            ax.tick_params(axis="y", labelleft=False, length=0)
+        # Manuscript band order top → bottom: Theta, Alpha, Beta, Low gamma.
+        ax.set_ylim(len(f.BAND_ORDER) - 0.55, -0.55)
+        ax.set_xlabel(xlabel, fontsize=f.FS_AXIS - 2)
+        f._style_axes(ax, grid=True)
+        if show_zero:
+            # Distinct from light gridlines; not a Rest–Task null label.
+            ax.axvline(
+                0.0,
+                color=f.PALETTE["dark_gray"],
+                lw=1.6,
+                ls=(0, (4, 2.5)),
+                zorder=1,
+                alpha=0.85,
+            )
+
+    def _plot_panel_e_sample_sizes(ax: plt.Axes) -> None:
+        """Single shared n column: identifiable obs / biological participants."""
+        y_rest, y_task = -0.22, 0.22
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(len(f.BAND_ORDER) - 0.55, -0.55)
+        for bi in range(len(f.BAND_ORDER)):
+            if bi % 2 == 1:
+                ax.axhspan(
+                    bi - 0.48,
+                    bi + 0.48,
+                    facecolor="#F3F3F3",
+                    edgecolor="none",
+                    zorder=0,
+                    alpha=1.0,
+                )
+        # Fixed left edge so R/T strings align across bands.
+        count_x = 0.12
+        for bi, band in enumerate(f.BAND_ORDER):
+            for state, y_off, color, prefix in (
+                ("rest", y_rest, panel_e_rest_color, "R"),
+                ("task", y_task, panel_e_task_color, "T"),
+            ):
+                summary = _panel_e_summary_lookup(band, state, "mu")
+                if summary is None:
+                    summary = _panel_e_summary_lookup(band, state, "fwhm")
+                if summary is None:
+                    continue
+                n_obs = int(summary.get("identifiable_n") or 0)
+                n_part = int(summary.get("unique_participant_n") or 0)
+                ax.text(
+                    count_x,
+                    bi + y_off,
+                    f"{prefix} {n_obs}/{n_part}",
+                    ha="left",
+                    va="center",
+                    fontsize=f.FS_TICK - 6,
+                    color=color,
+                    fontfamily="monospace",
+                    clip_on=False,
                     zorder=3,
                 )
-            if effort_mus:
-                jitter = (rng.random(len(effort_mus)) - 0.5) * 0.15
-                ax_e_mu.scatter(
-                    effort_mus,
-                    np.full(len(effort_mus), bi) + 0.15 + jitter,
-                    color=f.PALETTE["vermillion"],
-                    s=28,
-                    alpha=0.55,
-                    edgecolors=f.PALETTE["dark_gray"],
-                    linewidths=0.4,
-                    zorder=2,
-                )
-                ax_e_mu.scatter(
-                    [float(np.mean(effort_mus))],
-                    [bi + 0.15],
-                    color=f.PALETTE["vermillion"],
-                    s=80,
-                    marker="D",
-                    edgecolors="black",
-                    linewidths=0.8,
-                    zorder=3,
-                )
-        ax_e_mu.set_yticks(range(len(f.BAND_ORDER)))
-        ax_e_mu.set_yticklabels([f._band_display(b) for b in f.BAND_ORDER])
-        ax_e_mu.set_xlabel("Peak μ (s)", fontsize=f.FS_AXIS - 2)
-        f._style_axes(ax_e_mu)
-        f._ref_vline(ax_e_mu, 0.0)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        # Place caption below the axis so it does not crowd low-gamma counts.
+        ax.set_xlabel("")
+        ax.text(
+            0.5,
+            -0.12,
+            "n obs/part",
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontsize=f.FS_TICK - 6,
+            color=f.PALETTE["dark_gray"],
+            clip_on=False,
+        )
+        ax.tick_params(left=False, bottom=False, labelleft=False)
 
-        for bi, band in enumerate(f.BAND_ORDER):
-            low_f = [
-                float(r["low_fwhm_s"])
-                for r in peak_export
-                if r["band"] == band and math.isfinite(float(r["low_fwhm_s"]))
-            ]
-            effort_f = [
-                float(r["effort_fwhm_s"])
-                for r in peak_export
-                if r["band"] == band and math.isfinite(float(r["effort_fwhm_s"]))
-            ]
-            rng = np.random.default_rng(bi + 41)
-            if low_f:
-                jitter = (rng.random(len(low_f)) - 0.5) * 0.15
-                ax_e_fwhm.scatter(
-                    low_f,
-                    np.full(len(low_f), bi) - 0.15 + jitter,
-                    color=f.PALETTE["green"],
-                    s=28,
-                    alpha=0.55,
-                    edgecolors=f.PALETTE["dark_gray"],
-                    linewidths=0.4,
-                    zorder=2,
-                )
-            if effort_f:
-                jitter = (rng.random(len(effort_f)) - 0.5) * 0.15
-                ax_e_fwhm.scatter(
-                    effort_f,
-                    np.full(len(effort_f), bi) + 0.15 + jitter,
-                    color=f.PALETTE["vermillion"],
-                    s=28,
-                    alpha=0.55,
-                    edgecolors=f.PALETTE["dark_gray"],
-                    linewidths=0.4,
-                    zorder=2,
-                )
-        ax_e_fwhm.set_yticks(range(len(f.BAND_ORDER)))
-        ax_e_fwhm.set_yticklabels([f._band_display(b) for b in f.BAND_ORDER])
-        ax_e_fwhm.set_xlabel("FWHM (s)", fontsize=f.FS_AXIS - 2)
+    if peak_export:
+        _plot_panel_e_parameter(
+            ax_e_mu,
+            parameter="mu",
+            value_field="peak_center_mu_s",
+            xlabel="Peak μ (s)",
+            show_zero=True,
+            show_ylabels=True,
+        )
+        _plot_panel_e_sample_sizes(ax_e_n)
+        _plot_panel_e_parameter(
+            ax_e_fwhm,
+            parameter="fwhm",
+            value_field="peak_fwhm_s",
+            xlabel="FWHM (s)",
+            show_zero=False,
+            show_ylabels=False,
+        )
         ax_e_fwhm.ticklabel_format(axis="x", useOffset=False, style="plain")
-        f._style_axes(ax_e_fwhm)
         panel_e_expected_na = False
         panel_e_na_detail = ""
+        from matplotlib.lines import Line2D
+
+        panel_e_legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                color=panel_e_rest_color,
+                marker="D",
+                linestyle="",
+                markersize=4.5,
+                markeredgecolor="black",
+                markeredgewidth=0.45,
+                label="Rest",
+            ),
+            Line2D(
+                [0],
+                [0],
+                color=panel_e_task_color,
+                marker="D",
+                linestyle="",
+                markersize=4.5,
+                markeredgecolor="black",
+                markeredgewidth=0.6,
+                label="Task",
+            ),
+        ]
     else:
         panel_e_expected_na = True
         panel_e_na_detail = "No PRIMARY_META paired peak rows."
         msg = f.primary_meta_expected_na_message(panel_e_na_detail)
+        ax_e_n.axis("off")
         f._mark_empty_panel(
             ax_e_mu,
             msg,
@@ -1992,64 +2400,59 @@ def render_figure2(
             xlabel="FWHM (s)",
             ylabel=f.EEG_BAND_YLABEL,
         )
-    f._set_panel_title(ax_e_mu, panel_e_mu_title, fontsize=f.FS_PANEL_TITLE - 4, pad=8)
-    f._set_panel_title(ax_e_fwhm, panel_e_fwhm_title, fontsize=f.FS_PANEL_TITLE - 4, pad=8)
-    f._add_panel_label(ax_e_mu, "E")
-    panel_e_csv = source_dir / "figure2_panel_e_paired_peaks.csv"
-    f.write_source_csv(
-        panel_e_csv,
-        peak_export,
-        (
-            "dataset_id",
-            "participant_id",
-            "session_id",
-            "contrast_id",
-            "band",
-            "low_has_identifiable_peak",
-            "effort_has_identifiable_peak",
-            "low_peak_center_mu_s",
-            "effort_peak_center_mu_s",
-            "low_fwhm_s",
-            "effort_fwhm_s",
-            "row_type",
-        ),
+    f._set_panel_title(ax_e_mu, panel_e_mu_title, fontsize=f.FS_PANEL_TITLE - 5, pad=6)
+    f._set_panel_title(
+        ax_e_fwhm, panel_e_fwhm_title, fontsize=f.FS_PANEL_TITLE - 5, pad=6
     )
-    source_paths.append(panel_e_csv)
+    # Keep the middle column title blank so subplot titles stay aligned.
+    ax_e_n.set_title(" ", fontsize=f.FS_PANEL_TITLE - 5, pad=6)
+    panel_e_csv = source_dir / "figure2_panel_e_state_peaks.csv"
+    panel_e_summary_csv = source_dir / "figure2_panel_e_state_summaries.csv"
+    # Drop legacy wide paired-peaks export from prior Panel E layout.
+    for stale in (
+        source_dir / "figure2_panel_e_paired_peaks.csv",
+    ):
+        if stale.exists():
+            stale.unlink()
+    f.write_source_csv(panel_e_csv, peak_export, PANEL_E_STATE_LONG_FIELDS)
+    f.write_source_csv(panel_e_summary_csv, panel_e_summaries, PANEL_E_SUMMARY_FIELDS)
+    source_paths.extend([panel_e_csv, panel_e_summary_csv])
     if panel_e_hiit_sensitivity:
         panel_e_keys = [
-            "cohort=HIIT_sensitivity_matched_observation_pairs",
-            "sampling_unit=matched_rest_tetris_pair",
-            "aggregation=matched_observation_pairs",
-            "fwhm=descriptive",
+            "cohort=HIIT_sensitivity_state_specific_peaks",
+            "sampling_unit=biological_participant",
+            "estimand=mean_of_participant_means",
+            "eligibility=state_specific_identifiable_peak",
             "enters_primary_meta=false",
             f"panel_status={f.PANEL_STATUS_SENSITIVITY_DISPLAY}",
         ]
         panel_e_notes = f.FIGURE2_PANEL_E_HIIT_SENSITIVITY_NOTE
-        panel_e_panel_title = "HIIT Sensitivity: paired low vs effort μ and FWHM"
+        panel_e_panel_title = "HIIT sensitivity: Peak center and width by state"
     elif panel_e_expected_na:
         panel_e_keys = [
             "cohort=PRIMARY_META_C5_pairs",
-            "sampling_unit=dataset_participant",
-            "fwhm=descriptive",
+            "sampling_unit=biological_participant",
+            "estimand=mean_of_participant_means",
             f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",
         ]
         panel_e_notes = f.annotate_expected_not_applicable(
             f.FIGURE2_PANEL_E_NOTE,
             detail=panel_e_na_detail,
         )
-        panel_e_panel_title = "Paired low vs effort μ and FWHM"
+        panel_e_panel_title = "Peak center and width by state"
     else:
         panel_e_keys = [
             "cohort=PRIMARY_META_C5_pairs",
-            "sampling_unit=dataset_participant",
-            "fwhm=descriptive",
+            "sampling_unit=biological_participant",
+            "estimand=mean_of_participant_means",
+            "eligibility=state_specific_identifiable_peak",
         ]
         panel_e_notes = f.FIGURE2_PANEL_E_NOTE
-        panel_e_panel_title = "Paired low vs effort μ and FWHM"
+        panel_e_panel_title = "Peak center and width by state"
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure2",
-            panel_id="paired_peaks_mu_fwhm",
+            panel_id="state_peaks_mu_fwhm",
             title=panel_e_panel_title,
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
@@ -2278,17 +2681,46 @@ def render_figure2(
         handletextpad=0.35,
         columnspacing=1.2,
     )
-    if panel_e_shared_title:
-        pos_e = gs[2, 0].get_position(fig)
-        fig.text(
-            pos_e.x0,
-            pos_e.y1 + 0.012,
-            panel_e_shared_title,
-            ha="left",
-            va="bottom",
-            fontsize=f.FS_PANEL_TITLE - 2,
-            fontweight="bold",
-            color="black",
+    ax_e_title.text(
+        0.0,
+        0.78,
+        panel_e_panel_title,
+        transform=ax_e_title.transAxes,
+        ha="left",
+        va="center",
+        fontsize=f.FS_PANEL_TITLE - 2,
+        fontweight="bold",
+        color="black",
+    )
+    # Panel letter aligned with the Panel E title row (not subplot titles).
+    ax_e_title.annotate(
+        "E",
+        xy=(0.0, 0.78),
+        xycoords="axes fraction",
+        xytext=(-32, 0),
+        textcoords="offset points",
+        fontsize=f.FS_PANEL_LABEL,
+        fontweight="bold",
+        fontfamily="sans-serif",
+        va="center",
+        ha="left",
+        color=f.PALETTE["dark_gray"],
+        clip_on=False,
+        annotation_clip=False,
+        zorder=20,
+    )
+    if panel_e_legend_handles:
+        # Center shared Rest/Task legend across the full Panel E width.
+        ax_e_title.legend(
+            handles=panel_e_legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.02),
+            ncol=2,
+            fontsize=f.FS_TICK - 2,
+            frameon=False,
+            borderaxespad=0.0,
+            handletextpad=0.35,
+            columnspacing=1.4,
         )
 
     if panel_a_hiit_sensitivity:
@@ -2343,9 +2775,12 @@ def render_figure2(
         panel_d_caption = f"D: {f.FIGURE2_PANEL_D_NOTE}\n"
     if panel_e_hiit_sensitivity:
         panel_e_caption = (
-            "E: HIIT Sensitivity (display-only) — paired Rest–Tetris peak μ and FWHM "
-            "from C5 matched pairs (PRE/POST each contribute; no PRE/POST or PH/PS "
-            "collapse); FWHM descriptive only.\n"
+            "E: HIIT Sensitivity (display-only) — Gaussian peak centers (μ) and widths "
+            "(FWHM) shown separately for Rest and Task by band; summaries and 95% CIs "
+            "conditional on an identifiable peak in that state (Rest/Task may differ "
+            "in n); participant-clustered uncertainty; descriptive only, not a formal "
+            "paired Rest–Task test. The center column (R / T) reports identifiable "
+            "observations / unique biological participants once for both μ and FWHM.\n"
         )
     else:
         panel_e_caption = f"E: {f.FIGURE2_PANEL_E_NOTE}\n"
@@ -2395,7 +2830,12 @@ def render_figure2(
             "- Panel D: Fisher-z ZLPI band×state interaction (low/high demand); "
             "alpha-versus-other-band state-effect contrasts "
             "(negative ⇒ stronger alpha attenuation).\n"
-            "- Panel E: paired low/effort μ and FWHM; FWHM descriptive.\n"
+            "- Panel E: state-specific Rest/Task μ and FWHM (not joint "
+            "complete-case); separate state summaries = mean of "
+            "biological-participant means with participant-clustered 95% "
+            "percentile bootstrap CIs; no Δμ/ΔFWHM or linked Rest–Task lines; "
+            "descriptive only (not a formal paired test). Paired Δ fields "
+            "retained upstream in C5 only.\n"
             "- Panel F: prespecified ds003690 graded contrasts only.\n"
             "- Replaces prior 2×2 layout (paired scatter / all-band meta / "
             "D180 / μ-TOST).\n"
@@ -2418,9 +2858,12 @@ def render_figure2(
 
 
 __all__ = [
+    "PANEL_E_STATE_LONG_FIELDS",
+    "PANEL_E_SUMMARY_FIELDS",
     "build_curve_lag_index",
     "build_hiit_sensitivity_panel_a_series",
     "build_panel_e_peak_export",
+    "build_panel_e_state_summaries",
     "collapse_hiit_session_lag_series",
     "filter_hiit_sensitivity_paired_rows",
     "filter_primary_meta_paired_rows",

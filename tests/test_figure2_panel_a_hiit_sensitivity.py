@@ -503,20 +503,26 @@ class Figure2PanelAHiitFallbackRenderTests(unittest.TestCase):
             )
 
             panel_e = next(
-                p for p in artifacts.panels if p.panel_id == "paired_peaks_mu_fwhm"
+                p for p in artifacts.panels if p.panel_id == "state_peaks_mu_fwhm"
             )
-            self.assertIn("HIIT Sensitivity", panel_e.title)
+            self.assertIn("HIIT sensitivity", panel_e.title)
+            self.assertIn("Peak center and width by state", panel_e.title)
             self.assertIn(
                 f"panel_status={PANEL_STATUS_SENSITIVITY_DISPLAY}",
                 panel_e.analysis_keys,
             )
             peaks = read_csv_rows(
-                out / "source_data" / "figure2_panel_e_paired_peaks.csv"
+                out / "source_data" / "figure2_panel_e_state_peaks.csv"
             )
             self.assertTrue(peaks)
             self.assertEqual({r["row_type"] for r in peaks}, {"sensitivity_display"})
-            self.assertEqual(len(peaks), 12)  # 3 contrasts × 4 bands
-
+            # 3 contrasts × 4 bands × 2 states (rest/task)
+            self.assertEqual(len(peaks), 24)
+            self.assertEqual({r["state"] for r in peaks}, {"rest", "task"})
+            summaries = read_csv_rows(
+                out / "source_data" / "figure2_panel_e_state_summaries.csv"
+            )
+            self.assertTrue(summaries)
             panel_f = next(p for p in artifacts.panels if p.panel_id == "graded_ds003690")
             self.assertIn(
                 f"panel_status={PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",

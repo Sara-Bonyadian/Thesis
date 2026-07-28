@@ -18,6 +18,7 @@ from ppg_eeg.confirmatory.nulls import (
     DEFAULT_N_SURROGATES,
     NULL_QC_FILENAME,
     NULL_SUBJECT_RESULTS_FILENAME,
+    NULL_SURROGATE_VALUES_FILENAME,
     NULL_SUMMARY_FILENAME,
     NULL_TYPE_AR1_INNOVATIONS,
     NULL_TYPE_BLOCK_SHUFFLE,
@@ -338,8 +339,12 @@ class TestWriteOutputs(unittest.TestCase):
             )
             self.assertEqual(paths["null_summary"].name, NULL_SUMMARY_FILENAME)
             self.assertEqual(paths["null_qc"].name, NULL_QC_FILENAME)
+            self.assertEqual(
+                paths["null_surrogate_values"].name, NULL_SURROGATE_VALUES_FILENAME
+            )
             for path in paths.values():
                 self.assertTrue(path.is_file())
+            self.assertEqual(len(result.surrogate_rows), 2 * 5)
 
 
 class TestSurrogateCountDefaults(unittest.TestCase):

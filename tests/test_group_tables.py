@@ -528,6 +528,8 @@ class TestMuAndEndpointSeparation(unittest.TestCase):
             memory_index=0.2,
             rest_identifiable=True,
             memory_identifiable=False,
+            rest_mu=-1.5,
+            memory_mu=2.0,
         )
         result = build_group_tables(endpoints, peaks)
         row = result.paired_contrast_rows[0]
@@ -536,10 +538,38 @@ class TestMuAndEndpointSeparation(unittest.TestCase):
         self.assertFalse(row["mu_contrast_eligible"])
         self.assertTrue(math.isnan(float(row["delta_peak_center_mu_s"])))
         self.assertTrue(math.isnan(float(row["delta_fwhm_s"])))
+        # State-specific display: Rest remains available when only Rest is identifiable.
+        self.assertTrue(row["low_has_identifiable_peak"])
+        self.assertFalse(row["effort_has_identifiable_peak"])
+        self.assertAlmostEqual(float(row["low_peak_center_mu_s"]), -1.5, places=12)
+        self.assertTrue(math.isfinite(float(row["low_fwhm_s"])))
+        self.assertTrue(math.isnan(float(row["effort_peak_center_mu_s"])))
         self.assertTrue(math.isnan(float(row["effort_fwhm_s"])))
         # Other contrasts still computed.
         self.assertAlmostEqual(float(row["delta_endpoint_index"]), -0.30, places=12)
         self.assertAlmostEqual(float(row["delta_peak_height_A"]), -0.20, places=12)
+
+    def test_task_only_identifiable_keeps_task_state_fields(self) -> None:
+        endpoints, peaks = _ds003838_pair(
+            "sub-002",
+            rest_index=0.5,
+            memory_index=0.2,
+            rest_identifiable=False,
+            memory_identifiable=True,
+            rest_mu=-1.5,
+            memory_mu=2.25,
+        )
+        result = build_group_tables(endpoints, peaks)
+        row = result.paired_contrast_rows[0]
+        self.assertFalse(row["mu_contrast_eligible"])
+        self.assertTrue(math.isnan(float(row["delta_peak_center_mu_s"])))
+        self.assertTrue(math.isnan(float(row["delta_fwhm_s"])))
+        self.assertFalse(row["low_has_identifiable_peak"])
+        self.assertTrue(row["effort_has_identifiable_peak"])
+        self.assertTrue(math.isnan(float(row["low_peak_center_mu_s"])))
+        self.assertTrue(math.isnan(float(row["low_fwhm_s"])))
+        self.assertAlmostEqual(float(row["effort_peak_center_mu_s"]), 2.25, places=12)
+        self.assertTrue(math.isfinite(float(row["effort_fwhm_s"])))
 
     def test_nonidentifiable_peak_leaves_shape_fields_blank(self) -> None:
         endpoints = [

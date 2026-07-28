@@ -830,14 +830,18 @@ def build_paired_contrasts(
                     effort.get("endpoint_name")
                 ).casefold()
                 fields = _key_fields(pair_key)
-                mu_eligible = bool(low["has_identifiable_peak"]) and bool(
-                    effort["has_identifiable_peak"]
-                )
+                # State-specific display eligibility (Panel E): independent by state.
+                rest_peak_eligible = bool(low["has_identifiable_peak"])
+                task_peak_eligible = bool(effort["has_identifiable_peak"])
+                # Paired Δμ/ΔFWHM eligibility (elsewhere): both states identifiable.
+                mu_contrast_eligible = bool(rest_peak_eligible and task_peak_eligible)
                 contrast_eligible, contrast_exclusion_reason = _contrast_eligibility(
                     low, effort
                 )
-                low_has_peak = bool(low["has_identifiable_peak"])
-                effort_has_peak = bool(effort["has_identifiable_peak"])
+                low_mu = float(low["peak_center_mu_s"])
+                effort_mu = float(effort["peak_center_mu_s"])
+                low_fwhm = float(low["fwhm_s"])
+                effort_fwhm = float(effort["fwhm_s"])
                 contrast_rows.append(
                     {
                         "dataset_id": dataset_id,
@@ -877,43 +881,41 @@ def build_paired_contrasts(
                             float(low["peak_height_A"]),
                         ),
                         "delta_peak_center_mu_s": (
-                            _delta(
-                                float(effort["peak_center_mu_s"]),
-                                float(low["peak_center_mu_s"]),
-                            )
-                            if mu_eligible
+                            _delta(effort_mu, low_mu)
+                            if mu_contrast_eligible
                             else float("nan")
                         ),
                         "delta_fwhm_s": (
-                            _delta(float(effort["fwhm_s"]), float(low["fwhm_s"]))
-                            if mu_eligible
+                            _delta(effort_fwhm, low_fwhm)
+                            if mu_contrast_eligible
                             else float("nan")
                         ),
                         "contrast_eligible": contrast_eligible,
                         "contrast_exclusion_reason": contrast_exclusion_reason,
-                        "mu_contrast_eligible": mu_eligible,
+                        "mu_contrast_eligible": mu_contrast_eligible,
                         "low_endpoint_eligible": bool(low["endpoint_eligible"]),
                         "effort_endpoint_eligible": bool(effort["endpoint_eligible"]),
-                        "low_has_identifiable_peak": low_has_peak,
-                        "effort_has_identifiable_peak": effort_has_peak,
+                        "low_has_identifiable_peak": rest_peak_eligible,
+                        "effort_has_identifiable_peak": task_peak_eligible,
                         "low_endpoint_index": float(low["endpoint_index"]),
                         "effort_endpoint_index": float(effort["endpoint_index"]),
                         "low_local_prominence": float(low["local_prominence"]),
                         "effort_local_prominence": float(effort["local_prominence"]),
                         "low_peak_height_A": float(low["peak_height_A"]),
                         "effort_peak_height_A": float(effort["peak_height_A"]),
-                        "low_peak_center_mu_s": float(low["peak_center_mu_s"])
-                        if mu_eligible
-                        else float("nan"),
-                        "effort_peak_center_mu_s": float(effort["peak_center_mu_s"])
-                        if mu_eligible
-                        else float("nan"),
-                        "low_fwhm_s": float(low["fwhm_s"])
-                        if low_has_peak
-                        else float("nan"),
-                        "effort_fwhm_s": float(effort["fwhm_s"])
-                        if effort_has_peak
-                        else float("nan"),
+                        # State display: suppress only the corresponding state's fields.
+                        "low_peak_center_mu_s": (
+                            low_mu if rest_peak_eligible else float("nan")
+                        ),
+                        "effort_peak_center_mu_s": (
+                            effort_mu if task_peak_eligible else float("nan")
+                        ),
+                        "low_fwhm_s": (
+                            low_fwhm if rest_peak_eligible else float("nan")
+                        ),
+                        "effort_fwhm_s": (
+                            effort_fwhm if task_peak_eligible else float("nan")
+                        ),
                     }
                 )
 

@@ -396,7 +396,7 @@ def build_visual_review_checklist() -> list[dict[str, object]]:
             "item_id": "fig3_panel_a_nulls",
             "figure_id": "figure3",
             "export_category": "manuscript",
-            "check": "Panel A circular-shift dataset null forest (main stem only)",
+            "check": "Panel A empirical-null distributions for circular/phase/block with observed overlays",
             "status": "pending_review",
         },
         {

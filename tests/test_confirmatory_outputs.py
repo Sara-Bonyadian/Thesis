@@ -791,7 +791,8 @@ class TestFigures(unittest.TestCase):
                 "figure2_panel_d_marginal_estimates.csv",
                 "figure2_panel_d_contrasts.csv",
                 "figure2_panel_d_mixedlm_coefficients.csv",
-                "figure2_panel_e_paired_peaks.csv",
+                "figure2_panel_e_state_peaks.csv",
+                "figure2_panel_e_state_summaries.csv",
                 "figure2_panel_f_graded_ds003690.csv",
             ):
                 self.assertTrue((out / "source_data" / name).is_file())

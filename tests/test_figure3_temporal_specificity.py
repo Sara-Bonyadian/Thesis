@@ -146,9 +146,9 @@ class TestParticipantNullDeltaEstimand(unittest.TestCase):
         self.assertEqual(len(participants), 2)
         by_id = {p.participant_id: p for p in participants}
         # Participant 01 → canonical "1": mean((0.2)+(0.4))/2 = 0.3
-        self.assertAlmostEqual(by_id["1"].delta_p, 0.30, places=12)
-        self.assertEqual(by_id["1"].n_observations, 2)
-        self.assertAlmostEqual(by_id["2"].delta_p, 0.20, places=12)
+        self.assertAlmostEqual(by_id["01"].delta_p, 0.30, places=12)
+        self.assertEqual(by_id["01"].n_observations, 2)
+        self.assertAlmostEqual(by_id["02"].delta_p, 0.20, places=12)
         # Equal weight: (0.30 + 0.20) / 2 despite unequal observation counts.
         self.assertAlmostEqual(inference.mean_delta, 0.25, places=12)
         self.assertEqual(inference.n_participants, 2)
@@ -390,14 +390,28 @@ class TestFigure3PanelAForest(unittest.TestCase):
             scatter_csv = (
                 out / "source_data" / "figure3_supplement_nested_null_scatter.csv"
             )
-            for path in (delta_csv, inference_csv, loo_csv, secondary_csv, scatter_csv):
+            dist_csv = out / "source_data" / "figure3_panel_a_null_distributions.csv"
+            obs_csv = out / "source_data" / "figure3_panel_a_observation_summary.csv"
+            ds_sum_csv = out / "source_data" / "figure3_panel_a_dataset_summary.csv"
+            ds_elig_csv = out / "source_data" / "figure3_panel_a_dataset_eligibility.csv"
+            for path in (
+                delta_csv,
+                inference_csv,
+                loo_csv,
+                secondary_csv,
+                scatter_csv,
+                dist_csv,
+                obs_csv,
+                ds_sum_csv,
+                ds_elig_csv,
+            ):
                 self.assertTrue(path.is_file(), msg=str(path))
 
             with delta_csv.open(encoding="utf-8") as handle:
                 deltas = list(csv.DictReader(handle))
             self.assertEqual(len(deltas), 3)
-            self.assertEqual({r["participant_id"] for r in deltas}, {"1", "2", "3"})
-            self.assertEqual({r["subject_id"] for r in deltas}, {"1", "2", "3"})
+            self.assertEqual({r["participant_id"] for r in deltas}, {"01", "02", "03"})
+            self.assertEqual({r["subject_id"] for r in deltas}, {"01", "02", "03"})
             self.assertTrue(all(r["band"] == "theta" for r in deltas))
             self.assertTrue(all(r["null_type"] == "circular_shift" for r in deltas))
             self.assertTrue(
@@ -786,10 +800,10 @@ class TestSurrogateContracts(unittest.TestCase):
             hr_z=hr,
             eeg_z=eeg,
         )
-        row_a, _ = _null_statistics_for_unit(
+        row_a, _, _ = _null_statistics_for_unit(
             unit, null_type=NULL_TYPE_CIRCULAR_SHIFT, n_surrogates=20
         )
-        row_b, _ = _null_statistics_for_unit(
+        row_b, _, _ = _null_statistics_for_unit(
             unit, null_type=NULL_TYPE_CIRCULAR_SHIFT, n_surrogates=20
         )
         self.assertEqual(row_a["null_mean"], row_b["null_mean"])
@@ -823,6 +837,300 @@ class TestSurrogateContracts(unittest.TestCase):
             NULL_TYPE_CROSS_SUBJECT_MISMATCH,
             NULL_TYPE_AR1_INNOVATIONS,
         ))
+
+
+class TestFigure3PanelAEmpiricalNullGeometry(unittest.TestCase):
+    """Panel A must plot full surrogate distributions, not observed strips alone."""
+
+    @staticmethod
+    def _surrogate_row(
+        *,
+        dataset_id: str,
+        bio: str,
+        session: str,
+        observation_id: str,
+        condition: str,
+        null_type: str,
+        surrogate_index: int,
+        n_surrogates: int,
+        standardized_surrogate: float,
+        standardized_observed: float,
+    ) -> dict[str, object]:
+        return {
+            "dataset_id": dataset_id,
+            "dataset_role": "sensitivity",
+            "biological_participant_id": bio,
+            "analysis_unit_id": f"{dataset_id}|{bio}|{session}",
+            "subject_id": f"{bio}_{session}",
+            "session_id": session,
+            "observation_id": observation_id,
+            "condition": condition,
+            "period": "",
+            "state": "",
+            "task": condition,
+            "band": "theta",
+            "duration": 240,
+            "representation": "absolute_log10",
+            "endpoint": ENDPOINT_ZLPI,
+            "null_type": null_type,
+            "surrogate_index": surrogate_index,
+            "surrogate_endpoint_index": 0.0,
+            "observed_endpoint_index": 1.0,
+            "standardized_surrogate_value": standardized_surrogate,
+            "standardized_observed_value": standardized_observed,
+            "null_mean": 0.0,
+            "null_median": 0.0,
+            "null_std": 1.0,
+            "empirical_p": 0.5,
+            "rng_seed_u64": "1",
+            "n_surrogates": n_surrogates,
+            "eligibility_status": "eligible",
+            "qc_status": "",
+        }
+
+    def _build_full_surrogates(self, *, n_surrogates: int = 5) -> list[dict[str, object]]:
+        nulls = (
+            NULL_TYPE_CIRCULAR_SHIFT,
+            NULL_TYPE_PHASE_RANDOMIZATION,
+            NULL_TYPE_BLOCK_SHUFFLE,
+        )
+        # Two biological participants × two sessions × one condition each.
+        specs = [
+            ("01", "ph", "obs_01_ph", "ph_rest", 1.5),
+            ("01", "ps", "obs_01_ps", "ps_rest", 0.5),
+            ("02", "ph", "obs_02_ph", "ph_rest", 2.0),
+            ("02", "ps", "obs_02_ps", "ps_rest", 0.0),
+        ]
+        rows: list[dict[str, object]] = []
+        for null_type in nulls:
+            for bio, session, oid, cond, std_obs in specs:
+                for sidx in range(n_surrogates):
+                    rows.append(
+                        self._surrogate_row(
+                            dataset_id="hiit",
+                            bio=bio,
+                            session=session,
+                            observation_id=oid,
+                            condition=cond,
+                            null_type=null_type,
+                            surrogate_index=sidx,
+                            n_surrogates=n_surrogates,
+                            standardized_surrogate=float(sidx) - 2.0,
+                            standardized_observed=std_obs,
+                        )
+                    )
+        return rows
+
+    def test_panel_a_uses_full_surrogate_and_biological_participant_layers(self) -> None:
+        from ppg_eeg.confirmatory.figures import (
+            PANEL_A_REQUIRED_NULL_TYPES,
+            _biological_participant_standardized_means,
+            _plot_panel_a_empirical_nulls,
+        )
+        from ppg_eeg.confirmatory.nulls import (
+            NULL_SURROGATE_VALUES_FILENAME,
+            SURROGATE_VALUE_FIELDS,
+        )
+
+        n_surr = 5
+        surrogate_rows = self._build_full_surrogates(n_surrogates=n_surr)
+        null_rows = []
+        for r in surrogate_rows:
+            if int(r["surrogate_index"]) != 0:
+                continue
+            null_rows.append(
+                _null_row(
+                    dataset_id="hiit",
+                    subject_id=str(r["subject_id"]),
+                    observation_id=str(r["observation_id"]),
+                    condition=str(r["condition"]),
+                    band="theta",
+                    null_type=str(r["null_type"]),
+                    observed=1.0,
+                    null_mean=0.0,
+                    n_surrogates=n_surr,
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            null_path = root / "null_subject_results.csv"
+            sur_path = root / NULL_SURROGATE_VALUES_FILENAME
+            _write_null_csv(null_path, null_rows)
+            with sur_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(SURROGATE_VALUE_FIELDS))
+                writer.writeheader()
+                for row in surrogate_rows:
+                    writer.writerow(row)
+
+            out = root / "figures"
+            artifacts = render_figure3(
+                {
+                    "null_subject": null_path,
+                    "null_surrogate_values": sur_path,
+                },
+                out,
+            )
+            self.assertTrue(artifacts.manuscript.png.is_file())
+
+            layers_csv = out / "source_data" / "figure3_panel_a_plot_layers.csv"
+            dist_val_csv = out / "source_data" / "figure3_panel_a_distribution_validation.csv"
+            self.assertTrue(layers_csv.is_file())
+            self.assertTrue(dist_val_csv.is_file())
+
+            with layers_csv.open(encoding="utf-8") as handle:
+                layers = list(csv.DictReader(handle))
+            violin = [
+                r
+                for r in layers
+                if r["layer"] == "null_density_violin"
+            ]
+            obs_pts = [
+                r
+                for r in layers
+                if r["layer"] == "participant_observed_points"
+            ]
+            diamonds = [
+                r
+                for r in layers
+                if r["layer"] == "dataset_mean_diamond"
+            ]
+            self.assertEqual(len(violin), len(PANEL_A_REQUIRED_NULL_TYPES))
+            self.assertTrue(
+                all(r["source_column"] == "standardized_surrogate_value" for r in violin)
+            )
+            self.assertTrue(
+                all(r["source_column"] == "standardized_observed_value" for r in obs_pts)
+            )
+            self.assertTrue(
+                all(
+                    r["aggregation_level"] == "biological_participant"
+                    for r in obs_pts
+                )
+            )
+            self.assertTrue(
+                all(
+                    "equal_weight_across_biological_participants" in r["weighting"]
+                    for r in diamonds
+                )
+            )
+            # 4 observations × 5 surrogates = 20 per null method.
+            self.assertTrue(all(int(r["n_rows_plotted"]) == 20 for r in violin))
+            # Biological participants (not 4 session units).
+            self.assertTrue(all(int(r["n_rows_plotted"]) == 2 for r in obs_pts))
+
+            with dist_val_csv.open(encoding="utf-8") as handle:
+                vals = list(csv.DictReader(handle))
+            self.assertEqual(len(vals), 3)
+            for row in vals:
+                self.assertEqual(int(row["n_eligible_observations"]), 4)
+                self.assertEqual(int(row["n_surrogates_per_observation"]), n_surr)
+                self.assertEqual(int(row["expected_surrogate_values"]), 20)
+                self.assertEqual(int(row["available_surrogate_values"]), 20)
+                self.assertEqual(int(row["values_used_for_density"]), 20)
+                self.assertEqual(str(row["complete"]).casefold(), "true")
+                self.assertEqual(str(row["downsampling"]).casefold(), "none")
+
+            caption = (out / "figure3_caption.txt").read_text(encoding="utf-8")
+            self.assertIn("standardized_surrogate_value", caption)
+            self.assertIn("biological-participant", caption)
+            self.assertIn("equal-weight mean across biological participants", caption)
+            self.assertNotIn("40 sessions labeled as biological", caption)
+
+            # Hierarchy helper: PH/PS collapse to one biological participant.
+            obs_like = [
+                {
+                    "dataset_id": "hiit",
+                    "biological_participant_id": "01",
+                    "session_id": "ph",
+                    "condition": "rest",
+                    "standardized_observed_value": 1.0,
+                    "null_type": "circular_shift",
+                    "band": "theta",
+                },
+                {
+                    "dataset_id": "hiit",
+                    "biological_participant_id": "01",
+                    "session_id": "ps",
+                    "condition": "rest",
+                    "standardized_observed_value": 3.0,
+                    "null_type": "circular_shift",
+                    "band": "theta",
+                },
+            ]
+            bio = _biological_participant_standardized_means(obs_like)
+            self.assertEqual(len(bio), 1)
+            self.assertAlmostEqual(
+                float(bio[0]["standardized_observed_value"]), 2.0, places=12
+            )
+
+            # Legend / title geometry smoke: plot returns layer audit rows.
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots()
+            layer_rows = _plot_panel_a_empirical_nulls(
+                ax,
+                surrogate_rows,
+                dataset_roles={"hiit": "sensitivity"},
+                full_surrogate_distributions=True,
+            )
+            self.assertTrue(any(r["layer"] == "null_density_violin" for r in layer_rows))
+            legend = ax.get_legend()
+            self.assertIsNotNone(legend)
+            labels = [t.get_text() for t in legend.get_texts()]
+            self.assertTrue(any("Null distribution" in lab for lab in labels))
+            self.assertTrue(any("Participant observed" in lab for lab in labels))
+            self.assertTrue(any("Dataset mean" in lab for lab in labels))
+            # Concise row titles (null method only for single-dataset).
+            ticklabels = [t.get_text() for t in ax.get_yticklabels()]
+            self.assertEqual(
+                ticklabels,
+                ["Circular shift", "Phase randomized", "Block shuffled"],
+            )
+            subtitle_text = " ".join(t.get_text() for t in ax.texts)
+            self.assertIn("biological participants", subtitle_text)
+            self.assertNotIn("Dataset × null method", ax.get_ylabel())
+            xlabel = ax.get_xlabel()
+            self.assertIn("Standardized ZLPI", xlabel)
+            self.assertIn("observation-specific null", xlabel)
+            plt.close(fig)
+
+    def test_fallback_alone_is_not_marked_complete(self) -> None:
+        rows = []
+        for null_type in (
+            NULL_TYPE_CIRCULAR_SHIFT,
+            NULL_TYPE_PHASE_RANDOMIZATION,
+            NULL_TYPE_BLOCK_SHUFFLE,
+        ):
+            for i in range(2):
+                rows.append(
+                    _null_row(
+                        dataset_id="hiit",
+                        subject_id=f"0{i+1}",
+                        observation_id=f"obs{i}",
+                        condition="rest",
+                        band="theta",
+                        null_type=null_type,
+                        observed=1.0,
+                        null_mean=0.0,
+                        n_surrogates=500,
+                    )
+                )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            null_path = root / "null_subject_results.csv"
+            _write_null_csv(null_path, rows)
+            out = root / "figures"
+            render_figure3({"null_subject": null_path}, out)
+            with (out / "source_data" / "figure3_panel_a_distribution_validation.csv").open(
+                encoding="utf-8"
+            ) as handle:
+                vals = list(csv.DictReader(handle))
+            self.assertTrue(vals)
+            self.assertTrue(all(str(r["complete"]).casefold() == "false" for r in vals))
+            self.assertTrue(
+                all(str(r["used_fallback_summary"]).casefold() == "true" for r in vals)
+            )
 
 
 if __name__ == "__main__":
