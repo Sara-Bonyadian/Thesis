@@ -27,6 +27,9 @@ import numpy as np
 from ..core_eeg_ppg.output_layout import safe_subject_dir_name
 from ..datasets import CanonicalObservation
 from .artifact_controls import run_confirmatory_artifact_controls
+from .cardiac_controls_upstream import (
+    run_confirmatory_cardiac_controls_upstream,
+)
 from .config import (
     ConfirmatoryDatasetConfig,
     ConfirmatoryMasterConfig,
@@ -583,13 +586,20 @@ def run_c6(ctx: StageContext) -> dict[str, object]:
         out,
         enable_optional_artifact_controls=bool(ctx.enable_optional_artifact_controls),
     )
+    run_confirmatory_cardiac_controls_upstream(
+        c0_dir=ctx.stage_dir("C0"),
+        c1b_dir=ctx.stage_dir("C1b"),
+        c1c_dir=ctx.stage_dir("C1c"),
+        c3_dir=ctx.stage_dir("C3"),
+        output_dir=out,
+    )
     return {"inference_and_sensitivities": str(out)}
 
 
 def run_c7(ctx: StageContext) -> dict[str, object]:
     publish = ctx.stage_dir("C7") / "publish"
     publish.mkdir(parents=True, exist_ok=True)
-    for stage in ("C0", "C2", "C3", "C4", "C5", "C6"):
+    for stage in ("C0", "C1b", "C2", "C3", "C4", "C5", "C6"):
         src = ctx.stage_dir(stage)
         if not src.is_dir():
             continue

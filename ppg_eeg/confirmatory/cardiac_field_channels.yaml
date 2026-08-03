@@ -1,0 +1,43 @@
+version: 1
+description: >
+  Prespecified ECG-prone EEG channel sets for Figure 3 Panel D cardiac-field
+  sensitivity analyses. These lists are defined a priori and must not be tuned
+  against Panel D outcomes.
+
+channel_sets:
+  primary:
+    id: ecg_prone_default_v1
+    justification: >
+      Conservative frontal/temporal/peri-orbital channels commonly susceptible
+      to cardiac-field and facial-muscle contamination in scalp EEG.
+    channels:
+      - Fp1
+      - Fp2
+      - AF7
+      - AF8
+      - F7
+      - F8
+      - FT7
+      - FT8
+      - T7
+      - T8
+  conservative:
+    id: ecg_prone_extended_v1
+    justification: >
+      Secondary sensitivity set extending the default list with additional
+      anterior channels. Use only as an explicitly labeled sensitivity layer.
+    channels:
+      - Fp1
+      - Fp2
+      - AF3
+      - AF4
+      - AF7
+      - AF8
+      - F7
+      - F8
+      - FT7
+      - FT8
+      - T7
+      - T8
+      - FC5
+      - FC6

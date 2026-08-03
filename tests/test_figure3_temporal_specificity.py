@@ -17,6 +17,7 @@ from ppg_eeg.confirmatory.figures import (
     FIGURE3_SUPPLEMENT_LABEL,
     FIGURE3_SUPPLEMENT_STEM,
     PRIMARY_REPRESENTATION,
+    _panel_b_cross_subject_and_innovation,
     render_figure3,
 )
 from ppg_eeg.confirmatory.null_delta_inference import (
@@ -837,6 +838,69 @@ class TestSurrogateContracts(unittest.TestCase):
             NULL_TYPE_CROSS_SUBJECT_MISMATCH,
             NULL_TYPE_AR1_INNOVATIONS,
         ))
+
+
+class TestFigure3PanelBInnovationNormalization(unittest.TestCase):
+    def test_innovation_nulls_require_full_finite_draws(self) -> None:
+        rng = np.random.default_rng(20260730)
+        n = 240
+        base = _zscore(rng.normal(size=n))
+        hr_a = _zscore(base + 0.3 * rng.normal(size=n))
+        eeg_a = _zscore(0.5 * base + 0.7 * rng.normal(size=n))
+        hr_b = _zscore(rng.normal(size=n))
+        eeg_b = _zscore(0.4 * hr_b + 0.8 * rng.normal(size=n))
+        units = [
+            SeriesUnit(
+                dataset_id="hiit",
+                subject_id="01_ph",
+                task="rest",
+                condition="ph_pre_rest",
+                observation_id="hiit-01-ph-pre-rest",
+                modality="default",
+                duration_s=240,
+                duration_role="primary",
+                band="theta",
+                power_representation="absolute_log10",
+                is_primary_representation=True,
+                pair="hr_x_theta_absolute_log10",
+                hr_z=hr_a,
+                eeg_z=eeg_a,
+            ),
+            SeriesUnit(
+                dataset_id="hiit",
+                subject_id="02_ph",
+                task="rest",
+                condition="ph_pre_rest",
+                observation_id="hiit-02-ph-pre-rest",
+                modality="default",
+                duration_s=240,
+                duration_role="primary",
+                band="theta",
+                power_representation="absolute_log10",
+                is_primary_representation=True,
+                pair="hr_x_theta_absolute_log10",
+                hr_z=hr_b,
+                eeg_z=eeg_b,
+            ),
+        ]
+        obs_rows, _draw_rows, diag_rows = _panel_b_cross_subject_and_innovation(
+            units,
+            n_null_draws=64,
+        )
+        self.assertEqual(len(obs_rows), 2)
+        self.assertEqual(len(diag_rows), 2)
+        for row in obs_rows:
+            self.assertEqual(int(float(row["n_innovation_null_draws"])), 64)
+            self.assertEqual(int(float(row["innovation_null_finite_draws"])), 64)
+            self.assertEqual(int(float(row["innovation_null_nonfinite_draws"])), 0)
+            self.assertTrue(math.isfinite(float(row["innovation_null_mean"])))
+            self.assertTrue(float(row["innovation_null_sd"]) > 0.0)
+            self.assertTrue(
+                math.isfinite(float(row["innovation_null_normalized_effect"]))
+            )
+        for row in diag_rows:
+            self.assertFalse(bool(row["model_failure_flag"]))
+            self.assertEqual(str(row["model_failure_reason"]), "")
 
 
 class TestFigure3PanelAEmpiricalNullGeometry(unittest.TestCase):

@@ -841,19 +841,31 @@ class TestFigures(unittest.TestCase):
             self.assertTrue(all(row["dataset_id"] == "ds003690" for row in f2_f))
             self.assertIsNotNone(resolved["mixed_model"])
 
-            # Endpoint separation present in figure3 duration source.
+            # Panel C mixed duration-specific endpoints; no false ZLPI relabel.
             duration_csv = out / "source_data" / "figure3_panel_b_duration.csv"
             with duration_csv.open(encoding="utf-8", newline="") as handle:
                 duration_rows = list(csv.DictReader(handle))
-            endpoints = {row["endpoint_name"] for row in duration_rows}
-            self.assertIn(ENDPOINT_ZLPI, endpoints)
-            self.assertIn(ENDPOINT_MID_WINDOW_PROXIMAL_INDEX, endpoints)
-            self.assertIn(ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX, endpoints)
-            # No hard-coded rescue: can_rescue_primary is false in source.
             for row in duration_rows:
-                self.assertEqual(str(row["can_rescue_primary"]).lower(), "false")
-            broadband_csv = out / "source_data" / "figure3_panel_c_broadband.csv"
+                duration = int(float(row["duration_s"]))
+                endpoint = row["endpoint_name"]
+                if duration == 60:
+                    self.assertEqual(endpoint, ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX)
+                elif duration == 120:
+                    self.assertEqual(endpoint, ENDPOINT_MID_WINDOW_PROXIMAL_INDEX)
+                elif duration in {180, 240}:
+                    self.assertEqual(endpoint, ENDPOINT_ZLPI)
+                if row.get("eligibility_status") == "eligible":
+                    self.assertTrue(str(row.get("effect_estimate", "")).strip() != "")
+                if row.get("dataset_id") == "ds003816":
+                    self.assertEqual(duration, 60)
+                    self.assertEqual(endpoint, ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX)
+            broadband_csv = out / "source_data" / "figure3_sensitivity_broadband_residualization.csv"
             self.assertTrue(broadband_csv.is_file())
+            self.assertTrue((out / "source_data" / "figure3_panel_c_broadband.csv").is_file())
+            self.assertTrue((out / "source_data" / "figure3_panel_d_cardiac_controls_observations.csv").is_file())
+            self.assertTrue((out / "source_data" / "figure3_panel_d_cardiac_controls_summaries.csv").is_file())
+            self.assertTrue((out / "source_data" / "figure3_panel_d_cardiac_controls_dataset_qc.csv").is_file())
+            self.assertTrue((out / "source_data" / "figure3_panel_d_cardiac_controls_metadata.json").is_file())
             self.assertFalse((out / "source_data" / "figure3_panel_c_modality.csv").exists())
             self.assertEqual(FIGURE_DPI, 300)
 

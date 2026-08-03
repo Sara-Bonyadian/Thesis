@@ -15,6 +15,8 @@ from ppg_eeg.confirmatory.duration_contracts import (
     ZLPI_FLANKS_S,
     assert_contracts_internally_consistent,
     contract_for_duration,
+    standard_zlpi_expected_n_overlap,
+    standard_zlpi_is_computable,
     standard_zlpi_pool_durations,
 )
 
@@ -66,6 +68,16 @@ class TestDurationContracts(unittest.TestCase):
             self.assertNotEqual(contract.endpoint_name, ENDPOINT_ZLPI)
             self.assertFalse(contract.is_standard_zlpi)
             self.assertFalse(contract.pool_with_standard_zlpi)
+
+    def test_standard_zlpi_computability_by_overlap(self) -> None:
+        self.assertEqual(standard_zlpi_expected_n_overlap(60), -60)
+        self.assertEqual(standard_zlpi_expected_n_overlap(120), 0)
+        self.assertEqual(standard_zlpi_expected_n_overlap(180), 60)
+        self.assertEqual(standard_zlpi_expected_n_overlap(240), 120)
+        self.assertFalse(standard_zlpi_is_computable(60))
+        self.assertFalse(standard_zlpi_is_computable(120))
+        self.assertTrue(standard_zlpi_is_computable(180))
+        self.assertTrue(standard_zlpi_is_computable(240))
 
 
 if __name__ == "__main__":

@@ -70,6 +70,11 @@ ENDPOINT_ZLPI = "zlpi"
 ZLPI_FLANKS_S = (20, 60)
 STANDARD_ZLPI_DURATIONS_S = (240, 180)
 STANDARD_ZLPI_LAG_MAX_S = 60
+# Floor for constant common-support overlap under the locked ±60-s lag grid.
+STANDARD_ZLPI_MIN_OVERLAP = 60
+STANDARD_ZLPI_INSUFFICIENT_DURATION_REASON = (
+    "insufficient duration for standard ±60-s ZLPI lag support"
+)
 
 # D120 sensitivity-only alternative (never labeled ZLPI; never pooled with ZLPI).
 ENDPOINT_MID_WINDOW_PROXIMAL_INDEX = "mid_window_proximal_index"
@@ -236,6 +241,21 @@ def contract_for_duration(duration_s: int) -> DurationAnalysisContract:
         ) from exc
 
 
+def standard_zlpi_expected_n_overlap(duration_s: int) -> int:
+    """Expected constant ``n_overlap`` if standard ±60-s lag support were applied.
+
+    Common-support lag correlations use anchors in ``[L, N−L)``, so
+    ``n_overlap = duration_s − 2·lag_max`` with ``lag_max = 60``.
+    Negative values mean the required lag support is impossible.
+    """
+    return int(duration_s) - 2 * STANDARD_ZLPI_LAG_MAX_S
+
+
+def standard_zlpi_is_computable(duration_s: int) -> bool:
+    """True iff a fully finite segment supports locked standard ZLPI lag/flanks."""
+    return standard_zlpi_expected_n_overlap(duration_s) >= STANDARD_ZLPI_MIN_OVERLAP
+
+
 def standard_zlpi_pool_durations() -> tuple[int, ...]:
     """Durations whose endpoint may enter the primary ZLPI analysis pool."""
     return tuple(
@@ -283,7 +303,9 @@ __all__ = [
     "MWPI_LAG_MAX_S",
     "SHORT_WINDOW_DURATION_S",
     "STANDARD_ZLPI_DURATIONS_S",
+    "STANDARD_ZLPI_INSUFFICIENT_DURATION_REASON",
     "STANDARD_ZLPI_LAG_MAX_S",
+    "STANDARD_ZLPI_MIN_OVERLAP",
     "SWPI_ALIAS",
     "SWPI_FLANKS_S",
     "SWPI_LAG_MAX_S",
@@ -291,5 +313,7 @@ __all__ = [
     "DurationAnalysisContract",
     "assert_contracts_internally_consistent",
     "contract_for_duration",
+    "standard_zlpi_expected_n_overlap",
+    "standard_zlpi_is_computable",
     "standard_zlpi_pool_durations",
 ]
