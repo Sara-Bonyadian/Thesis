@@ -21,6 +21,26 @@ from .config import (
     ConfirmatoryDatasetConfig,
     ConfirmatoryMasterConfig,
 )
+from .dataset_contracts import (
+    STATE_OTHER,
+    TIME_NA,
+    DatasetContracts,
+    resolve_condition_semantics,
+)
+from .duration_contracts import (
+    contract_for_duration,
+    standard_zlpi_is_computable,
+)
+from .reason_codes import (
+    ENDPOINT_CONTRACT_NON_ZLPI,
+    INSUFFICIENT_DURATION,
+    INSUFFICIENT_LAG_SUPPORT,
+    INPUT_DISCOVERY_FAILED,
+    MISSING_CONDITION_MAPPING,
+    MISSING_PAIRED_OBSERVATION,
+    MISSING_REQUIRED_MODALITY,
+    STANDARD_ZLPI_NOT_APPLICABLE,
+)
 
 PROTOCOL_AUDIT_FILENAME = "protocol_audit.csv"
 PAIRED_SUBJECT_SETS_FILENAME = "paired_subject_sets.json"
@@ -109,6 +129,17 @@ class EligibilityDecision:
     pairing_resolved: bool | None
     protocol_match: bool | None
     notes: str
+    # Explicit duration / endpoint contract fields (disambiguate "eligible").
+    endpoint_name: str = ""
+    endpoint_alias: str = ""
+    is_standard_zlpi: bool = False
+    has_required_duration: bool | None = None
+    has_required_lag_support: bool | None = None
+    endpoint_computable: bool = False
+    endpoint_status: str = "not_computable"
+    endpoint_reason_code: str = ""
+    standard_zlpi_computable: bool = False
+    standard_zlpi_reason_code: str = ""
 
     def to_row(self) -> dict[str, object]:
         return {
@@ -133,6 +164,16 @@ class EligibilityDecision:
             "pairing_resolved": self.pairing_resolved,
             "protocol_match": self.protocol_match,
             "notes": self.notes,
+            "endpoint_name": self.endpoint_name,
+            "endpoint_alias": self.endpoint_alias,
+            "is_standard_zlpi": self.is_standard_zlpi,
+            "has_required_duration": self.has_required_duration,
+            "has_required_lag_support": self.has_required_lag_support,
+            "endpoint_computable": self.endpoint_computable,
+            "endpoint_status": self.endpoint_status,
+            "endpoint_reason_code": self.endpoint_reason_code,
+            "standard_zlpi_computable": self.standard_zlpi_computable,
+            "standard_zlpi_reason_code": self.standard_zlpi_reason_code,
         }
 
 
@@ -323,7 +364,31 @@ def protocol_spec(dataset_id: str) -> ProtocolSpec:
         raise KeyError(f"Unknown confirmatory dataset {dataset_id!r}. Known: {known}") from exc
 
 
+def condition_semantics_for(dataset_id: str, condition: str) -> tuple[str, str, str]:
+    """Return normalized (state, time, session) roles for condition labels."""
+    label = condition.strip().casefold()
+    try:
+        spec = protocol_spec(dataset_id)
+    except KeyError:
+        spec = None
+    if spec is not None and label in spec.low_demand_conditions:
+        state = "state_low"
+    elif spec is not None and label in spec.cognitive_effort_conditions:
+        state = "state_high"
+    elif "rest" in label or "passive" in label or label == "step1":
+        state = "state_low"
+    elif "tetris" in label or "memory" in label or "wm" in label or "go" in label:
+        state = "state_high"
+    else:
+        state = "state_other"
+    time_role = "time_pre" if "pre" in label else ("time_post" if "post" in label else "time_na")
+    session_role = "ph" if "_ph_" in f"_{label}_" else ("ps" if "_ps_" in f"_{label}_" else "single")
+    return state, time_role, session_role
+
+
 def _participant_id(observation: CanonicalObservation) -> str:
+    if observation.participant_id:
+        return observation.participant_id.casefold()
     dataset_id = observation.dataset_id.casefold()
     obs_id = observation.observation_id.casefold()
     subject_id = observation.subject_id.casefold()
@@ -349,7 +414,51 @@ def _run_id(observation: CanonicalObservation) -> str:
 
 
 def _session_id(observation: CanonicalObservation) -> str:
+    if observation.session_id:
+        return observation.session_id.casefold()
     return (observation.session_label or "single").strip().casefold()
+
+
+def _dataset_contracts(
+    config: ConfirmatoryDatasetConfig,
+    spec: ProtocolSpec,
+) -> DatasetContracts:
+    semantics = resolve_condition_semantics(
+        condition_semantics=config.normalization.condition_semantics,
+        low_demand_conditions=spec.low_demand_conditions,
+        high_demand_conditions=spec.cognitive_effort_conditions,
+    )
+    return DatasetContracts(
+        dataset_id=config.dataset_id,
+        participant_id_from=config.protocol.participant_id_from,
+        session_id_from=config.protocol.session_id_from,
+        cardiac_event_type=config.protocol.cardiac_event_type,
+        condition_semantics=semantics,
+        capabilities=config.capabilities,
+    )
+
+
+def _normalize_observation_with_contracts(
+    observation: CanonicalObservation,
+    *,
+    contracts: DatasetContracts,
+) -> CanonicalObservation:
+    participant = _participant_id(observation)
+    session = _session_id(observation)
+    semantic = contracts.semantic_for_condition(observation.condition_label.casefold())
+    normalized_state = semantic.normalized_state if semantic else STATE_OTHER
+    normalized_time = semantic.normalized_time if semantic else TIME_NA
+    if semantic and semantic.session_alias:
+        session = semantic.session_alias
+    return replace(
+        observation,
+        participant_id=participant,
+        session_id=session,
+        normalized_state=normalized_state,
+        normalized_time=normalized_time,
+        cardiac_modality=contracts.capabilities.cardiac_modality,
+        cardiac_event_type=contracts.cardiac_event_type,
+    )
 
 
 def _pair_key(
@@ -530,11 +639,18 @@ def evaluate_duration_eligibility(
     metadata: EligibilityMetadata,
     duration_s: int,
 ) -> EligibilityDecision:
-    """Evaluate one fixed duration without interpreting absent data as failure."""
+    """Evaluate one fixed duration without interpreting absent data as failure.
+
+    ``status`` reflects extraction-window / protocol eligibility for the nested
+    duration segment. Endpoint computability is reported separately via
+    ``endpoint_*`` and ``standard_zlpi_*`` fields so D60/D120 are never mistaken
+    for computable standard-ZLPI endpoints.
+    """
     if duration_s not in EXPECTED_DURATIONS_S:
         raise ValueError(
             f"duration_s must be one of {EXPECTED_DURATIONS_S}, got {duration_s}."
         )
+    contract = contract_for_duration(duration_s)
     raw_overlap_s = _known_nonnegative(
         metadata.raw_overlap_s, field="raw_overlap_s"
     )
@@ -588,6 +704,77 @@ def evaluate_duration_eligibility(
         suffix = "clean_beat_span_not_computed"
         notes = f"{notes} {suffix}".strip() if notes else suffix
 
+    has_required_duration: bool | None
+    if raw_overlap_s is None:
+        has_required_duration = None
+    else:
+        has_required_duration = raw_overlap_s >= float(duration_s)
+
+    # Lag-support for THIS duration's own endpoint contract (ZLPI/MWPI/SWPI).
+    required_overlap_for_contract = float(
+        contract.expected_constant_overlap_if_fully_finite
+    )
+    has_required_lag_support: bool | None
+    if raw_overlap_s is None:
+        has_required_lag_support = None
+    else:
+        # Need enough contiguous samples to extract duration_s AND leave the
+        # contract's common-support overlap under its lag envelope.
+        has_required_lag_support = (
+            has_required_duration is True
+            and required_overlap_for_contract > 0
+            and raw_overlap_s >= float(duration_s)
+        )
+
+    endpoint_computable = status == "eligible" and has_required_lag_support is True
+    exclusion_to_reason = {
+        "missing_paired_state": MISSING_PAIRED_OBSERVATION,
+        "unresolved_pairing": MISSING_PAIRED_OBSERVATION,
+        "insufficient_raw_duration": INSUFFICIENT_DURATION,
+        "insufficient_beat_span": INSUFFICIENT_DURATION,
+        "missing_eeg": MISSING_REQUIRED_MODALITY,
+        "missing_cardiac_data": MISSING_REQUIRED_MODALITY,
+        "protocol_mismatch": MISSING_CONDITION_MAPPING,
+        "data_not_supplied": INPUT_DISCOVERY_FAILED,
+    }
+    if status == "not_supplied":
+        endpoint_status = "not_supplied"
+        endpoint_reason_code = exclusion_to_reason.get(
+            exclusion_code, exclusion_code or INPUT_DISCOVERY_FAILED
+        )
+    elif status == "ineligible":
+        endpoint_status = "ineligible"
+        endpoint_reason_code = exclusion_to_reason.get(
+            exclusion_code, exclusion_code or INSUFFICIENT_DURATION
+        )
+    elif not endpoint_computable:
+        endpoint_status = "not_computable"
+        if has_required_duration is False:
+            endpoint_reason_code = INSUFFICIENT_DURATION
+        elif has_required_lag_support is False:
+            endpoint_reason_code = INSUFFICIENT_LAG_SUPPORT
+        else:
+            endpoint_reason_code = exclusion_to_reason.get(
+                exclusion_code, exclusion_code or INPUT_DISCOVERY_FAILED
+            )
+    else:
+        endpoint_status = "computable"
+        endpoint_reason_code = ""
+
+    # Standard ZLPI is never applicable at D60/D120 under the locked contract.
+    if not contract.is_standard_zlpi:
+        standard_zlpi_computable = False
+        standard_zlpi_reason_code = ENDPOINT_CONTRACT_NON_ZLPI
+    elif not standard_zlpi_is_computable(duration_s):
+        standard_zlpi_computable = False
+        standard_zlpi_reason_code = STANDARD_ZLPI_NOT_APPLICABLE
+    elif endpoint_computable:
+        standard_zlpi_computable = True
+        standard_zlpi_reason_code = ""
+    else:
+        standard_zlpi_computable = False
+        standard_zlpi_reason_code = endpoint_reason_code or INSUFFICIENT_LAG_SUPPORT
+
     return EligibilityDecision(
         dataset_id=metadata.dataset_id.casefold(),
         observation_id=metadata.observation_id,
@@ -607,6 +794,16 @@ def evaluate_duration_eligibility(
         pairing_resolved=metadata.pairing_resolved,
         protocol_match=metadata.protocol_match,
         notes=notes,
+        endpoint_name=contract.endpoint_name,
+        endpoint_alias=contract.endpoint_alias,
+        is_standard_zlpi=bool(contract.is_standard_zlpi),
+        has_required_duration=has_required_duration,
+        has_required_lag_support=has_required_lag_support,
+        endpoint_computable=endpoint_computable,
+        endpoint_status=endpoint_status,
+        endpoint_reason_code=endpoint_reason_code,
+        standard_zlpi_computable=standard_zlpi_computable,
+        standard_zlpi_reason_code=standard_zlpi_reason_code,
     )
 
 
@@ -766,14 +963,21 @@ def observations_from_dataset_config(
     config: ConfirmatoryDatasetConfig,
 ) -> list[CanonicalObservation]:
     """Discover observations using the existing dataset adapters."""
-    return build_observations(
+    observations = build_observations(
         config.dataset_id,
         config.paths.raw_root,
         subjects=config.selection.subjects or None,
         tasks=config.selection.tasks or None,
         conditions=config.selection.conditions or None,
         sessions=config.selection.sessions or None,
+        hiit_partition_mode=config.protocol.hiit_partition_mode,
     )
+    spec = protocol_spec(config.dataset_id)
+    contracts = _dataset_contracts(config, spec)
+    return [
+        _normalize_observation_with_contracts(obs, contracts=contracts)
+        for obs in observations
+    ]
 
 
 def eligibility_metadata_from_observations(
@@ -1043,6 +1247,7 @@ __all__ = [
     "EligibilityMetadata",
     "ProtocolSpec",
     "build_paired_subject_sets",
+    "condition_semantics_for",
     "enrich_eligibility_metadata_from_csv",
     "eligibility_metadata_from_observations",
     "evaluate_all_durations",

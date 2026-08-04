@@ -19,7 +19,11 @@ from typing import Mapping, Sequence
 import numpy as np
 from scipy import stats
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.lines import Line2D
 from matplotlib.gridspec import GridSpec
 
@@ -1565,10 +1569,41 @@ def verify_panel_e_integrity(result: PanelEResult) -> list[str]:
                 failures.append(f"{row.get('specification_id')}: NC assigned numerical zero")
 
     plotted_ids = {_as_str(r.get("specification_id")) for r in plotted}
-    if plotted_ids != set(ESTIMABLE_SPEC_ORDER):
-        failures.append(
-            f"plotted ids {sorted(plotted_ids)} != primary {list(ESTIMABLE_SPEC_ORDER)}"
-        )
+    computed_primary = {
+        _as_str(r.get("specification_id"))
+        for r in result.common_sample_rows
+        if r.get("computability_status") == STATUS_COMPUTED
+        and _as_str(r.get("specification_id")) in ESTIMABLE_SPEC_ORDER
+    }
+    if computed_primary:
+        # When any primary estimable row is computable, all must be plotted.
+        if plotted_ids != set(ESTIMABLE_SPEC_ORDER):
+            failures.append(
+                f"plotted ids {sorted(plotted_ids)} != primary {list(ESTIMABLE_SPEC_ORDER)}"
+            )
+    else:
+        # All-NC / missing-input path: nothing may be plotted as zero; every
+        # primary row must carry an explicit NC reason.
+        if plotted_ids:
+            failures.append(
+                f"NC Panel E plotted ids unexpectedly non-empty: {sorted(plotted_ids)}"
+            )
+        for sid in ESTIMABLE_SPEC_ORDER:
+            row = next(
+                (
+                    r
+                    for r in result.common_sample_rows
+                    if _as_str(r.get("specification_id")) == sid
+                ),
+                None,
+            )
+            if row is None:
+                failures.append(f"{sid}: missing NC primary specification row")
+                continue
+            if row.get("computability_status") == STATUS_COMPUTED:
+                failures.append(f"{sid}: marked computed without plotted flag")
+            if not _as_str(row.get("computability_reason")):
+                failures.append(f"{sid}: NC row missing computability_reason")
     if "delta_broadband_power" in plotted_ids or "delta_hr_broadband" in plotted_ids:
         failures.append("alpha-inclusive broadband plotted as preferred manuscript adjustment")
 
@@ -1658,6 +1693,8 @@ def render_panel_e_figure(
 
     _configure_publication_style()
     fig = plt.figure(figsize=(14.4, 8.4), constrained_layout=False)
+    # Always attach Agg so layout tests / headless renders can call get_renderer().
+    FigureCanvasAgg(fig)
     gs = GridSpec(
         2,
         2 if sample_identical else 3,

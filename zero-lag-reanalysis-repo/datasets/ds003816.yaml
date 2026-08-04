@@ -12,3 +12,34 @@ selection:
   tasks: []
   conditions: []
   sessions: []
+
+protocol:
+  participant_id_from: observation_id
+  session_id_from: session_label
+  cardiac_event_type: r_peak
+
+normalization:
+  condition_semantics:
+    preresting: { state: state_low, time: time_pre, session: single }
+    postresting: { state: state_low, time: time_post, session: single }
+    lkmself: { state: state_high, time: time_na, session: single }
+    lkmother: { state: state_high, time: time_na, session: single }
+    visualizeself: { state: state_high, time: time_na, session: single }
+    visualizeother: { state: state_high, time: time_na, session: single }
+
+capabilities:
+  has_eeg: true
+  has_hr: true
+  cardiac_modality: ecg
+  has_ecg_r_peaks: true
+  has_ppg_peaks: false
+  has_low_high_task_pair: false
+  has_pre_post_pair: true
+  has_behavior: false
+  # Short recordings: SWPI (D60) / MWPI (D120) only; not standard ZLPI durations.
+  supports_d180: false
+  supports_d240: false
+  supports_topography: true
+  supports_gamma: false
+  sensitivity_only: true
+  has_artifact_controls: true

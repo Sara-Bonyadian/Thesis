@@ -280,6 +280,10 @@ class TestFigure3PanelEDeltaNuisance(unittest.TestCase):
             self.assertIn("not proxied", caption.casefold())
 
             fig = captured["fig"]
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+            if not isinstance(fig.canvas, FigureCanvasAgg):
+                FigureCanvasAgg(fig)
             fig.canvas.draw()
             renderer = fig.canvas.get_renderer()
             legends = [c for c in fig.legends] if hasattr(fig, "legends") else []

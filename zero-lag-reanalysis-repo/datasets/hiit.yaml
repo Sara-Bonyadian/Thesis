@@ -49,3 +49,36 @@ cardiac:
   ibi_min_ms: 400.0
   ibi_max_ms: 1500.0
   debug_plot: false
+
+protocol:
+  participant_id_from: observation_id
+  session_id_from: subject_suffix
+  cardiac_event_type: systolic_peak
+  hiit_partition_mode: protocol_task
+
+normalization:
+  condition_semantics:
+    ph_pre_rest: { state: state_low, time: time_pre, session: ph }
+    ph_pre_tetris: { state: state_high, time: time_pre, session: ph }
+    ph_post_rest: { state: state_low, time: time_post, session: ph }
+    ph_post_tetris: { state: state_high, time: time_post, session: ph }
+    ps_pre_rest: { state: state_low, time: time_pre, session: ps }
+    ps_pre_tetris: { state: state_high, time: time_pre, session: ps }
+    ps_post_rest: { state: state_low, time: time_post, session: ps }
+    ps_post_tetris: { state: state_high, time: time_post, session: ps }
+
+capabilities:
+  has_eeg: true
+  has_hr: true
+  cardiac_modality: ppg
+  has_ecg_r_peaks: false
+  has_ppg_peaks: true
+  has_low_high_task_pair: true
+  has_pre_post_pair: true
+  has_behavior: false
+  supports_d180: true
+  supports_d240: true
+  supports_topography: true
+  supports_gamma: true
+  sensitivity_only: true
+  has_artifact_controls: true

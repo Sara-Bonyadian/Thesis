@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import shutil
@@ -62,6 +63,14 @@ from .protocol_audit import (
     run_protocol_audit,
 )
 from .report import run_confirmatory_reporting
+from .capability_resolution import (
+    resolve_effective_capabilities,
+    write_capability_resolution,
+)
+from .validation import (
+    validate_dataset_configuration,
+    write_validation_report,
+)
 
 VALID_STAGES = (
     "C0",
@@ -105,6 +114,7 @@ STAGE_REQUIRES: dict[str, tuple[str, ...]] = {
 }
 
 STAGE_STATUS_FILENAME = "stage_status.json"
+RUN_METADATA_FILENAME = "run_metadata.json"
 
 
 class StageError(RuntimeError):
@@ -162,6 +172,35 @@ def _write_stage_status(ctx: StageContext, stage: str, status: str, detail: str)
     payload["updated_at_utc"] = _utc_now()
     ctx.root.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _config_hash(paths: Sequence[Path]) -> str:
+    hasher = hashlib.sha256()
+    for path in paths:
+        hasher.update(path.resolve().as_posix().encode("utf-8"))
+        hasher.update(b"\n")
+        hasher.update(path.read_bytes())
+        hasher.update(b"\n")
+    return hasher.hexdigest()
+
+
+def _write_run_metadata(ctx: StageContext, stages: Sequence[str]) -> Path:
+    payload = {
+        "dataset_id": ctx.dataset.dataset_id,
+        "dataset_role": ctx.dataset.role,
+        "dataset_output_root": str(ctx.dataset.output_root),
+        "master_config": str(ctx.master_path),
+        "dataset_config": str(ctx.dataset_path),
+        "configuration_hash_sha256": _config_hash([ctx.master_path, ctx.dataset_path]),
+        "requested_stages": list(stages),
+        "root_seed": int(ctx.master.root_seed),
+        "n_surrogates": int(ctx.n_surrogates),
+        "generated_at_utc": _utc_now(),
+    }
+    path = ctx.root / RUN_METADATA_FILENAME
+    ctx.root.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def _require_stages(ctx: StageContext, stage: str) -> None:
@@ -229,11 +268,18 @@ def run_c0(ctx: StageContext) -> dict[str, Path]:
     out.mkdir(parents=True, exist_ok=True)
     observations = _load_observations(ctx)
     lag_max_s = float(ctx.master.lag.max_s)
-    data_audit_path, _records = run_confirmatory_data_audit(
+    data_audit_path, records = run_confirmatory_data_audit(
         observations,
         out,
         lag_max_s=lag_max_s,
     )
+    audit_rows = [record.to_row() for record in records]
+    _effective, capability_rows = resolve_effective_capabilities(
+        ctx.dataset,
+        observations,
+        data_audit_rows=audit_rows,
+    )
+    capability_path = write_capability_resolution(capability_rows, out)
     metadata = eligibility_metadata_from_observations(
         {ctx.dataset.dataset_id: observations}
     )
@@ -253,6 +299,7 @@ def run_c0(ctx: StageContext) -> dict[str, Path]:
         "data_audit": data_audit_path,
         "eligibility_by_duration": paths[2],
         "eligibility_qc_summary": paths[3],
+        "capability_resolution": capability_path,
     }
     mapping["stage_status"] = _write_c0_stage_status(
         out,
@@ -888,6 +935,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[confirmatory] dataset={dataset.dataset_id}")
         print(f"[confirmatory] output_root={dataset.output_root}")
         print(f"[confirmatory] stages={stages}")
+        observations = _load_observations(ctx)
+        issues = validate_dataset_configuration(dataset, observations)
+        report_path = write_validation_report(
+            dataset=dataset,
+            issues=issues,
+            output_dir=ctx.root / "validation",
+        )
+        print(f"[confirmatory] validation_report={report_path}")
+        metadata_path = _write_run_metadata(ctx, stages)
+        print(f"[confirmatory] run_metadata={metadata_path}")
+        errors = [issue for issue in issues if issue.severity == "error"]
+        if errors:
+            raise StageError(
+                "configuration_validation_failed: "
+                + "; ".join(issue.message for issue in errors[:5])
+            )
         run_stages(ctx, stages)
     except (StageError, ValueError, FileNotFoundError) as exc:
         print(f"[confirmatory] STOP: {exc}", file=sys.stderr)

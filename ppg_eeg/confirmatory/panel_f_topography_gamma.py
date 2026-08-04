@@ -30,6 +30,7 @@ from .duration_contracts import ENDPOINT_ZLPI, EXPECTED_PRIMARY_DURATION_S
 from .harmonize import BAND_ORDER, harmonize_observation
 from .nulls import compute_endpoint_index_from_series
 from .paired_delta_inference import DEFAULT_CLUSTER_BOOTSTRAP_DRAWS
+from .protocol_audit import condition_semantics_for
 
 PANEL_F_STEM = "figure3_panel_f_topography_gamma"
 PANEL_F_TITLE = "F. Topography and gamma specificity"
@@ -458,9 +459,10 @@ def compute_observation_channel_zlpi(
 
 def _infer_state(condition: str) -> str:
     text = condition.casefold()
-    if "tetris" in text:
+    state_role, _time_role, _session = condition_semantics_for("unknown", text)
+    if state_role == "state_high":
         return "tetris"
-    if "rest" in text:
+    if state_role == "state_low":
         return "rest"
     return ""
 

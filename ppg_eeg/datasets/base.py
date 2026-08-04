@@ -26,6 +26,12 @@ class CanonicalObservation:
     modality: str | None = None
     timepoint: str | None = None
     state: str | None = None
+    participant_id: str | None = None
+    session_id: str | None = None
+    normalized_state: str | None = None
+    normalized_time: str | None = None
+    cardiac_modality: str | None = None
+    cardiac_event_type: str | None = None
     is_usable: bool = True
     notes: str = ""
 
@@ -45,6 +51,12 @@ class CanonicalObservation:
             "modality": self.modality or "",
             "timepoint": self.timepoint or "",
             "state": self.state or "",
+            "participant_id": self.participant_id or "",
+            "session_id": self.session_id or "",
+            "normalized_state": self.normalized_state or "",
+            "normalized_time": self.normalized_time or "",
+            "cardiac_modality": self.cardiac_modality or "",
+            "cardiac_event_type": self.cardiac_event_type or "",
             "is_usable": bool(self.is_usable),
             "notes": self.notes,
         }

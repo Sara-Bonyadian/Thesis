@@ -923,10 +923,28 @@ def compute_panel_d_cardiac_controls(
         baseline_obs,
         control=CONTROL_ICA_TEMPLATE,
     )
+    if not control_rows[CONTROL_ICA_TEMPLATE]:
+        control_rows[CONTROL_ICA_TEMPLATE] = [
+            {
+                "control": CONTROL_ICA_TEMPLATE,
+                "eligibility": "not_computable",
+                "exclusion_reason": _control_reason(CONTROL_ICA_TEMPLATE, "UNKNOWN"),
+                "not_computable_reason": _control_reason(CONTROL_ICA_TEMPLATE, "UNKNOWN"),
+            }
+        ]
     control_rows[CONTROL_RPEAK_MASK] = _emit_not_computable(
         baseline_obs,
         control=CONTROL_RPEAK_MASK,
     )
+    if not control_rows[CONTROL_RPEAK_MASK]:
+        control_rows[CONTROL_RPEAK_MASK] = [
+            {
+                "control": CONTROL_RPEAK_MASK,
+                "eligibility": "not_computable",
+                "exclusion_reason": _control_reason(CONTROL_RPEAK_MASK, "UNKNOWN"),
+                "not_computable_reason": _control_reason(CONTROL_RPEAK_MASK, "UNKNOWN"),
+            }
+        ]
     beat_rows, beat_reason = _beat_count_adjusted_observations(baseline_obs, subject_rows)
     if beat_rows:
         control_rows[CONTROL_BEAT_COUNT] = beat_rows
@@ -935,13 +953,36 @@ def compute_panel_d_cardiac_controls(
             baseline_obs,
             control=CONTROL_BEAT_COUNT,
         )
+        if not control_rows[CONTROL_BEAT_COUNT]:
+            # No baseline rows: still emit an explicit NC reason for summaries.
+            control_rows[CONTROL_BEAT_COUNT] = [
+                {
+                    "control": CONTROL_BEAT_COUNT,
+                    "eligibility": "not_computable",
+                    "exclusion_reason": beat_reason
+                    or _control_reason(CONTROL_BEAT_COUNT, "UNKNOWN"),
+                    "not_computable_reason": beat_reason
+                    or _control_reason(CONTROL_BEAT_COUNT, "UNKNOWN"),
+                }
+            ]
         for row in control_rows[CONTROL_BEAT_COUNT]:
-            row["exclusion_reason"] = beat_reason
-            row["not_computable_reason"] = beat_reason
+            row["exclusion_reason"] = beat_reason or _as_str(
+                row.get("exclusion_reason")
+            ) or _control_reason(CONTROL_BEAT_COUNT, "UNKNOWN")
+            row["not_computable_reason"] = row["exclusion_reason"]
     control_rows[CONTROL_ECG_CHANNELS] = _emit_not_computable(
         baseline_obs,
         control=CONTROL_ECG_CHANNELS,
     )
+    if not control_rows[CONTROL_ECG_CHANNELS]:
+        control_rows[CONTROL_ECG_CHANNELS] = [
+            {
+                "control": CONTROL_ECG_CHANNELS,
+                "eligibility": "not_computable",
+                "exclusion_reason": _control_reason(CONTROL_ECG_CHANNELS, "UNKNOWN"),
+                "not_computable_reason": _control_reason(CONTROL_ECG_CHANNELS, "UNKNOWN"),
+            }
+        ]
 
     observations: list[dict[str, object]] = []
     for control in CONTROL_ORDER:
@@ -960,8 +1001,12 @@ def compute_panel_d_cardiac_controls(
                     control,
                     baseline_obs,
                     rows,
-                    computability_status="computed",
-                    computability_reason="",
+                    computability_status="computed" if baseline_obs else "not_computable",
+                    computability_reason=(
+                        ""
+                        if baseline_obs
+                        else "no_baseline_eligible_observations"
+                    ),
                     display_label=display_labels[control],
                     n_baseline_eligible=n_baseline_eligible,
                 )
@@ -971,9 +1016,11 @@ def compute_panel_d_cardiac_controls(
         reason = ""
         if not computed:
             for row in rows:
-                reason = _as_str(row.get("exclusion_reason"))
+                reason = _as_str(row.get("exclusion_reason") or row.get("not_computable_reason"))
                 if reason:
                     break
+            if not reason:
+                reason = _control_reason(control, "UNKNOWN")
         summaries.append(
             _summarize_control(
                 control,

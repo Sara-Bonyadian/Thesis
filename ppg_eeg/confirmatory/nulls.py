@@ -68,6 +68,7 @@ from .correlation import (
 )
 from .duration_contracts import EXPECTED_DURATIONS_S, contract_for_duration
 from .endpoints import evaluate_endpoint_curve
+from .protocol_audit import condition_semantics_for
 
 NULL_SUBJECT_RESULTS_FILENAME = "null_subject_results.csv"
 NULL_SUMMARY_FILENAME = "null_summary.csv"
@@ -1059,16 +1060,12 @@ def _surrogate_rows_for_unit(
 ) -> list[dict[str, object]]:
     """Expand one unit's surrogate vector into row-wise long-form records."""
     ids = _surrogate_identity_fields(unit)
-    state = (
-        "rest"
-        if "rest" in _as_str(unit.condition).casefold()
-        else ("tetris" if "tetris" in _as_str(unit.condition).casefold() else "")
+    state_role, time_role, _session = condition_semantics_for(
+        unit.dataset_id,
+        _as_str(unit.condition),
     )
-    period = (
-        "pre"
-        if "pre" in _as_str(unit.condition).casefold()
-        else ("post" if "post" in _as_str(unit.condition).casefold() else "")
-    )
+    state = "rest" if state_role == "state_low" else ("task" if state_role == "state_high" else "")
+    period = "pre" if time_role == "time_pre" else ("post" if time_role == "time_post" else "")
     obs_z = float("nan")
     if math.isfinite(null_std) and null_std > 0 and math.isfinite(observed_endpoint_index):
         obs_z = float((observed_endpoint_index - null_mean) / null_std)

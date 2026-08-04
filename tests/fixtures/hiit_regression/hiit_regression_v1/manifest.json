@@ -1,0 +1,88 @@
+{
+  "code_commit": "805e7dbb1324291a87e2c8cbe0fba958ddd98702",
+  "configuration_hash": "583c2c045f1cb341224f28684505c5534f40d2cbde1aa9e128099815efa7134d",
+  "files": [
+    {
+      "bytes": "649",
+      "relative_path": "run_metadata.json",
+      "sha256": "93d249e788da94a67e959e5fc79d6f000733fc6bf976cd436d9b6ac71d2ec451"
+    },
+    {
+      "bytes": "185093",
+      "relative_path": "C0/eligibility_by_duration.csv",
+      "sha256": "d42ea93741108650dabe99d8bd4703748b2ddc72db717d10a6265c6c8f020d11"
+    },
+    {
+      "bytes": "2007",
+      "relative_path": "C0/eligibility_qc_summary.csv",
+      "sha256": "5570018639c3d8c6fd50a687c30f802d625c7c35b961e5543a62fde9ed30a7f9"
+    },
+    {
+      "bytes": "1025",
+      "relative_path": "C0/capability_resolution.csv",
+      "sha256": "9d67c641f7f883c2985a27cac5dbd6da7a338e0f2a2f0272acb61cc9e37d7315"
+    },
+    {
+      "bytes": "13429",
+      "relative_path": "C0/protocol_audit.csv",
+      "sha256": "c27db06167dba918c65f9fb394eb7b8a03f7ae2801171e833d2b5552dbad864d"
+    },
+    {
+      "bytes": "56878",
+      "relative_path": "C0/data_audit.csv",
+      "sha256": "14a3b35b8e6023054b5a4f148990154c032f7d8133f9a4727e05a6a9dd9086c0"
+    },
+    {
+      "bytes": "6243",
+      "relative_path": "C7/figures/source_data/figure3_panel_c_duration_sensitivity.csv",
+      "sha256": "6c669b5cc1674e6df91c7a564402ff8d274f51d03e25ac17feb91f88ea6f84d7"
+    },
+    {
+      "bytes": "2170",
+      "relative_path": "C7/figures/source_data/figure3_panel_d_cardiac_controls_summaries.csv",
+      "sha256": "af2594fb39a4fed15f7f8246f77ac46e7519e0245eb4f5a0181c0eab1248826d"
+    },
+    {
+      "bytes": "3962",
+      "relative_path": "C7/figures/source_data/figure3_panel_e_nuisance_modality_specifications.csv",
+      "sha256": "2faf910ab6c4dabedbee8bef9f520de83231f9d18d1598032b48a24688f5d512"
+    },
+    {
+      "bytes": "2493",
+      "relative_path": "C7/figures/source_data/figure3_panel_e_nuisance_modality_common_sample.csv",
+      "sha256": "f68a54aa24b52b38e9f1602ae5e22c640de2bff2e0e9f7206a76fd71fa19aead"
+    },
+    {
+      "bytes": "54352",
+      "relative_path": "C7/figures/source_data/figure3_panel_f_topography_gamma_summary.csv",
+      "sha256": "b29012be5d209ac9b117d98d676de5d25cce5d01c9dfcf89082a6eefb7c05e6b"
+    },
+    {
+      "bytes": "6035",
+      "relative_path": "C7/figures/source_data/figure3_panel_f_topography_gamma_common_montage.csv",
+      "sha256": "006b93135e18e312c18ce6350e0e58c6897d176a3e4f5feaf0f46d53e35f004b"
+    },
+    {
+      "bytes": "690",
+      "relative_path": "C7/figures/source_data/figure3_panel_b_group_summaries.csv",
+      "sha256": "6d1468ae9e2a002b8f33707cac39a2fe8540742f18e2b41cc19b4133e4f8f1bc"
+    },
+    {
+      "bytes": "1336",
+      "relative_path": "C7/figures/source_data/figure3_panel_a_inference.csv",
+      "sha256": "827b8a5648f021525a9a4300a6e14dd2b7693910d774ff44b45cf0dcbbd3e4dd"
+    }
+  ],
+  "generation_timestamp_utc": "2026-08-03T21:19:31.124977+00:00",
+  "random_seeds": {
+    "root_seed": 20260713
+  },
+  "snapshot_version": "hiit_regression_v1",
+  "source_hiit_root": "/Users/sarabonyadian/Documents/HIIT/ppg-eeg/derivatives/confirmatory_temporal_coupling/sensitivity/hiit",
+  "specification_version": "phase1_closure_reason_taxonomy",
+  "tolerances": {
+    "categorical_exact": true,
+    "numeric_abs_tol": 1e-09,
+    "numeric_rel_tol": 1e-09
+  }
+}

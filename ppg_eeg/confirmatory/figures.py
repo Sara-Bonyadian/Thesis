@@ -99,6 +99,7 @@ from .panel_f_topography_gamma import (
     compute_panel_f_topography,
     render_panel_f_figure,
 )
+from .protocol_audit import condition_semantics_for
 
 FIGURE_DPI = 300
 
@@ -206,16 +207,7 @@ GROUP_MEAN_LABEL_TEMPLATE = "Group mean Fisher z (n = {n} participants)"
 MU_EQUIVALENCE_LABEL = f"μ equivalence ({EQUIVALENCE_REGION_LABEL})"
 MSG_NOT_INCLUDED = "Not included in the confirmatory analysis."
 MSG_NOT_APPLICABLE = "Not applicable for this dataset"
-LOW_DEMAND_CONDITION_LABELS = {
-    "rest",
-    "passive",
-    "step1",
-    "low_demand",
-    "ph_pre_rest",
-    "ph_post_rest",
-    "ps_pre_rest",
-    "ps_post_rest",
-}
+LOW_DEMAND_CONDITION_LABELS = {"rest", "passive", "step1", "low_demand"}
 
 # Master.yaml dataset_roles mirrored for figure cohort splitting when audit omits role.
 FIGURE1_PRIMARY_DATASETS = frozenset(
@@ -1400,10 +1392,15 @@ def _set_lag_axes(ax: plt.Axes, duration_s: int) -> None:
 
 
 def _is_low_demand_condition(row: Mapping[str, object]) -> bool:
+    dataset_id = _as_str(row.get("dataset_id")).casefold()
     condition = _as_str(row.get("condition") or row.get("task")).casefold()
     role = _as_str(row.get("condition_role") or row.get("state")).casefold()
     if role == "low_demand":
         return True
+    if dataset_id:
+        state_role, _time_role, _session = condition_semantics_for(dataset_id, condition)
+        if state_role == "state_low":
+            return True
     return condition in LOW_DEMAND_CONDITION_LABELS
 
 
@@ -1494,7 +1491,6 @@ def mean_ci_by_lag(
 ) -> list[dict[str, object]]:
     """Aggregate Fisher-z curves to mean ± 95% CI per lag (low-demand by default)."""
     buckets: dict[int, list[float]] = {}
-    low_labels = LOW_DEMAND_CONDITION_LABELS
     for row in curve_rows:
         if _as_int(row.get("duration_s"), duration_s) != duration_s:
             continue
@@ -1506,16 +1502,25 @@ def mean_ci_by_lag(
         ):
             continue
         condition = _as_str(row.get("condition") or row.get("task")).casefold()
+        dataset_id = _as_str(row.get("dataset_id")).casefold()
         role = _as_str(row.get("condition_role") or row.get("state")).casefold()
         if condition_role == "low_demand":
-            if role and role != "low_demand" and condition not in low_labels:
+            state_role = ""
+            if dataset_id and condition:
+                state_role, _time_role, _session = condition_semantics_for(
+                    dataset_id, condition
+                )
+            is_low = (
+                role in {"low_demand", "state_low"}
+                or state_role == "state_low"
+                or (
+                    not role
+                    and not state_role
+                    and condition in LOW_DEMAND_CONDITION_LABELS
+                )
+            )
+            if condition and not is_low:
                 continue
-            if not role and condition not in low_labels and condition:
-                # If condition unknown, keep row (synthetic tables often use rest).
-                if condition not in low_labels and condition not in {"", "rest"}:
-                    # keep generic synthetic conditions like "rest"
-                    if "rest" not in condition and "passive" not in condition and "low" not in condition:
-                        pass
         lag = int(round(_as_float(row.get("lag_s"))))
         r = _as_float(row.get("r"))
         z = fisher_z(r) if math.isfinite(r) else float("nan")
@@ -2392,11 +2397,19 @@ def _fit_ar1_phi_for_panel(values: np.ndarray) -> float:
     return float(np.sum((x_m - x_mean) * (y_m - y_mean)) / denom)
 
 
-def _panel_b_parse_state_period(condition: str) -> tuple[str, str, str]:
+def _panel_b_parse_state_period(dataset_id: str, condition: str) -> tuple[str, str, str]:
     text = _as_str(condition).casefold()
-    state = "rest" if "rest" in text else ("tetris" if "tetris" in text else "")
-    period = "pre" if "pre" in text else ("post" if "post" in text else "")
-    session_type = "ph" if "_ph_" in f"_{text}_" else ("ps" if "_ps_" in f"_{text}_" else "")
+    state_role, time_role, session_type = condition_semantics_for(dataset_id, text)
+    state = (
+        "rest"
+        if state_role == "state_low"
+        else ("task" if state_role == "state_high" else "")
+    )
+    period = (
+        "pre"
+        if time_role == "time_pre"
+        else ("post" if time_role == "time_post" else "")
+    )
     return state, period, session_type
 
 
@@ -2462,7 +2475,7 @@ def _panel_b_unit_keys(unit: SeriesUnit) -> dict[str, str]:
             "task": unit.task,
         }
     )
-    state, period, session_type = _panel_b_parse_state_period(unit.condition)
+    state, period, session_type = _panel_b_parse_state_period(unit.dataset_id, unit.condition)
     return {
         "dataset_id": _as_str(keys.get("dataset_id"), unit.dataset_id).casefold(),
         "biological_participant_id": _as_str(keys.get("participant_id")).casefold(),
@@ -3076,6 +3089,49 @@ def _panel_c_dataset_role(dataset_id: str, dataset_roles: Mapping[str, str]) -> 
     return "unknown"
 
 
+def _panel_c_supported_durations(dataset_id: str) -> frozenset[int]:
+    """Return duration set allowed for Panel C from YAML capabilities.
+
+    Declared capability alone never computes an endpoint; this only gates which
+    duration contracts may appear for a dataset. Missing YAML → all locked
+    durations (eligibility still decides computability).
+    """
+    ds = _as_str(dataset_id).casefold()
+    if not ds:
+        return frozenset(EXPECTED_DURATIONS_S)
+    try:
+        import yaml
+
+        from .config import load_dataset_config, load_master_config
+
+        repo_root = Path(__file__).resolve().parents[2] / "zero-lag-reanalysis-repo"
+        dataset_yaml = repo_root / "datasets" / f"{ds}.yaml"
+        master_yaml = repo_root / "master.yaml"
+        if not dataset_yaml.is_file() or not master_yaml.is_file():
+            # Lightweight parse when master is unavailable.
+            if dataset_yaml.is_file():
+                raw = yaml.safe_load(dataset_yaml.read_text(encoding="utf-8")) or {}
+                caps = raw.get("capabilities") or {}
+                allowed = {60, 120}
+                if bool(caps.get("supports_d180", True)):
+                    allowed.add(180)
+                if bool(caps.get("supports_d240", True)):
+                    allowed.add(240)
+                return frozenset(allowed)
+            return frozenset(EXPECTED_DURATIONS_S)
+        master = load_master_config(master_yaml)
+        cfg = load_dataset_config(dataset_yaml, master=master)
+        caps = cfg.capabilities
+        allowed = {60, 120}
+        if caps.supports_d180:
+            allowed.add(180)
+        if caps.supports_d240:
+            allowed.add(240)
+        return frozenset(allowed)
+    except Exception:  # noqa: BLE001
+        return frozenset(EXPECTED_DURATIONS_S)
+
+
 def _split_observation_ids(raw_ids: object) -> list[str]:
     text = _as_str(raw_ids)
     if not text:
@@ -3244,16 +3300,21 @@ def _panel_c_observation_level_rows(
 
         participant_id = _as_str(row.get("participant_id")).casefold()
         session_id = _as_str(row.get("session_id"), "single").casefold() or "single"
-        if dataset_id == "hiit":
-            biological_participant_id = participant_id
-            subject_id = _as_str(row.get("subject_id")).casefold()
-            session_unit_id = (
-                subject_id if subject_id else f"{biological_participant_id}_{session_id}"
-            )
+        # Prefer explicit session-unit fields when present; otherwise compose
+        # participant_id + session_id. HIIT stores PH/PS in subject_id.
+        biological_participant_id = participant_id or _as_str(
+            row.get("subject_id")
+        ).casefold()
+        subject_id = _as_str(row.get("subject_id")).casefold()
+        if subject_id and ("_" in subject_id) and session_id in {"", "single"}:
+            # Session-suffixed subject IDs (e.g. 01_ph) act as session units.
+            session_unit_id = subject_id
+            biological_participant_id = subject_id.rsplit("_", 1)[0]
+        elif subject_id and session_id not in {"", "single"} and subject_id.endswith(
+            f"_{session_id}"
+        ):
+            session_unit_id = subject_id
         else:
-            biological_participant_id = participant_id or _as_str(
-                row.get("subject_id")
-            ).casefold()
             session_unit_id = (
                 f"{biological_participant_id}_{session_id}"
                 if session_id not in {"", "single"}
@@ -3303,12 +3364,12 @@ def _panel_c_observation_level_rows(
             ),
         }
 
-        if dataset_id == "ds003816" and int(duration_s) != 60:
+        if int(duration_s) not in _panel_c_supported_durations(dataset_id):
             out.append(
                 {
                     **base,
                     "eligibility_status": "excluded",
-                    "exclusion_reason": "ds003816_excluded_above_60s",
+                    "exclusion_reason": "duration_not_supported_by_dataset_capabilities",
                 }
             )
             continue
@@ -3562,8 +3623,12 @@ def _validate_panel_c_rows(rows: Sequence[Mapping[str, object]]) -> None:
             raise RuntimeError(f"Panel C duration outside locked set: {duration_s}")
         if not dataset_id:
             raise RuntimeError("Panel C summary row has empty dataset_id.")
-        if dataset_id == "ds003816" and duration_s > 60:
-            raise RuntimeError("Panel C ds003816 row detected above 60 seconds.")
+        supported = _panel_c_supported_durations(dataset_id)
+        if duration_s not in supported and status == "eligible":
+            raise RuntimeError(
+                f"Panel C eligible row for {dataset_id} at D{duration_s} "
+                f"outside capability-supported durations {sorted(supported)}."
+            )
         contract = contract_for_duration(duration_s)
         expected_name = _as_str(contract.endpoint_name).casefold()
         if endpoint_name != expected_name:
@@ -3588,8 +3653,6 @@ def _validate_panel_c_rows(rows: Sequence[Mapping[str, object]]) -> None:
             raise RuntimeError(
                 f"Panel C forbids labeling D{duration_s} as SWPI/MWPI."
             )
-        if dataset_id == "ds003816" and endpoint_name != ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX:
-            raise RuntimeError("Panel C ds003816 D60 must use SWPI.")
         if lag_max != int(contract.lag_max_s) or (flank_inner, flank_outer) != tuple(
             contract.flanks_s
         ):

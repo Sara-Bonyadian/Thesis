@@ -17,3 +17,29 @@ selection:
     - verbalwm
   sessions:
     - single
+
+protocol:
+  participant_id_from: subject_id
+  session_id_from: session_label
+  cardiac_event_type: r_peak
+
+normalization:
+  condition_semantics:
+    rest: { state: state_low, time: time_na, session: single }
+    verbalwm: { state: state_high, time: time_na, session: single }
+
+capabilities:
+  has_eeg: true
+  has_hr: true
+  cardiac_modality: both
+  has_ecg_r_peaks: true
+  has_ppg_peaks: true
+  has_low_high_task_pair: true
+  has_pre_post_pair: false
+  has_behavior: false
+  supports_d180: true
+  supports_d240: true
+  supports_topography: true
+  supports_gamma: true
+  sensitivity_only: false
+  has_artifact_controls: true

@@ -26,6 +26,7 @@ from .duration_contracts import (
     STANDARD_ZLPI_LAG_MAX_S,
     ZLPI_FLANKS_S,
 )
+from .dataset_contracts import DatasetCapabilities
 
 EXPECTED_BANDS_HZ: dict[str, tuple[float, float]] = {
     "theta": (4.0, 7.0),
@@ -186,6 +187,19 @@ class DatasetCardiacConfig:
 
 
 @dataclass(frozen=True)
+class DatasetProtocolConfig:
+    participant_id_from: str = "auto"
+    session_id_from: str = "auto"
+    cardiac_event_type: str = "auto"
+    hiit_partition_mode: str = "protocol_task"
+
+
+@dataclass(frozen=True)
+class DatasetNormalizationConfig:
+    condition_semantics: dict[str, dict[str, str]]
+
+
+@dataclass(frozen=True)
 class ConfirmatoryDatasetConfig:
     schema_version: int
     source_path: Path
@@ -196,6 +210,26 @@ class ConfirmatoryDatasetConfig:
     output_root: Path
     cardiac: DatasetCardiacConfig = DatasetCardiacConfig()
     eeg: DatasetEegConfig = DatasetEegConfig()
+    protocol: DatasetProtocolConfig = DatasetProtocolConfig()
+    normalization: DatasetNormalizationConfig = DatasetNormalizationConfig(
+        condition_semantics={}
+    )
+    capabilities: DatasetCapabilities = DatasetCapabilities(
+        has_eeg=True,
+        has_hr=True,
+        cardiac_modality="auto",
+        has_ecg_r_peaks=False,
+        has_ppg_peaks=False,
+        has_low_high_task_pair=True,
+        has_pre_post_pair=False,
+        has_behavior=False,
+        supports_d180=True,
+        supports_d240=True,
+        supports_topography=True,
+        supports_gamma=True,
+        sensitivity_only=False,
+        has_artifact_controls=True,
+    )
     n_surrogates: int | None = None
 
 
@@ -642,6 +676,9 @@ def load_dataset_config(
         "selection",
         "cardiac",
         "eeg",
+        "protocol",
+        "normalization",
+        "capabilities",
         "n_surrogates",
     }
     _reject_unknown_keys(root, allowed=top_keys, path="<root>")
@@ -721,6 +758,13 @@ def load_dataset_config(
     )
     cardiac = _load_dataset_cardiac(root.get("cardiac"), dataset_id=dataset_id)
     eeg = _load_dataset_eeg(root.get("eeg"))
+    protocol = _load_dataset_protocol(root.get("protocol"))
+    normalization = _load_dataset_normalization(root.get("normalization"))
+    capabilities = _load_dataset_capabilities(
+        root.get("capabilities"),
+        dataset_id=dataset_id,
+        role=role,
+    )
     n_surrogates: int | None = None
     if "n_surrogates" in root and root["n_surrogates"] is not None:
         n_surrogates = _as_int(root["n_surrogates"], path="n_surrogates")
@@ -740,6 +784,9 @@ def load_dataset_config(
         output_root=output_root,
         cardiac=cardiac,
         eeg=eeg,
+        protocol=protocol,
+        normalization=normalization,
+        capabilities=capabilities,
         n_surrogates=n_surrogates,
     )
 
@@ -776,13 +823,6 @@ def _load_dataset_cardiac(
 ) -> DatasetCardiacConfig:
     """Parse optional dataset ``cardiac`` block with modality-aware defaults."""
     defaults = DatasetCardiacConfig()
-    if dataset_id == "hiit":
-        defaults = DatasetCardiacConfig(
-            channel="photosensor",
-            signal_type="ppg",
-            detector="ppg_peak",
-            ibi_max_ms=1500.0,
-        )
 
     if raw is None:
         return defaults
@@ -840,4 +880,133 @@ def _load_dataset_cardiac(
         start_time_s=_opt_float("start_time_s", defaults.start_time_s),
         end_time_s=_opt_float("end_time_s", defaults.end_time_s),
         debug_plot=debug_raw,
+    )
+
+
+def _load_dataset_protocol(raw: Any) -> DatasetProtocolConfig:
+    if raw is None:
+        return DatasetProtocolConfig()
+    payload = _as_mapping(raw, path="protocol")
+    _reject_unknown_keys(
+        payload,
+        allowed={
+            "participant_id_from",
+            "session_id_from",
+            "cardiac_event_type",
+            "hiit_partition_mode",
+        },
+        path="protocol",
+    )
+    participant_id_from = str(payload.get("participant_id_from", "auto")).strip().casefold()
+    session_id_from = str(payload.get("session_id_from", "auto")).strip().casefold()
+    cardiac_event_type = str(payload.get("cardiac_event_type", "auto")).strip().casefold()
+    hiit_partition_mode = str(payload.get("hiit_partition_mode", "protocol_task")).strip().casefold()
+    if participant_id_from not in {"auto", "subject_id", "observation_id"}:
+        raise ValueError("protocol.participant_id_from must be auto|subject_id|observation_id.")
+    if session_id_from not in {"auto", "session_label", "subject_suffix"}:
+        raise ValueError("protocol.session_id_from must be auto|session_label|subject_suffix.")
+    if hiit_partition_mode not in {"protocol_task", "task_only"}:
+        raise ValueError("protocol.hiit_partition_mode must be protocol_task|task_only.")
+    return DatasetProtocolConfig(
+        participant_id_from=participant_id_from,
+        session_id_from=session_id_from,
+        cardiac_event_type=cardiac_event_type,
+        hiit_partition_mode=hiit_partition_mode,
+    )
+
+
+def _load_dataset_normalization(raw: Any) -> DatasetNormalizationConfig:
+    if raw is None:
+        return DatasetNormalizationConfig(condition_semantics={})
+    payload = _as_mapping(raw, path="normalization")
+    _reject_unknown_keys(payload, allowed={"condition_semantics"}, path="normalization")
+    semantics_raw = payload.get("condition_semantics") or {}
+    if not isinstance(semantics_raw, Mapping):
+        raise ValueError("normalization.condition_semantics must be a mapping.")
+    semantics: dict[str, dict[str, str]] = {}
+    for label, raw_spec in semantics_raw.items():
+        condition = str(label).strip().casefold()
+        spec = _as_mapping(raw_spec, path=f"normalization.condition_semantics.{label}")
+        _reject_unknown_keys(spec, allowed={"state", "time", "session"}, path=f"normalization.condition_semantics.{label}")
+        _require_keys(spec, required={"state"}, path=f"normalization.condition_semantics.{label}")
+        semantics[condition] = {
+            "state": str(spec.get("state", "")).strip().casefold(),
+            "time": str(spec.get("time", "time_na")).strip().casefold(),
+            "session": str(spec.get("session", "")).strip().casefold(),
+        }
+    return DatasetNormalizationConfig(condition_semantics=semantics)
+
+
+def _load_dataset_capabilities(
+    raw: Any,
+    *,
+    dataset_id: str,
+    role: str,
+) -> DatasetCapabilities:
+    # Neutral defaults only. Dataset-specific values must come from YAML;
+    # effective computability is resolved later from observed evidence.
+    del dataset_id  # retained for call-site compatibility / clearer errors later
+    defaults = DatasetCapabilities(
+        has_eeg=True,
+        has_hr=True,
+        cardiac_modality="auto",
+        has_ecg_r_peaks=False,
+        has_ppg_peaks=False,
+        has_low_high_task_pair=True,
+        has_pre_post_pair=False,
+        has_behavior=False,
+        supports_d180=True,
+        supports_d240=True,
+        supports_topography=True,
+        supports_gamma=True,
+        sensitivity_only=role == "sensitivity",
+        has_artifact_controls=True,
+    )
+    if raw is None:
+        return defaults
+    payload = _as_mapping(raw, path="capabilities")
+    allowed = {
+        "has_eeg",
+        "has_hr",
+        "cardiac_modality",
+        "has_ecg_r_peaks",
+        "has_ppg_peaks",
+        "has_low_high_task_pair",
+        "has_pre_post_pair",
+        "has_behavior",
+        "supports_d180",
+        "supports_d240",
+        "supports_topography",
+        "supports_gamma",
+        "sensitivity_only",
+        "has_artifact_controls",
+    }
+    _reject_unknown_keys(payload, allowed=allowed, path="capabilities")
+
+    def _bool(name: str, fallback: bool) -> bool:
+        if name not in payload:
+            return fallback
+        value = payload[name]
+        if not isinstance(value, bool):
+            raise ValueError(f"capabilities.{name} must be boolean.")
+        return value
+
+    cardiac_modality = str(payload.get("cardiac_modality", defaults.cardiac_modality)).strip().casefold()
+    if cardiac_modality not in {"ecg", "ppg", "both", "neither", "auto"}:
+        raise ValueError("capabilities.cardiac_modality must be ecg|ppg|both|neither|auto.")
+    return DatasetCapabilities(
+        has_eeg=_bool("has_eeg", defaults.has_eeg),
+        has_hr=_bool("has_hr", defaults.has_hr),
+        cardiac_modality=cardiac_modality,
+        has_ecg_r_peaks=_bool("has_ecg_r_peaks", defaults.has_ecg_r_peaks),
+        has_ppg_peaks=_bool("has_ppg_peaks", defaults.has_ppg_peaks),
+        has_low_high_task_pair=_bool("has_low_high_task_pair", defaults.has_low_high_task_pair),
+        has_pre_post_pair=_bool("has_pre_post_pair", defaults.has_pre_post_pair),
+        has_behavior=_bool("has_behavior", defaults.has_behavior),
+        supports_d180=_bool("supports_d180", defaults.supports_d180),
+        supports_d240=_bool("supports_d240", defaults.supports_d240),
+        supports_topography=_bool("supports_topography", defaults.supports_topography),
+        supports_gamma=_bool("supports_gamma", defaults.supports_gamma),
+        sensitivity_only=_bool("sensitivity_only", defaults.sensitivity_only),
+        has_artifact_controls=_bool("has_artifact_controls", defaults.has_artifact_controls),
     )

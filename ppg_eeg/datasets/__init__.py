@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Sequence
 
@@ -101,7 +102,8 @@ def build_observations(
         "conditions": conditions,
         "sessions": sessions,
     }
-    if dataset_id.casefold() == "hiit":
+    build_params = inspect.signature(adapter.build_observations).parameters
+    if "hiit_partition_mode" in build_params:
         build_kwargs["hiit_partition_mode"] = hiit_partition_mode
     observations = adapter.build_observations(raw_root, **build_kwargs)
     observations = _apply_subject_task_assignments(observations, subject_tasks)
