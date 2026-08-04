@@ -195,7 +195,8 @@ class TestFigure3PanelEDeltaNuisance(unittest.TestCase):
         for row in result.common_sample_rows:
             self.assertFalse(bool(row.get("predictors_centered")))
             self.assertEqual(
-                row.get("zero_nuisance_interpretation"), "no Rest–Tetris nuisance change"
+                row.get("zero_nuisance_interpretation"),
+                "no low-demand–high-demand nuisance change",
             )
 
         base = next(r for r in result.common_sample_rows if r["specification_id"] == "baseline")
@@ -337,9 +338,9 @@ class TestFigure3PanelEDeltaNuisance(unittest.TestCase):
                 "accelerometer summary",
                 "rejected-window",
                 "ocular-artifact",
-                "Rest versus Tetris",
+                "low-demand versus high-demand",
                 "muscle-artifact",
-                "All HIIT observations use PPG",
+                "Cardiac modality is constant within this dataset (PPG)",
             ):
                 self.assertIn(phrase, reason_blob)
 
@@ -354,7 +355,7 @@ class TestFigure3PanelEDeltaNuisance(unittest.TestCase):
             # SVG embeds unavailable reasons (not clipped away as empty)
             svg_text = Path(paths["svg"]).read_text(encoding="utf-8")
             self.assertIn("Respiration", svg_text)
-            self.assertIn("All HIIT observations use PPG", svg_text)
+            self.assertIn("Cardiac modality is constant within this dataset (PPG)", svg_text)
 
 
 @unittest.skipUnless(

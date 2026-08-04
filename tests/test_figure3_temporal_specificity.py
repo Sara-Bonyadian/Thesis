@@ -147,9 +147,9 @@ class TestParticipantNullDeltaEstimand(unittest.TestCase):
         self.assertEqual(len(participants), 2)
         by_id = {p.participant_id: p for p in participants}
         # Participant 01 → canonical "1": mean((0.2)+(0.4))/2 = 0.3
-        self.assertAlmostEqual(by_id["01"].delta_p, 0.30, places=12)
-        self.assertEqual(by_id["01"].n_observations, 2)
-        self.assertAlmostEqual(by_id["02"].delta_p, 0.20, places=12)
+        self.assertAlmostEqual(by_id["1"].delta_p, 0.30, places=12)
+        self.assertEqual(by_id["1"].n_observations, 2)
+        self.assertAlmostEqual(by_id["2"].delta_p, 0.20, places=12)
         # Equal weight: (0.30 + 0.20) / 2 despite unequal observation counts.
         self.assertAlmostEqual(inference.mean_delta, 0.25, places=12)
         self.assertEqual(inference.n_participants, 2)
@@ -411,8 +411,10 @@ class TestFigure3PanelAForest(unittest.TestCase):
             with delta_csv.open(encoding="utf-8") as handle:
                 deltas = list(csv.DictReader(handle))
             self.assertEqual(len(deltas), 3)
-            self.assertEqual({r["participant_id"] for r in deltas}, {"01", "02", "03"})
-            self.assertEqual({r["subject_id"] for r in deltas}, {"01", "02", "03"})
+            self.assertEqual({r["participant_id"] for r in deltas}, {"1", "2", "3"})
+            # subject_id follows the same canonicalize_participant_id rule for
+            # purely numeric IDs (``01`` → ``1``).
+            self.assertEqual({r["subject_id"] for r in deltas}, {"1", "2", "3"})
             self.assertTrue(all(r["band"] == "theta" for r in deltas))
             self.assertTrue(all(r["null_type"] == "circular_shift" for r in deltas))
             self.assertTrue(

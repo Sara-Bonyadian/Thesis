@@ -239,23 +239,34 @@ def canonicalize_participant_id(participant_id: str) -> str:
 def resolve_biological_keys(row: Mapping[str, object]) -> dict[str, str]:
     """Resolve dataset-scoped participant and session keys.
 
-    For HIIT, the independent unit matches Figure 1 Panel B: session
-    ``subject_id`` (e.g. ``01_ph`` / ``01_ps``), not biological participant
-    alone. Other datasets keep biological ``participant_id``.
+    Independent-unit rules (metadata-driven, no dataset-name branch):
+
+    1. Declared ``participant_unit_id`` / ``analysis_unit_id`` wins when present.
+    2. Session-qualified ``subject_id`` values (``{id}_{session}``, e.g.
+       ``01_ph``) are the locked Panel-B analysis unit and are kept verbatim.
+    3. Otherwise the biological participant ID is used (digit padding collapsed).
     """
     keys = normalize_keys(row)
     dataset_id = _as_str(keys["dataset_id"]).casefold()
     session_id = _as_str(keys["session_id"], "single").casefold() or "single"
-    subject_id = _as_str(keys["subject_id"] or row.get("subject_id")).casefold()
     biological = canonicalize_participant_id(keys["participant_id"])
-
-    if dataset_id == "hiit":
-        if subject_id:
-            participant_id = subject_id
-        elif session_id not in {"", "single"} and biological:
-            participant_id = f"{biological}_{session_id}"
-        else:
-            participant_id = biological
+    subject_id = _as_str(keys["subject_id"] or row.get("subject_id")).casefold()
+    declared_unit = _as_str(
+        row.get("participant_unit_id") or row.get("analysis_unit_id")
+    ).casefold()
+    if declared_unit:
+        participant_id = declared_unit
+    elif subject_id and "_" in subject_id:
+        # Session-qualified subject token is the independent unit.
+        participant_id = subject_id
+        if session_id in {"", "single"}:
+            _stem, suffix = subject_id.rsplit("_", 1)
+            if suffix and not suffix.isdigit():
+                session_id = suffix
+    elif subject_id:
+        participant_id = canonicalize_participant_id(subject_id)
+    elif session_id not in {"", "single"} and biological:
+        participant_id = f"{biological}_{session_id}"
     else:
         participant_id = biological
 

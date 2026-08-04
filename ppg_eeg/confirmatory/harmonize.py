@@ -13,6 +13,11 @@ import numpy as np
 
 from .config import EXPECTED_DURATIONS_S, EXPECTED_PRIMARY_DURATION_S
 from .multitaper_power import BANDS_HZ, ROBUST_MEDIAN_CHANNEL
+from .reason_codes import (
+    STRUCTURED_NC_FIELDS,
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+)
 
 MAX_GAP_S = 5.0
 NESTED_DURATIONS_S = (240, 180, 120)
@@ -23,6 +28,33 @@ ALIGNED_FEATURES_TEMPLATE = "features_confirmatory_aligned_D{duration_s}.csv"
 SEGMENT_MANIFEST_FILENAME = "segment_manifest.json"
 ALIGNMENT_QC_FILENAME = "alignment_qc_confirmatory.csv"
 BAND_ORDER = tuple(BANDS_HZ)
+
+
+def _c1c_qc_row(row: Mapping[str, object]) -> dict[str, object]:
+    exclusion = str(row.get("exclusion_reason") or "")
+    code = map_exclusion_to_reason_code(exclusion)
+    return attach_structured_reason(
+        {
+            **dict(row),
+            "reason_code": code,
+        },
+        stage="C1c",
+        eligible=bool(row.get("eligible")),
+        reason_code=code,
+        reason=exclusion.replace("_", " ") if exclusion else "",
+        required_evidence=(
+            f"common_support_samples>={row.get('duration_s', '')}"
+            if exclusion
+            else ""
+        ),
+        observed_evidence=(
+            f"n_common_support={row.get('n_common_support')}; "
+            f"available_duration_s={row.get('available_duration_s')}"
+            if exclusion
+            else ""
+        ),
+        specification_id=f"aligned_D{row.get('duration_s', '')}",
+    )
 
 
 @dataclass(frozen=True)
@@ -406,35 +438,37 @@ def harmonize_observation(
         if not segment.eligible:
             features_by_duration[duration] = ()
             qc_rows.append(
-                {
-                    **ids,
-                    "duration_s": duration,
-                    "duration_role": segment.role,
-                    "eligible": False,
-                    "exclusion_reason": segment.exclusion_reason,
-                    "selected_block_start_s": (
-                        selected.start_s if selected is not None else None
-                    ),
-                    "selected_block_end_s": (
-                        selected.end_s if selected is not None else None
-                    ),
-                    "selected_block_n_samples": (
-                        selected.n_samples if selected is not None else 0
-                    ),
-                    "n_hr_valid": n_hr_valid,
-                    "n_eeg_valid": n_eeg_valid,
-                    "n_common_support": n_common,
-                    "n_blocks": len(blocks),
-                    "segment_start_s": None,
-                    "segment_end_s": None,
-                    "segment_center_s": center_s,
-                    "center_selection": CENTER_SELECTION,
-                    "segment_n_samples": 0,
-                    "n_missing_within_segment": 0,
-                    "available_support_s": available_duration_s,
-                    "available_duration_s": available_duration_s,
-                    "selected_duration_s": float(duration),
-                }
+                _c1c_qc_row(
+                    {
+                        **ids,
+                        "duration_s": duration,
+                        "duration_role": segment.role,
+                        "eligible": False,
+                        "exclusion_reason": segment.exclusion_reason,
+                        "selected_block_start_s": (
+                            selected.start_s if selected is not None else None
+                        ),
+                        "selected_block_end_s": (
+                            selected.end_s if selected is not None else None
+                        ),
+                        "selected_block_n_samples": (
+                            selected.n_samples if selected is not None else 0
+                        ),
+                        "n_hr_valid": n_hr_valid,
+                        "n_eeg_valid": n_eeg_valid,
+                        "n_common_support": n_common,
+                        "n_blocks": len(blocks),
+                        "segment_start_s": None,
+                        "segment_end_s": None,
+                        "segment_center_s": center_s,
+                        "center_selection": CENTER_SELECTION,
+                        "segment_n_samples": 0,
+                        "n_missing_within_segment": 0,
+                        "available_support_s": available_duration_s,
+                        "available_duration_s": available_duration_s,
+                        "selected_duration_s": float(duration),
+                    }
+                )
             )
             continue
 
@@ -490,31 +524,33 @@ def harmonize_observation(
         expected_count = duration
         missing_within = expected_count - len(rows)
         qc_rows.append(
-            {
-                **ids,
-                "duration_s": duration,
-                "duration_role": segment.role,
-                "eligible": True,
-                "exclusion_reason": "",
-                "selected_block_start_s": selected.start_s if selected else None,
-                "selected_block_end_s": selected.end_s if selected else None,
-                "selected_block_n_samples": (
-                    selected.n_samples if selected else 0
-                ),
-                "n_hr_valid": n_hr_valid,
-                "n_eeg_valid": n_eeg_valid,
-                "n_common_support": n_common,
-                "n_blocks": len(blocks),
-                "segment_start_s": segment.start_s,
-                "segment_end_s": segment.end_s,
-                "segment_center_s": segment.center_s,
-                "center_selection": CENTER_SELECTION,
-                "segment_n_samples": segment.n_samples,
-                "n_missing_within_segment": missing_within,
-                "available_support_s": available_duration_s,
-                "available_duration_s": available_duration_s,
-                "selected_duration_s": float(duration),
-            }
+            _c1c_qc_row(
+                {
+                    **ids,
+                    "duration_s": duration,
+                    "duration_role": segment.role,
+                    "eligible": True,
+                    "exclusion_reason": "",
+                    "selected_block_start_s": selected.start_s if selected else None,
+                    "selected_block_end_s": selected.end_s if selected else None,
+                    "selected_block_n_samples": (
+                        selected.n_samples if selected else 0
+                    ),
+                    "n_hr_valid": n_hr_valid,
+                    "n_eeg_valid": n_eeg_valid,
+                    "n_common_support": n_common,
+                    "n_blocks": len(blocks),
+                    "segment_start_s": segment.start_s,
+                    "segment_end_s": segment.end_s,
+                    "segment_center_s": segment.center_s,
+                    "center_selection": CENTER_SELECTION,
+                    "segment_n_samples": segment.n_samples,
+                    "n_missing_within_segment": missing_within,
+                    "available_support_s": available_duration_s,
+                    "available_duration_s": available_duration_s,
+                    "selected_duration_s": float(duration),
+                }
+            )
         )
 
     manifest = {
@@ -714,6 +750,7 @@ def write_harmonize_outputs(
         "available_duration_s",
         "selected_duration_s",
     ]
+    qc_fields = list(dict.fromkeys([*qc_fields, *STRUCTURED_NC_FIELDS]))
     _write_csv(qc_path, result.qc_rows, qc_fields)
     written["alignment_qc"] = qc_path
     return written

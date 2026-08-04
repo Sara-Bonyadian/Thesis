@@ -62,6 +62,10 @@ def _observation(
         session_label=session,
         modality=session if dataset_id == "hiit" else "eeg_cardiac",
         state=condition,
+        participant_id=participant,
+        session_id=session,
+        run_id=run or "single",
+        condition_id=condition,
     )
 
 

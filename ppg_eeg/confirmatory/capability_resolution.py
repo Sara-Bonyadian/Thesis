@@ -16,7 +16,9 @@ from .reason_codes import (
     MISSING_EVENT_SERIES,
     MISSING_PAIRED_OBSERVATION,
     MISSING_REQUIRED_MODALITY,
+    STRUCTURED_NC_FIELDS,
     TOPOGRAPHY_NOT_SUPPORTED,
+    with_structured_nc_fields,
 )
 
 CAPABILITY_RESOLUTION_FILENAME = "capability_resolution.csv"
@@ -73,25 +75,28 @@ def resolve_effective_capabilities(
             for r in data_audit_rows
         )
 
-    conditions = {o.condition_label.casefold() for o in obs}
     semantics = {
         k.casefold(): v for k, v in dataset.normalization.condition_semantics.items()
     }
+    observed_semantics = [
+        semantics.get(o.condition_label.casefold(), {}) for o in obs
+    ]
     has_low = any(
-        str(v.get("state", "")).casefold() == "state_low" for v in semantics.values()
-    ) or any("rest" in c or "passive" in c or c == "step1" for c in conditions)
+        str(v.get("state", "")).casefold() == "state_low"
+        for v in observed_semantics
+    )
     has_high = any(
-        str(v.get("state", "")).casefold() == "state_high" for v in semantics.values()
-    ) or any(
-        any(tok in c for tok in ("tetris", "memory", "wm", "go", "ig", "step2", "step3"))
-        for c in conditions
+        str(v.get("state", "")).casefold() == "state_high"
+        for v in observed_semantics
     )
     has_pre = any(
-        str(v.get("time", "")).casefold() == "time_pre" for v in semantics.values()
-    ) or any("pre" in c for c in conditions)
+        str(v.get("time", "")).casefold() == "time_pre"
+        for v in observed_semantics
+    )
     has_post = any(
-        str(v.get("time", "")).casefold() == "time_post" for v in semantics.values()
-    ) or any("post" in c for c in conditions)
+        str(v.get("time", "")).casefold() == "time_post"
+        for v in observed_semantics
+    )
 
     signal_types = {
         str(r.get("cardiac_signal_type", "")).casefold()
@@ -132,6 +137,10 @@ def resolve_effective_capabilities(
         ),
         has_pre_post_pair=bool(declared.has_pre_post_pair and has_pre and has_post),
         has_behavior=bool(declared.has_behavior),
+        supports_d120=bool(
+            declared.supports_d120
+            and (max_overlap is None or max_overlap >= 120)
+        ),
         supports_d180=bool(declared.supports_d180 and (supports_d180_obs if max_overlap is not None else False)),
         supports_d240=bool(declared.supports_d240 and (supports_d240_obs if max_overlap is not None else False)),
         supports_topography=bool(declared.supports_topography and has_eeg_files),
@@ -206,7 +215,7 @@ def resolve_effective_capabilities(
     add(
         "has_low_high_task_pair",
         declared.has_low_high_task_pair,
-        f"conditions={sorted(conditions)}; semantics_keys={sorted(semantics)}",
+        f"observed_conditions={sorted(o.condition_label.casefold() for o in obs)}; semantics_keys={sorted(semantics)}",
         effective.has_low_high_task_pair,
         ""
         if effective.has_low_high_task_pair or not declared.has_low_high_task_pair
@@ -272,15 +281,37 @@ def write_capability_resolution(
     target = Path(output_dir).expanduser().resolve()
     target.mkdir(parents=True, exist_ok=True)
     path = target / CAPABILITY_RESOLUTION_FILENAME
-    payload = [row.to_row() for row in rows]
-    fieldnames = list(payload[0].keys()) if payload else [
-        "capability",
-        "declared_value",
-        "observed_evidence",
-        "effective_value",
-        "reason_code",
-        "affected_stage",
+    payload = [
+        with_structured_nc_fields(
+            {
+                **row.to_row(),
+                "status": "computed" if not row.reason_code else "not_computable",
+                "reason": row.reason_code.replace("_", " ") if row.reason_code else "",
+                "required_evidence": f"declared:{row.capability}={row.declared_value}",
+                "observed_evidence": row.observed_evidence,
+                "specification_id": row.capability,
+                "dataset_id": "",
+                "participant_id": "",
+                "session_id": "",
+                "observation_id": "",
+            },
+            stage=str(row.affected_stage or "C0"),
+            specification_id=row.capability,
+        )
+        for row in rows
     ]
+    fieldnames = list(
+        dict.fromkeys(
+            [
+                *(list(payload[0].keys()) if payload else []),
+                *STRUCTURED_NC_FIELDS,
+                "capability",
+                "declared_value",
+                "effective_value",
+                "affected_stage",
+            ]
+        )
+    )
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()

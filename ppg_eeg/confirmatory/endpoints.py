@@ -23,6 +23,11 @@ from .duration_contracts import (
     EXPECTED_DURATIONS_S,
     contract_for_duration,
 )
+from .reason_codes import (
+    STRUCTURED_NC_FIELDS,
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+)
 
 FISHER_R_CLIP = 0.999999
 # Plan floor for standard/mid-window endpoints; D60 uses its full common-support length.
@@ -31,64 +36,76 @@ MIN_COMMON_SUPPORT_STANDARD = 60
 METRICS_TEMPLATE = "confirmatory_endpoint_metrics_D{duration_s}.csv"
 QC_TEMPLATE = "confirmatory_endpoint_qc_D{duration_s}.csv"
 
-METRICS_FIELDS = IDENTITY_FIELDS + (
-    "duration_s",
-    "duration_role",
-    "lag_analysis_role",
-    "endpoint_name",
-    "endpoint_alias",
-    "is_standard_zlpi",
-    "pool_with_standard_zlpi",
-    "band",
-    "power_representation",
-    "is_primary_representation",
-    "pair",
-    "eligible",
-    "exclusion_reason",
-    "r0",
-    "z0",
-    "endpoint_index",
-    "local_prominence",
-    "negative_flank_mean_z",
-    "positive_flank_mean_z",
-    "combined_flank_mean_z",
-    "negative_shoulder_mean_z",
-    "positive_shoulder_mean_z",
-    "flank_inner_s",
-    "flank_outer_s",
-    "shoulders_inner_s",
-    "shoulders_outer_s",
-    "n_common_support",
-    "n_negative_flank_lags",
-    "n_positive_flank_lags",
-    "n_combined_flank_lags",
-    "n_negative_shoulder_lags",
-    "n_positive_shoulder_lags",
+METRICS_FIELDS = tuple(
+    dict.fromkeys(
+        IDENTITY_FIELDS
+        + (
+            "duration_s",
+            "duration_role",
+            "lag_analysis_role",
+            "endpoint_name",
+            "endpoint_alias",
+            "is_standard_zlpi",
+            "pool_with_standard_zlpi",
+            "band",
+            "power_representation",
+            "is_primary_representation",
+            "pair",
+            "eligible",
+            "exclusion_reason",
+            "r0",
+            "z0",
+            "endpoint_index",
+            "local_prominence",
+            "negative_flank_mean_z",
+            "positive_flank_mean_z",
+            "combined_flank_mean_z",
+            "negative_shoulder_mean_z",
+            "positive_shoulder_mean_z",
+            "flank_inner_s",
+            "flank_outer_s",
+            "shoulders_inner_s",
+            "shoulders_outer_s",
+            "n_common_support",
+            "n_negative_flank_lags",
+            "n_positive_flank_lags",
+            "n_combined_flank_lags",
+            "n_negative_shoulder_lags",
+            "n_positive_shoulder_lags",
+        )
+        + STRUCTURED_NC_FIELDS
+    )
 )
 
-QC_FIELDS = IDENTITY_FIELDS + (
-    "duration_s",
-    "duration_role",
-    "lag_analysis_role",
-    "endpoint_name",
-    "endpoint_alias",
-    "is_standard_zlpi",
-    "pool_with_standard_zlpi",
-    "band",
-    "power_representation",
-    "is_primary_representation",
-    "pair",
-    "eligible",
-    "exclusion_reason",
-    "n_lags_observed",
-    "n_lags_expected",
-    "lag_grid_complete",
-    "required_windows_complete",
-    "overlap_is_constant",
-    "n_common_support",
-    "min_common_support_required",
-    "r0_finite",
-    "all_required_r_finite",
+QC_FIELDS = tuple(
+    dict.fromkeys(
+        IDENTITY_FIELDS
+        + (
+            "duration_s",
+            "duration_role",
+            "lag_analysis_role",
+            "endpoint_name",
+            "endpoint_alias",
+            "is_standard_zlpi",
+            "pool_with_standard_zlpi",
+            "band",
+            "power_representation",
+            "is_primary_representation",
+            "pair",
+            "eligible",
+            "exclusion_reason",
+            "n_lags_observed",
+            "n_lags_expected",
+            "lag_grid_complete",
+            "required_windows_complete",
+            "overlap_is_constant",
+            "n_common_support",
+            "min_common_support_required",
+            "r0_finite",
+            "all_required_r_finite",
+        )
+        + STRUCTURED_NC_FIELDS
+    )
 )
 
 
@@ -178,6 +195,40 @@ def _group_curve_rows(
     return [(meta[key], grouped[key]) for key in order]
 
 
+def _with_c3_reason(
+    row: Mapping[str, object],
+    *,
+    eligible: bool,
+    exclusion_reason: str,
+    n_common_support: int | None = None,
+    min_support: int | None = None,
+) -> dict[str, object]:
+    code = map_exclusion_to_reason_code(exclusion_reason)
+    required = ""
+    observed = ""
+    if not eligible:
+        if min_support is not None:
+            required = f"n_common_support>={min_support}; complete lag grid"
+        if n_common_support is not None:
+            observed = f"n_common_support={n_common_support}; exclusion={exclusion_reason}"
+    return attach_structured_reason(
+        {
+            **dict(row),
+            "exclusion_reason": exclusion_reason,
+            "reason_code": code,
+        },
+        stage="C3",
+        eligible=eligible,
+        reason_code=code,
+        reason=exclusion_reason.replace("_", " ") if exclusion_reason else "",
+        required_evidence=required,
+        observed_evidence=observed,
+        specification_id=str(
+            row.get("endpoint_name") or row.get("endpoint_alias") or "endpoint"
+        ),
+    )
+
+
 def _empty_rows(
     identity: Mapping[str, str],
     contract: DurationAnalysisContract,
@@ -249,7 +300,23 @@ def _empty_rows(
         "r0_finite": False,
         "all_required_r_finite": False,
     }
-    return metrics, qc
+    min_support = min_common_support_required(contract)
+    return (
+        _with_c3_reason(
+            metrics,
+            eligible=False,
+            exclusion_reason=exclusion_reason,
+            n_common_support=0,
+            min_support=min_support,
+        ),
+        _with_c3_reason(
+            qc,
+            eligible=False,
+            exclusion_reason=exclusion_reason,
+            n_common_support=0,
+            min_support=min_support,
+        ),
+    )
 
 
 def evaluate_endpoint_curve(
@@ -406,7 +473,22 @@ def evaluate_endpoint_curve(
         "r0_finite": r0_finite,
         "all_required_r_finite": all_required_r_finite,
     }
-    return metrics, qc
+    return (
+        _with_c3_reason(
+            metrics,
+            eligible=eligible,
+            exclusion_reason=exclusion_reason,
+            n_common_support=n_common_support,
+            min_support=min_support,
+        ),
+        _with_c3_reason(
+            qc,
+            eligible=eligible,
+            exclusion_reason=exclusion_reason,
+            n_common_support=n_common_support,
+            min_support=min_support,
+        ),
+    )
 
 
 def compute_endpoints_from_curves(

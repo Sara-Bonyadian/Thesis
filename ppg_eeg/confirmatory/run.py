@@ -52,7 +52,13 @@ from .multitaper_power import (
     FEATURES_FILENAME as MULTITAPER_FEATURES,
     ROBUST_MEDIAN_CHANNEL,
 )
-from .nulls import DEFAULT_N_SURROGATES, SMOKE_N_SURROGATES, run_confirmatory_nulls
+from .nulls import (
+    DEFAULT_N_SURROGATES,
+    SMOKE_N_SURROGATES,
+    StaleC4CacheError,
+    run_confirmatory_nulls,
+    validate_c4_cache_for_run,
+)
 from .peak_model import run_confirmatory_peak_fits
 from .production import discover_config_dir, master_config_path
 from .data_audit import run_confirmatory_data_audit
@@ -598,9 +604,34 @@ def run_c3(ctx: StageContext) -> dict[str, object]:
     return {"endpoint_durations": sorted(endpoints)}
 
 
+def _run_fingerprint(ctx: StageContext) -> dict[str, object]:
+    return {
+        "configuration_hash_sha256": _config_hash([ctx.master_path, ctx.dataset_path]),
+        "root_seed": int(ctx.master.root_seed),
+        "n_surrogates": int(ctx.n_surrogates),
+    }
+
+
+def _require_fresh_c4(ctx: StageContext, *, require_present: bool) -> dict[str, object]:
+    """Validate cached C4 artifacts against the current run production contract."""
+    try:
+        return validate_c4_cache_for_run(
+            ctx.stage_dir("C4"),
+            expected_n_surrogates=int(ctx.n_surrogates),
+            configuration_hash_sha256=str(
+                _run_fingerprint(ctx)["configuration_hash_sha256"]
+            ),
+            root_seed=int(ctx.master.root_seed),
+            require_present=require_present,
+        )
+    except StaleC4CacheError as exc:
+        raise StageError(str(exc)) from exc
+
+
 def run_c4(ctx: StageContext) -> dict[str, object]:
     aligned = ctx.stage_dir("C1c")
     out = ctx.stage_dir("C4")
+    fingerprint = _run_fingerprint(ctx)
     run_confirmatory_nulls(
         aligned,
         out,
@@ -608,11 +639,16 @@ def run_c4(ctx: StageContext) -> dict[str, object]:
         durations=(240,),
         n_jobs=ctx.n_jobs,
         progress=True,
+        configuration_hash_sha256=str(fingerprint["configuration_hash_sha256"]),
+        root_seed=int(fingerprint["root_seed"]),
     )
     return {"n_surrogates": ctx.n_surrogates, "n_jobs": ctx.n_jobs}
 
 
 def run_c5(ctx: StageContext) -> dict[str, object]:
+    # Group tables do not read C4 directly, but reject stale smoke nulls when
+    # present so production trees cannot silently carry 20-surrogate caches.
+    _require_fresh_c4(ctx, require_present=False)
     endpoints = ctx.stage_dir("C3")
     out = ctx.stage_dir("C5")
     run_confirmatory_group_tables(
@@ -620,11 +656,13 @@ def run_c5(ctx: StageContext) -> dict[str, object]:
         out,
         peaks_dir=endpoints,
         dataset_ids=(ctx.dataset.dataset_id,),
+        dataset_roles={ctx.dataset.dataset_id: ctx.dataset.role},
     )
     return {"group_tables": str(out)}
 
 
 def run_c6(ctx: StageContext) -> dict[str, object]:
+    _require_fresh_c4(ctx, require_present=False)
     group = ctx.stage_dir("C5")
     out = ctx.stage_dir("C6")
     run_confirmatory_inference_from_dir(group, out)
@@ -644,6 +682,8 @@ def run_c6(ctx: StageContext) -> dict[str, object]:
 
 
 def run_c7(ctx: StageContext) -> dict[str, object]:
+    # Figures / publish consume C4 null exports; require a matching cache.
+    _require_fresh_c4(ctx, require_present=True)
     publish = ctx.stage_dir("C7") / "publish"
     publish.mkdir(parents=True, exist_ok=True)
     for stage in ("C0", "C1b", "C2", "C3", "C4", "C5", "C6"):

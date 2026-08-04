@@ -69,6 +69,13 @@ from .correlation import (
 from .duration_contracts import EXPECTED_DURATIONS_S, contract_for_duration
 from .endpoints import evaluate_endpoint_curve
 from .protocol_audit import condition_semantics_for
+from .reason_codes import (
+    CONFIGURATION_VALIDATION_FAILED,
+    STRUCTURED_NC_FIELDS,
+    UNDEFINED_NULL_VARIANCE,
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+)
 
 NULL_SUBJECT_RESULTS_FILENAME = "null_subject_results.csv"
 NULL_SUMMARY_FILENAME = "null_summary.csv"
@@ -106,34 +113,61 @@ CHECKPOINT_DIRNAME = "_unit_checkpoints"
 RUN_MANIFEST_FILENAME = "run_manifest.json"
 COMPLETE_MARKER_FILENAME = "C4_COMPLETE.json"
 
-SUBJECT_RESULT_FIELDS = (
-    "dataset_id",
-    "subject_id",
-    "task",
-    "condition",
-    "observation_id",
-    "modality",
-    "duration_s",
-    "duration_role",
-    "endpoint_name",
-    "endpoint_alias",
-    "is_standard_zlpi",
-    "band",
-    "power_representation",
-    "is_primary_representation",
-    "pair",
-    "null_type",
-    "n_surrogates_requested",
-    "n_surrogates_finite",
-    "observed_endpoint_index",
-    "observed_eligible",
-    "null_mean",
-    "null_std",
-    "null_median",
-    "empirical_p",
-    "effect_size_surrogate_z",
-    "rng_seed_u64",
-    "analysis_key",
+QC_FIELDS = tuple(
+    dict.fromkeys(
+        (
+            "dataset_id",
+            "subject_id",
+            "condition",
+            "observation_id",
+            "modality",
+            "duration_s",
+            "endpoint_name",
+            "band",
+            "power_representation",
+            "null_type",
+            "null_status",
+            "n_surrogates_requested",
+            "n_surrogates_finite",
+            "notes",
+            *STRUCTURED_NC_FIELDS,
+        )
+    )
+)
+
+SUBJECT_RESULT_FIELDS = tuple(
+    dict.fromkeys(
+        (
+            "dataset_id",
+            "subject_id",
+            "task",
+            "condition",
+            "observation_id",
+            "modality",
+            "duration_s",
+            "duration_role",
+            "endpoint_name",
+            "endpoint_alias",
+            "is_standard_zlpi",
+            "band",
+            "power_representation",
+            "is_primary_representation",
+            "pair",
+            "null_type",
+            "n_surrogates_requested",
+            "n_surrogates_finite",
+            "observed_endpoint_index",
+            "observed_eligible",
+            "null_mean",
+            "null_std",
+            "null_median",
+            "empirical_p",
+            "effect_size_surrogate_z",
+            "rng_seed_u64",
+            "analysis_key",
+            *STRUCTURED_NC_FIELDS,
+        )
+    )
 )
 
 SUMMARY_FIELDS = (
@@ -153,23 +187,6 @@ SUMMARY_FIELDS = (
     "mean_effect_size_surrogate_z",
     "median_effect_size_surrogate_z",
     "median_observed_endpoint_index",
-)
-
-QC_FIELDS = (
-    "dataset_id",
-    "subject_id",
-    "condition",
-    "observation_id",
-    "modality",
-    "duration_s",
-    "endpoint_name",
-    "band",
-    "power_representation",
-    "null_type",
-    "status",
-    "n_surrogates_requested",
-    "n_surrogates_finite",
-    "notes",
 )
 
 SURROGATE_VALUE_FIELDS = (
@@ -760,48 +777,95 @@ def _null_statistics_for_unit(
 
     p_value = empirical_p_value(observed_stat, null_vals, alternative="greater")
     effect = surrogate_effect_size(observed_stat, null_vals)
+    null_std = _std(null_vals)
+    reason_status = status
+    reason_code = ""
+    reason_text = notes
+    if status == "ok" and n_finite > 0 and (not math.isfinite(null_std) or null_std <= 0):
+        reason_status = UNDEFINED_NULL_VARIANCE
+        reason_code = UNDEFINED_NULL_VARIANCE
+        reason_text = "Null surrogate variance is undefined or zero; standardized effect not computable."
+    elif status != "ok":
+        reason_code = map_exclusion_to_reason_code(status)
 
-    subject_row = {
-        **identity,
-        "modality": unit.modality,
-        "duration_s": int(unit.duration_s),
-        "duration_role": unit.duration_role,
-        "endpoint_name": contract.endpoint_name,
-        "endpoint_alias": contract.endpoint_alias,
-        "is_standard_zlpi": bool(contract.is_standard_zlpi),
-        "band": unit.band,
-        "power_representation": unit.power_representation,
-        "is_primary_representation": bool(unit.is_primary_representation),
-        "pair": unit.pair,
-        "null_type": null_type,
-        "n_surrogates_requested": int(n_surrogates),
-        "n_surrogates_finite": int(n_finite),
-        "observed_endpoint_index": observed_stat,
-        "observed_eligible": observed_eligible,
-        "null_mean": _mean(null_vals),
-        "null_std": _std(null_vals),
-        "null_median": _median(null_vals),
-        "empirical_p": p_value,
-        "effect_size_surrogate_z": effect,
-        "rng_seed_u64": int(seed),
-        "analysis_key": key,
-    }
-    qc_row = {
-        "dataset_id": unit.dataset_id,
-        "subject_id": unit.subject_id,
-        "condition": unit.condition,
-        "observation_id": unit.observation_id,
-        "modality": unit.modality,
-        "duration_s": int(unit.duration_s),
-        "endpoint_name": contract.endpoint_name,
-        "band": unit.band,
-        "power_representation": unit.power_representation,
-        "null_type": null_type,
-        "status": status,
-        "n_surrogates_requested": int(n_surrogates),
-        "n_surrogates_finite": int(n_finite),
-        "notes": notes,
-    }
+    subject_row = attach_structured_reason(
+        {
+            **identity,
+            "modality": unit.modality,
+            "duration_s": int(unit.duration_s),
+            "duration_role": unit.duration_role,
+            "endpoint_name": contract.endpoint_name,
+            "endpoint_alias": contract.endpoint_alias,
+            "is_standard_zlpi": bool(contract.is_standard_zlpi),
+            "band": unit.band,
+            "power_representation": unit.power_representation,
+            "is_primary_representation": bool(unit.is_primary_representation),
+            "pair": unit.pair,
+            "null_type": null_type,
+            "n_surrogates_requested": int(n_surrogates),
+            "n_surrogates_finite": int(n_finite),
+            "observed_endpoint_index": observed_stat,
+            "observed_eligible": observed_eligible,
+            "null_mean": _mean(null_vals),
+            "null_std": null_std,
+            "null_median": _median(null_vals),
+            "empirical_p": p_value,
+            "effect_size_surrogate_z": effect,
+            "rng_seed_u64": int(seed),
+            "analysis_key": key,
+            "notes": reason_text,
+        },
+        stage="C4",
+        status="computed" if reason_status == "ok" else "not_computable",
+        reason_code=reason_code,
+        reason=reason_text,
+        required_evidence=(
+            f"n_surrogates={n_surrogates}; finite null variance"
+            if reason_status != "ok"
+            else ""
+        ),
+        observed_evidence=(
+            f"status={status}; n_surrogates_finite={n_finite}; null_std={null_std}"
+            if reason_status != "ok"
+            else ""
+        ),
+        specification_id=f"{null_type}:{contract.endpoint_name}",
+    )
+    qc_row = attach_structured_reason(
+        {
+            "dataset_id": unit.dataset_id,
+            "subject_id": unit.subject_id,
+            "condition": unit.condition,
+            "observation_id": unit.observation_id,
+            "modality": unit.modality,
+            "duration_s": int(unit.duration_s),
+            "endpoint_name": contract.endpoint_name,
+            "band": unit.band,
+            "power_representation": unit.power_representation,
+            "null_type": null_type,
+            "null_status": status if reason_status == "ok" else reason_status,
+            "n_surrogates_requested": int(n_surrogates),
+            "n_surrogates_finite": int(n_finite),
+            "notes": reason_text,
+        },
+        stage="C4",
+        status="computed" if reason_status == "ok" else "not_computable",
+        reason_code=reason_code,
+        reason=reason_text,
+        required_evidence=(
+            f"n_surrogates={n_surrogates}; finite null variance"
+            if reason_status != "ok"
+            else ""
+        ),
+        observed_evidence=(
+            f"status={status}; n_surrogates_finite={n_finite}; null_std={null_std}"
+            if reason_status != "ok"
+            else ""
+        ),
+        specification_id=f"{null_type}:{contract.endpoint_name}",
+    )
+    # Preserve legacy null-QC status vocabulary for downstream filters.
+    qc_row["status"] = status if reason_status == "ok" else reason_status
     return subject_row, qc_row, list(null_vals)
 
 
@@ -1661,6 +1725,8 @@ def _validate_complete_marker(
     n_surrogates: int,
     n_units: int,
     null_types: Sequence[str],
+    configuration_hash_sha256: str | None = None,
+    root_seed: int | None = None,
 ) -> bool:
     marker = output_path / COMPLETE_MARKER_FILENAME
     if not marker.is_file():
@@ -1678,7 +1744,132 @@ def _validate_complete_marker(
     stored_types = [_as_str(v) for v in list(payload.get("null_types") or [])]
     if stored_types != [str(v) for v in null_types]:
         return False
+    if configuration_hash_sha256 is not None:
+        stored_hash = _as_str(payload.get("configuration_hash_sha256"))
+        if stored_hash and stored_hash != str(configuration_hash_sha256):
+            return False
+    if root_seed is not None and "root_seed" in payload:
+        if int(payload.get("root_seed", -1)) != int(root_seed):
+            return False
     return True
+
+
+class StaleC4CacheError(RuntimeError):
+    """Raised when cached C4 artifacts do not match the current run contract."""
+
+
+def read_c4_cache_fingerprint(c4_dir: str | Path) -> dict[str, object]:
+    """Read C4 complete-marker / subject-table fingerprint for cache validation."""
+    output_path = Path(c4_dir).expanduser().resolve()
+    marker = output_path / COMPLETE_MARKER_FILENAME
+    fingerprint: dict[str, object] = {
+        "c4_dir": str(output_path),
+        "marker_present": marker.is_file(),
+        "n_surrogates": None,
+        "configuration_hash_sha256": "",
+        "root_seed": None,
+        "null_types": (),
+        "n_units": None,
+    }
+    if marker.is_file():
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict):
+            fingerprint["n_surrogates"] = (
+                int(payload["n_surrogates"])
+                if payload.get("n_surrogates") is not None
+                else None
+            )
+            fingerprint["configuration_hash_sha256"] = _as_str(
+                payload.get("configuration_hash_sha256")
+            )
+            if payload.get("root_seed") is not None:
+                fingerprint["root_seed"] = int(payload.get("root_seed"))
+            fingerprint["null_types"] = tuple(
+                _as_str(v) for v in list(payload.get("null_types") or [])
+            )
+            if payload.get("n_units") is not None:
+                fingerprint["n_units"] = int(payload.get("n_units"))
+    if fingerprint["n_surrogates"] is None:
+        subject_path = output_path / NULL_SUBJECT_RESULTS_FILENAME
+        if subject_path.is_file():
+            with subject_path.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            values = {
+                int(_as_float(r.get("n_surrogates_requested")))
+                for r in rows
+                if math.isfinite(_as_float(r.get("n_surrogates_requested")))
+            }
+            if values:
+                fingerprint["n_surrogates"] = int(min(values))
+    return fingerprint
+
+
+def validate_c4_cache_for_run(
+    c4_dir: str | Path,
+    *,
+    expected_n_surrogates: int,
+    configuration_hash_sha256: str | None = None,
+    root_seed: int | None = None,
+    require_present: bool = False,
+) -> dict[str, object]:
+    """Reject stale C4 caches when surrogate count / config fingerprint diverge.
+
+    Typical failure: smoke ``n_surrogates=20`` artifacts left under a production
+    tree that now requests ``n_surrogates=500``. Downstream C5/C6/C7 stages that
+    consume C4 must call this helper before reading null exports.
+    """
+    output_path = Path(c4_dir).expanduser().resolve()
+    fingerprint = read_c4_cache_fingerprint(output_path)
+    marker = output_path / COMPLETE_MARKER_FILENAME
+    subject_path = output_path / NULL_SUBJECT_RESULTS_FILENAME
+    present = marker.is_file() or subject_path.is_file()
+    if not present:
+        if require_present:
+            raise StaleC4CacheError(
+                f"C4 artifacts required under {output_path} but none were found "
+                f"(expected n_surrogates={expected_n_surrogates})."
+            )
+        return {**fingerprint, "validated": False, "present": False}
+
+    observed = fingerprint.get("n_surrogates")
+    if observed is None:
+        raise StaleC4CacheError(
+            f"C4 cache under {output_path} is missing n_surrogates fingerprint; "
+            f"refusing to consume potentially stale nulls "
+            f"(expected n_surrogates={expected_n_surrogates})."
+        )
+    if int(observed) != int(expected_n_surrogates):
+        raise StaleC4CacheError(
+            f"Stale C4 cache under {output_path}: "
+            f"n_surrogates={observed} but run expects {expected_n_surrogates}. "
+            f"Re-run C4 (reason_code={CONFIGURATION_VALIDATION_FAILED})."
+        )
+    stored_hash = _as_str(fingerprint.get("configuration_hash_sha256"))
+    if (
+        configuration_hash_sha256
+        and stored_hash
+        and stored_hash != str(configuration_hash_sha256)
+    ):
+        raise StaleC4CacheError(
+            f"Stale C4 cache under {output_path}: configuration_hash mismatch "
+            f"(cached={stored_hash}, expected={configuration_hash_sha256}). "
+            f"Re-run C4 (reason_code={CONFIGURATION_VALIDATION_FAILED})."
+        )
+    stored_seed = fingerprint.get("root_seed")
+    if (
+        root_seed is not None
+        and stored_seed is not None
+        and int(stored_seed) != int(root_seed)
+    ):
+        raise StaleC4CacheError(
+            f"Stale C4 cache under {output_path}: root_seed mismatch "
+            f"(cached={stored_seed}, expected={root_seed}). "
+            f"Re-run C4 (reason_code={CONFIGURATION_VALIDATION_FAILED})."
+        )
+    return {**fingerprint, "validated": True, "present": True}
 
 
 def _delete_final_outputs(output_path: Path) -> None:
@@ -1705,6 +1896,8 @@ def write_null_outputs(
     n_units: int | None = None,
     null_types: Sequence[str] = NULL_TYPES,
     wall_time_s: float | None = None,
+    configuration_hash_sha256: str | None = None,
+    root_seed: int | None = None,
 ) -> dict[str, Path]:
     """Write null CSVs atomically, then the ``C4_COMPLETE.json`` marker."""
     output_path = Path(output_dir).expanduser().resolve()
@@ -1753,6 +1946,8 @@ def write_null_outputs(
         "n_subject_rows": len(result.subject_rows),
         "n_qc_rows": len(result.qc_rows),
         "wall_time_s": None if wall_time_s is None else float(wall_time_s),
+        "configuration_hash_sha256": str(configuration_hash_sha256 or ""),
+        "root_seed": None if root_seed is None else int(root_seed),
     }
     _atomic_write_json(output_path / COMPLETE_MARKER_FILENAME, marker_payload)
     return {
@@ -1901,6 +2096,8 @@ def run_confirmatory_nulls(
     n_jobs: int | None = -1,
     progress: bool = True,
     cache_observed: bool = True,
+    configuration_hash_sha256: str | None = None,
+    root_seed: int | None = None,
 ) -> NullBatteryResult:
     """Load aligned M4 tables, run nulls, and write result CSVs."""
     root = Path(aligned_dir).expanduser().resolve()
@@ -1919,6 +2116,8 @@ def run_confirmatory_nulls(
         n_surrogates=n_surrogates,
         n_units=len(units),
         null_types=null_type_tuple,
+        configuration_hash_sha256=configuration_hash_sha256,
+        root_seed=root_seed,
     ):
         existing = _read_null_result_csvs(output_path)
         if (
@@ -1950,6 +2149,8 @@ def run_confirmatory_nulls(
         n_surrogates=n_surrogates,
         n_units=len(units),
         null_types=null_type_tuple,
+        configuration_hash_sha256=configuration_hash_sha256,
+        root_seed=root_seed,
     ):
         _delete_final_outputs(output_path)
 
@@ -1972,6 +2173,8 @@ def run_confirmatory_nulls(
         n_units=len(units),
         null_types=null_type_tuple,
         wall_time_s=wall,
+        configuration_hash_sha256=configuration_hash_sha256,
+        root_seed=root_seed,
     )
     return result
 
@@ -1992,6 +2195,9 @@ __all__ = [
     "SMOKE_N_SURROGATES",
     "SURROGATE_VALUE_FIELDS",
     "SUBJECT_RESULT_FIELDS",
+    "StaleC4CacheError",
+    "read_c4_cache_fingerprint",
+    "validate_c4_cache_for_run",
     "NullBatteryResult",
     "SeriesUnit",
     "amplitude_spectrum",

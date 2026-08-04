@@ -21,6 +21,8 @@ from ppg_eeg.confirmatory.inference import (
     LEAVE_ONE_DATASET_OUT_FILENAME,
     META_ANALYSIS_RESULTS_FILENAME,
     META_EXCLUDED_DATASETS,
+    MIXED_MODEL_CONTRASTS_FILENAME,
+    MIXED_MODEL_MARGINAL_ESTIMATES_FILENAME,
     MIXED_MODEL_RESULTS_FILENAME,
     MULTIPLICITY_RESULTS_FILENAME,
     PEAK_CENTER_EQUIVALENCE_FILENAME,
@@ -749,6 +751,8 @@ class TestWriteOutputs(unittest.TestCase):
             paths = write_inference_outputs(result, tmp)
             expected = {
                 MIXED_MODEL_RESULTS_FILENAME,
+                MIXED_MODEL_MARGINAL_ESTIMATES_FILENAME,
+                MIXED_MODEL_CONTRASTS_FILENAME,
                 DATASET_EFFECTS_FILENAME,
                 META_ANALYSIS_RESULTS_FILENAME,
                 LEAVE_ONE_DATASET_OUT_FILENAME,

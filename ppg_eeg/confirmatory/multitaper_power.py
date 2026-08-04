@@ -20,6 +20,15 @@ from ..core_eeg_ppg.eeg import preprocess_eeg
 from ..core_eeg_ppg.features_core import _read_raw
 from ..core_eeg_ppg.output_layout import safe_subject_dir_name
 from ..datasets import CanonicalObservation
+from .reason_codes import (
+    INSUFFICIENT_DURATION,
+    INPUT_DISCOVERY_FAILED,
+    MISSING_REQUIRED_BAND,
+    MISSING_REQUIRED_MODALITY,
+    STRUCTURED_NC_FIELDS,
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+)
 from .parallel_util import (
     atomic_write_csv_rows,
     atomic_write_json,
@@ -616,9 +625,62 @@ def write_multitaper_outputs(
         feature_fields,
     )
     qc_path = output_path / QC_FILENAME
-    qc_row = result.qc.to_row()
-    atomic_write_csv_rows(qc_path, [qc_row], list(qc_row))
+    qc_row = _enrich_c1a_qc_row(result.qc.to_row())
+    atomic_write_csv_rows(
+        qc_path,
+        [qc_row],
+        list(dict.fromkeys([*qc_row.keys(), *STRUCTURED_NC_FIELDS])),
+    )
     return features_path, qc_path
+
+
+def _enrich_c1a_qc_row(row: Mapping[str, object]) -> dict[str, object]:
+    """Attach StructuredReason fields at the C1a QC decision site."""
+    status = str(row.get("status") or "").strip().casefold()
+    warning = str(row.get("warning") or "").strip()
+    eligible = status == "ok" and bool(row.get("spectral_qc_passed", True))
+    if status in {"", "ok"} and eligible:
+        exclusion = ""
+    elif status in {"no_usable_channels", "short_recording", "spectral_qc_failed"}:
+        exclusion = status
+    elif warning:
+        exclusion = warning.split(";")[0].strip() or status or INPUT_DISCOVERY_FAILED
+    else:
+        exclusion = status or INPUT_DISCOVERY_FAILED
+    code = map_exclusion_to_reason_code(exclusion)
+    if not code:
+        if "channel" in exclusion:
+            code = MISSING_REQUIRED_MODALITY
+        elif "short" in exclusion or "duration" in exclusion:
+            code = INSUFFICIENT_DURATION
+        elif "band" in exclusion or "nyquist" in exclusion:
+            code = MISSING_REQUIRED_BAND
+        elif exclusion:
+            code = INPUT_DISCOVERY_FAILED
+    return attach_structured_reason(
+        {
+            **dict(row),
+            "participant_id": str(row.get("subject_id") or row.get("participant_id") or ""),
+            "session_id": str(row.get("session_id") or ""),
+            "exclusion_reason": exclusion,
+            "reason_code": code,
+        },
+        stage="C1a",
+        eligible=eligible,
+        reason_code=code,
+        reason=exclusion.replace("_", " ") if exclusion else "",
+        required_evidence=(
+            "usable EEG channels with spectral QC pass and supported bands"
+            if not eligible
+            else ""
+        ),
+        observed_evidence=(
+            f"status={status}; usable_channels={row.get('n_usable_channels')}; "
+            f"spectral_qc_passed={row.get('spectral_qc_passed')}; warning={warning}"
+            if not eligible
+            else ""
+        ),
+    )
 
 
 def extract_multitaper_file(

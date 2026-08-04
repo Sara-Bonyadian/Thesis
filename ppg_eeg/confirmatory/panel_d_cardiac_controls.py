@@ -16,6 +16,13 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from .duration_contracts import ENDPOINT_ZLPI, EXPECTED_PRIMARY_DURATION_S, ZLPI_FLANKS_S
+from .reason_codes import (
+    ARTIFACT_CONTROL_NOT_AVAILABLE,
+    STRUCTURED_NC_FIELDS,
+    UNSUPPORTED_CONTROL_FOR_MODALITY,
+    attach_structured_reason,
+    with_structured_nc_fields,
+)
 from .paired_delta_inference import cluster_bootstrap_mean_ci
 
 CONTROL_BASELINE = "baseline"
@@ -507,6 +514,14 @@ def _control_reason(control: str, signal_type: str) -> str:
     return "not_computable_from_retained_tables"
 
 
+def _control_reason_code(control: str, signal_type: str) -> str:
+    if control in {CONTROL_ICA_TEMPLATE, CONTROL_RPEAK_MASK} and signal_type == "PPG":
+        return UNSUPPORTED_CONTROL_FOR_MODALITY
+    if control in {CONTROL_ICA_TEMPLATE, CONTROL_RPEAK_MASK, CONTROL_ECG_CHANNELS}:
+        return ARTIFACT_CONTROL_NOT_AVAILABLE
+    return ARTIFACT_CONTROL_NOT_AVAILABLE
+
+
 def _emit_not_computable(
     baseline_obs: Sequence[Mapping[str, object]],
     *,
@@ -523,7 +538,19 @@ def _emit_not_computable(
         item["exclusion_reason"] = _control_reason(control, signal_type)
         item["not_computable_reason"] = item["exclusion_reason"]
         item["analysis_role"] = "cardiac_control"
-        rows.append(item)
+        item["reason_code"] = _control_reason_code(control, signal_type)
+        rows.append(
+            attach_structured_reason(
+                item,
+                stage="C6",
+                status="not_computable",
+                reason_code=str(item["reason_code"]),
+                reason=str(item["exclusion_reason"]),
+                required_evidence="high-rate time-locked EEG/cardio traces for cardiac control",
+                observed_evidence=f"signal_type={signal_type}; retained_tables=1Hz_envelope",
+                specification_id=control,
+            )
+        )
     return rows
 
 
@@ -1107,12 +1134,18 @@ def write_panel_d_cardiac_control_exports(
     def _write_csv(path: Path, rows: Sequence[Mapping[str, object]], fields: Sequence[str]) -> None:
         import csv
 
+        export_fields = list(dict.fromkeys([*fields, *STRUCTURED_NC_FIELDS]))
         with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(fields))
+            writer = csv.DictWriter(handle, fieldnames=export_fields)
             writer.writeheader()
             for row in rows:
+                row = with_structured_nc_fields(
+                    row,
+                    stage="C7",
+                    specification_id=str(row.get("control") or path.stem),
+                )
                 payload: dict[str, object] = {}
-                for field in fields:
+                for field in export_fields:
                     value = row.get(field, "")
                     if isinstance(value, float) and not math.isfinite(value):
                         payload[field] = ""

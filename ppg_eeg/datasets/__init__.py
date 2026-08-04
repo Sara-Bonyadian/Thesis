@@ -4,7 +4,13 @@ import inspect
 from pathlib import Path
 from typing import Sequence
 
-from .base import CanonicalObservation, DatasetAdapter
+from .base import (
+    CanonicalObservation,
+    CanonicalObservationIdentity,
+    DatasetAdapter,
+    canonical_observation_identity,
+    validate_observation_identities,
+)
 from .ds003690 import DS003690Adapter
 from .ds003816 import DS003816Adapter
 from .ds003838 import DS003838Adapter
@@ -77,7 +83,15 @@ def _apply_subject_condition_assignments(
 
     filtered: list[CanonicalObservation] = []
     for observation in observations:
-        assigned_condition = assignments.get(observation.subject_id.casefold())
+        subject_key = observation.subject_id.casefold()
+        participant_key = str(observation.participant_id or "").strip().casefold()
+        # Allow assignments keyed by biological participant (``01``) or
+        # session-qualified subject (``01_ph``).
+        assigned_condition = assignments.get(subject_key)
+        if assigned_condition is None and participant_key:
+            assigned_condition = assignments.get(participant_key)
+        if assigned_condition is None and "_" in subject_key:
+            assigned_condition = assignments.get(subject_key.rsplit("_", 1)[0])
         if assigned_condition is None or observation.condition_label.casefold() == assigned_condition:
             filtered.append(observation)
     return filtered
@@ -107,13 +121,18 @@ def build_observations(
         build_kwargs["hiit_partition_mode"] = hiit_partition_mode
     observations = adapter.build_observations(raw_root, **build_kwargs)
     observations = _apply_subject_task_assignments(observations, subject_tasks)
-    return _apply_subject_condition_assignments(observations, subject_conditions)
+    observations = _apply_subject_condition_assignments(observations, subject_conditions)
+    validate_observation_identities(observations)
+    return observations
 
 
 __all__ = [
     "ADAPTER_REGISTRY",
     "CanonicalObservation",
+    "CanonicalObservationIdentity",
     "DatasetAdapter",
     "build_observations",
+    "canonical_observation_identity",
     "get_adapter",
+    "validate_observation_identities",
 ]

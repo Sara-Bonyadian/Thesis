@@ -100,6 +100,7 @@ from .panel_f_topography_gamma import (
     render_panel_f_figure,
 )
 from .protocol_audit import condition_semantics_for
+from .reason_codes import STRUCTURED_NC_FIELDS, with_structured_nc_fields
 
 FIGURE_DPI = 300
 
@@ -244,12 +245,13 @@ FIGURE1_PANEL_D_SURROGATE_RULE_NOTE = (
 )
 FIGURE1_PANEL_D_NOTE = (
     FIGURE1_PANEL_D_SURROGATE_RULE_NOTE
-    + " HIIT is shown as one descriptive sensitivity estimate. PH and PS are "
-    "session subjects (Panel B-aligned; counted separately, n≈40). Within each "
-    "session, available PRE/POST low-demand ZLPI are averaged before the group "
-    "mean. The HIIT row is a sensitivity summary, not an independent primary "
-    "dataset. Surrogate marks use the median of all HIIT low-demand "
-    "condition-level median_empirical_p values for that band."
+    + " Sensitivity datasets may contribute one descriptive estimate. Protocol "
+    "session conditions are analysis units (Panel B-aligned; counted separately). "
+    "Within each session condition, available pre-/post-intervention low-demand "
+    "ZLPI are averaged before the group mean. Sensitivity rows are summaries, "
+    "not independent primary datasets. Surrogate marks use the median of all "
+    "low-demand condition-level median_empirical_p values for that band within "
+    "the sensitivity cohort."
 )
 FIGURE1_PANEL_D_ASTERISK_LABEL = (
     f"* = circular-shift surrogate p < {FIGURE1_PANEL_D_SURROGATE_ALPHA:g} only"
@@ -257,17 +259,18 @@ FIGURE1_PANEL_D_ASTERISK_LABEL = (
 FIGURE1_PANEL_E_NOTE = (
     "Alpha-focused replication display of the equal four-band primary meta "
     "(one prespecified contrast per dataset); not an alpha-only confirmatory hierarchy. "
-    "HIIT is shown as one descriptive sensitivity estimate. PH and PS are session "
-    "subjects (Panel B-aligned; counted separately). Within each session, available "
-    "Rest–Tetris ΔZLPI contrasts are averaged before group summarization. "
-    "The HIIT row is excluded from the pooled random-effects meta-analysis."
+    "Sensitivity datasets may contribute one descriptive estimate. Protocol session "
+    "conditions are analysis units (Panel B-aligned; counted separately). Within each "
+    "session condition, available low-demand–high-demand ΔZLPI contrasts are averaged "
+    "before group summarization. Sensitivity rows are excluded from the pooled "
+    "random-effects meta-analysis."
 )
 FIGURE1_PANEL_F_NOTE = (
     "Near-zero central peak: linear baseline from distant flanks (20≤|τ|≤60 s), "
     "nonnegative Gaussian on baseline-adjusted |τ|≤20 s; identifiable peaks only "
-    "(A ≥ 1.8×RMSE, SE(A), weak-edge). Group μ/FWHM: mean of per-session-subject "
-    "means (Panel B-aligned; HIIT PH/PS counted as separate units) with "
-    "hierarchical CI; μ TOST / ±2 s on that mean. FWHM on log scale "
+    "(A ≥ 1.8×RMSE, SE(A), weak-edge). Group μ/FWHM: mean of per-session-condition "
+    "means (Panel B-aligned; protocol session conditions counted as separate units) "
+    "with hierarchical CI; μ TOST / ±2 s on that mean. FWHM on log scale "
     "(back-transformed CI)."
 )
 
@@ -277,10 +280,10 @@ FIGURE2_TITLE = (
 )
 FIGURE3_TITLE = "Temporal specificity and core robustness"
 FIGURE2_PANEL_C_NOTE = (
-    "Alpha PRIMARY_META absolute paired ΔZLPI (task − low-demand); "
-    "no percent attenuation. HIIT is shown as one descriptive sensitivity estimate "
-    "(PH/PS session subjects counted separately, Panel B-aligned) and is excluded "
-    "from the pooled random-effects meta-analysis."
+    "Alpha PRIMARY_META absolute paired ΔZLPI (high-demand − low-demand); "
+    "no percent attenuation. Sensitivity datasets may contribute one descriptive "
+    "estimate (protocol session conditions counted separately, Panel B-aligned) "
+    "and are excluded from the pooled random-effects meta-analysis."
 )
 FIGURE2_PANEL_D_OUTCOME_LABEL = "Model-estimated Fisher-z ZLPI"
 FIGURE2_PANEL_D_NOTE = (
@@ -292,12 +295,13 @@ FIGURE2_PANEL_D_NOTE = (
     "(negative contrast ⇒ stronger alpha attenuation under high demand)."
 )
 FIGURE2_PANEL_E_NOTE = (
-    "State-specific Gaussian peak centers (μ) and widths (FWHM) for Rest and Task "
-    "by dataset and frequency band. Estimates and participant-clustered 95% CIs "
-    "are conditional on an identifiable peak in the corresponding state; Rest and "
-    "Task may have different sample sizes. Sample-size labels (R / T) report "
-    "identifiable observations / unique biological participants. Descriptive "
-    "only — not a formal paired Rest–Task test."
+    "State-specific Gaussian peak centers (μ) and widths (FWHM) for low-demand "
+    "and high-demand states by dataset and frequency band. Estimates and "
+    "participant-clustered 95% CIs are conditional on an identifiable peak in the "
+    "corresponding state; low- and high-demand states may have different sample "
+    "sizes. Sample-size labels (L / H) report identifiable observations / unique "
+    "biological participants. Descriptive only — not a formal paired "
+    "low-demand–high-demand test."
 )
 FIGURE2_PANEL_F_NOTE = (
     "Prespecified graded ds003690 contrasts (passive__simplert, "
@@ -312,36 +316,40 @@ PANEL_STATUS_EXPECTED_NOT_APPLICABLE = "expected_not_applicable"
 PANEL_STATUS_SENSITIVITY_DISPLAY = "sensitivity_display"
 FIGURE2_EXPECTED_NOT_APPLICABLE_NOTE = (
     "Expected not applicable: PRIMARY_META panels require primary-cohort "
-    "meta inputs and are empty by design for sensitivity-only runs "
-    "(e.g. HIIT alone)."
+    "meta inputs and are empty by design for sensitivity-only runs."
 )
-FIGURE2_PANEL_A_HIIT_SENSITIVITY_NOTE = (
-    "HIIT Sensitivity (display-only): matched Rest–Tetris Fisher-z lag curves "
-    "from C5 pairs (PRE and POST each contribute; no PRE/POST or PH/PS "
-    "averaging before the group mean). Point estimate = mean across matched "
-    "pairs; 95% CI = PH/PS session-subject cluster bootstrap (pairs within a "
-    "drawn session are retained together). Excluded from PRIMARY_META; not a "
-    "primary confirmatory claim. Report n_matched_pairs and n_session_clusters "
-    "(not participant n)."
+FIGURE2_PANEL_A_SENSITIVITY_NOTE = (
+    "Sensitivity display (display-only): matched low-demand–high-demand Fisher-z "
+    "lag curves from C5 pairs (pre- and post-intervention each contribute; no "
+    "pre/post or protocol-session averaging before the group mean). Point "
+    "estimate = mean across matched pairs; 95% CI = session-condition cluster "
+    "bootstrap (pairs within a drawn session condition are retained together). "
+    "Excluded from PRIMARY_META; not a primary confirmatory claim. Report "
+    "n_matched_pairs and n_session_clusters (not participant n)."
 )
-FIGURE2_PANEL_B_HIIT_SENSITIVITY_NOTE = (
-    "HIIT Sensitivity (display-only): matched Rest–Tetris Δ Fisher-z lag curves "
-    "Δz(τ)=z_effort(τ)−z_low(τ) from the same C5 pairs as Panel A (PRE and POST "
-    "each contribute; no PRE/POST or PH/PS averaging before the group mean). "
-    "Point estimate = mean across matched pairs; 95% CI = PH/PS session-subject "
-    "cluster bootstrap. Excluded from PRIMARY_META; display only — no "
-    "cluster-permutation testing. Report n_matched_pairs and n_session_clusters "
-    "(not participant n)."
+FIGURE2_PANEL_B_SENSITIVITY_NOTE = (
+    "Sensitivity display (display-only): matched low-demand–high-demand Δ Fisher-z "
+    "lag curves Δz(τ)=z_high(τ)−z_low(τ) from the same C5 pairs as Panel A "
+    "(pre- and post-intervention each contribute; no pre/post or protocol-session "
+    "averaging before the group mean). Point estimate = mean across matched pairs; "
+    "95% CI = session-condition cluster bootstrap. Excluded from PRIMARY_META; "
+    "display only — no cluster-permutation testing. Report n_matched_pairs and "
+    "n_session_clusters (not participant n)."
 )
-FIGURE2_PANEL_E_HIIT_SENSITIVITY_NOTE = (
-    "HIIT Sensitivity (display-only): state-specific Rest and Task Gaussian peak "
-    "μ and FWHM from C5 matched pairs (PRE/POST each contribute; no PRE/POST or "
-    "PH/PS collapse). Suppress μ/FWHM independently when that state's peak is not "
-    "identifiable. Summaries = mean of biological-participant means with "
-    "participant-clustered percentile bootstrap 95% CIs. Sample-size labels "
-    "(R / T) report identifiable observations / unique biological participants. "
-    "Descriptive only; excluded from PRIMARY_META."
+FIGURE2_PANEL_E_SENSITIVITY_NOTE = (
+    "Sensitivity display (display-only): state-specific low-demand and high-demand "
+    "Gaussian peak μ and FWHM from C5 matched pairs (pre-/post-intervention each "
+    "contribute; no pre/post or protocol-session collapse). Suppress μ/FWHM "
+    "independently when that state's peak is not identifiable. Summaries = mean "
+    "of biological-participant means with participant-clustered percentile "
+    "bootstrap 95% CIs. Sample-size labels (L / H) report identifiable "
+    "observations / unique biological participants. Descriptive only; excluded "
+    "from PRIMARY_META."
 )
+# Deprecated aliases retained for callers/tests that still import the HIIT names.
+FIGURE2_PANEL_A_HIIT_SENSITIVITY_NOTE = FIGURE2_PANEL_A_SENSITIVITY_NOTE  # deprecated
+FIGURE2_PANEL_B_HIIT_SENSITIVITY_NOTE = FIGURE2_PANEL_B_SENSITIVITY_NOTE  # deprecated
+FIGURE2_PANEL_E_HIIT_SENSITIVITY_NOTE = FIGURE2_PANEL_E_SENSITIVITY_NOTE  # deprecated
 
 
 def primary_meta_expected_na_message(detail: str) -> str:
@@ -1215,6 +1223,54 @@ def _dataset_display(dataset_id: str, *, n_pairs: int | None = None) -> str:
     return label
 
 
+STATE_ROLE_DISPLAY: dict[str, str] = {
+    "state_low": "Low-demand state",
+    "low_demand": "Low-demand state",
+    "rest": "Low-demand state",
+    "state_high": "High-demand state",
+    "high_demand": "High-demand state",
+    "cognitive_effort": "High-demand state",
+    "tetris": "High-demand state",
+    "task": "High-demand state",
+}
+TIME_ROLE_DISPLAY: dict[str, str] = {
+    "time_pre": "Pre-intervention",
+    "pre": "Pre-intervention",
+    "time_post": "Post-intervention",
+    "post": "Post-intervention",
+}
+
+
+def format_role_display(
+    role: str,
+    *,
+    raw_label: str | None = None,
+    role_map: Mapping[str, str] | None = None,
+) -> str:
+    """General role label with optional YAML condition token in parentheses.
+
+    Example: ``format_role_display("state_low", raw_label="rest")`` →
+    ``"Low-demand state (rest)"``.
+    """
+    key = _as_str(role).casefold()
+    mapping = role_map or STATE_ROLE_DISPLAY
+    base = mapping.get(key, key.replace("_", " ").strip().title() or "Condition")
+    raw = _as_str(raw_label).casefold()
+    if raw and raw not in {key, base.casefold()} and raw not in mapping:
+        return f"{base} ({raw})"
+    if raw and raw in mapping and mapping[raw] == base and raw != key:
+        return f"{base} ({raw})"
+    return base
+
+
+def sensitivity_display_title(body: str, *, dataset_id: str | None = None) -> str:
+    """Manuscript panel title for sensitivity-only display (metadata-driven)."""
+    body = body.strip()
+    if dataset_id:
+        return f"Sensitivity display ({_dataset_display(dataset_id)}): {body}"
+    return f"Sensitivity display: {body}"
+
+
 def _endpoint_display(endpoint_name: str) -> str:
     key = _as_str(endpoint_name, ENDPOINT_ZLPI)
     return ENDPOINT_DISPLAY.get(key, key.upper() if key else "ZLPI")
@@ -1466,12 +1522,18 @@ def write_source_csv(
     fieldnames: Sequence[str],
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fields = list(dict.fromkeys([*fieldnames, *STRUCTURED_NC_FIELDS]))
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
+        writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in rows:
+            row = with_structured_nc_fields(
+                row,
+                stage="C7",
+                specification_id=str(row.get("specification_id") or path.stem),
+            )
             payload = {}
-            for field in fieldnames:
+            for field in fields:
                 value = row.get(field, "")
                 if isinstance(value, float) and not math.isfinite(value):
                     payload[field] = ""
@@ -2276,7 +2338,7 @@ def _plot_panel_a_empirical_nulls(
     ax.tick_params(axis="y", pad=2)
     ax.margins(x=0.04)
 
-    # Subtitle with hierarchy counts (HIIT-style when single dataset).
+    # Subtitle with hierarchy counts (session-condition units when single dataset).
     first = row_meta[0]
     role_disp = _as_str(first.get("dataset_role"), "unknown").title()
     if single_dataset:
@@ -3112,7 +3174,9 @@ def _panel_c_supported_durations(dataset_id: str) -> frozenset[int]:
             if dataset_yaml.is_file():
                 raw = yaml.safe_load(dataset_yaml.read_text(encoding="utf-8")) or {}
                 caps = raw.get("capabilities") or {}
-                allowed = {60, 120}
+                allowed = {60}
+                if bool(caps.get("supports_d120", True)):
+                    allowed.add(120)
                 if bool(caps.get("supports_d180", True)):
                     allowed.add(180)
                 if bool(caps.get("supports_d240", True)):
@@ -3122,7 +3186,9 @@ def _panel_c_supported_durations(dataset_id: str) -> frozenset[int]:
         master = load_master_config(master_yaml)
         cfg = load_dataset_config(dataset_yaml, master=master)
         caps = cfg.capabilities
-        allowed = {60, 120}
+        allowed = {60}
+        if caps.supports_d120:
+            allowed.add(120)
         if caps.supports_d180:
             allowed.add(180)
         if caps.supports_d240:
@@ -3301,7 +3367,8 @@ def _panel_c_observation_level_rows(
         participant_id = _as_str(row.get("participant_id")).casefold()
         session_id = _as_str(row.get("session_id"), "single").casefold() or "single"
         # Prefer explicit session-unit fields when present; otherwise compose
-        # participant_id + session_id. HIIT stores PH/PS in subject_id.
+        # participant_id + session_id. Some datasets store protocol session
+        # conditions in subject_id (YAML session_id_from=subject_suffix).
         biological_participant_id = participant_id or _as_str(
             row.get("subject_id")
         ).casefold()
@@ -5878,9 +5945,9 @@ def render_figure3(
             "participant); not participant-session units.\n"
             "  - Orange diamond = equal-weight mean across biological participants.\n"
             "  - Dashed zero = center of each observation-specific null.\n"
-            "  - When the C4 surrogate export is complete, each null uses 500 "
-            "surrogates per eligible observation (HIIT: 157×500 = 78,500 values per "
-            "null method).\n"
+            "  - When the C4 surrogate export is complete, each null uses the "
+            "prespecified number of surrogates per eligible observation "
+            "(observation count × draws per null method).\n"
             "B: Cross-subject specificity and AR(1) innovations (D240/theta/ZLPI, "
             "absolute-log10). Correct pairing uses simultaneous HR_i with EEG_i. "
             "Cross-subject mismatch substitutes another participant's HR_j (same "
@@ -6000,8 +6067,9 @@ def render_figure3(
                 "",
                 "## Sample size wording",
                 f"- This render: **{primary_inference.sample_size_label}**",
-                "- For HIIT, n uses session subject_ids (e.g. `01_ph` / `01_ps`), "
-                "matching Figure 1 Panel B.",
+                "- When protocol session conditions are separate analysis units "
+                "(Panel B-aligned), n uses session-condition identifiers rather "
+                "than biological participants alone.",
                 "",
                 "## CI method",
                 "Unweighted mean of biological-participant Δ_p within dataset; "
@@ -6344,12 +6412,19 @@ __all__ = [
     "FIGURE_DPI",
     "FIGURE2_PANEL_AB_DISPLAY_SMOOTH_NOTE",
     "FIGURE2_PANEL_AB_DISPLAY_SMOOTH_SIGMA_S",
+    "FIGURE2_PANEL_A_SENSITIVITY_NOTE",
+    "FIGURE2_PANEL_B_SENSITIVITY_NOTE",
+    "FIGURE2_PANEL_E_SENSITIVITY_NOTE",
+    "FIGURE2_PANEL_A_HIIT_SENSITIVITY_NOTE",  # deprecated alias
+    "FIGURE2_PANEL_B_HIIT_SENSITIVITY_NOTE",  # deprecated alias
+    "FIGURE2_PANEL_E_HIIT_SENSITIVITY_NOTE",  # deprecated alias
     "LAG_CURVE_DISPLAY_SMOOTH_NOTE",
     "LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S",
     "FigureArtifacts",
     "Figure3RenderResult",
     "FiguresResult",
     "display_lag_mask",
+    "format_role_display",
     "gaussian_smooth_display_series",
     "generate_confirmatory_figures",
     "mean_ci_by_lag",
@@ -6359,5 +6434,6 @@ __all__ = [
     "render_figure3_panel_f",
     "resolve_reporting_inputs",
     "save_figure_trio",
+    "sensitivity_display_title",
     "write_figure_export_categories",
 ]

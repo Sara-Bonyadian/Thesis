@@ -426,7 +426,8 @@ class Figure2PanelAHiitFallbackRenderTests(unittest.TestCase):
             panel_a = next(
                 p for p in artifacts.panels if p.panel_id == "matched_low_effort_curves"
             )
-            self.assertIn("HIIT Sensitivity", panel_a.title)
+            self.assertIn("Sensitivity display", panel_a.title)
+            self.assertIn("HIIT", panel_a.title)
             self.assertIn(
                 "cohort=HIIT_sensitivity_matched_observation_pairs",
                 panel_a.analysis_keys,
@@ -458,7 +459,8 @@ class Figure2PanelAHiitFallbackRenderTests(unittest.TestCase):
                 for p in artifacts.panels
                 if p.panel_id == "matched_lag_difference_curves"
             )
-            self.assertIn("HIIT Sensitivity", panel_b.title)
+            self.assertIn("Sensitivity display", panel_b.title)
+            self.assertIn("HIIT", panel_b.title)
             self.assertIn(
                 "cohort=HIIT_sensitivity_matched_observation_pairs",
                 panel_b.analysis_keys,
@@ -496,7 +498,8 @@ class Figure2PanelAHiitFallbackRenderTests(unittest.TestCase):
             panel_c = next(
                 p for p in artifacts.panels if p.panel_id == "alpha_primary_meta_forest"
             )
-            self.assertIn("HIIT Sensitivity", panel_c.title)
+            self.assertIn("Sensitivity display", panel_c.title)
+            self.assertIn("HIIT", panel_c.title)
             self.assertIn(
                 f"panel_status={PANEL_STATUS_SENSITIVITY_DISPLAY}",
                 panel_c.analysis_keys,
@@ -505,7 +508,7 @@ class Figure2PanelAHiitFallbackRenderTests(unittest.TestCase):
             panel_e = next(
                 p for p in artifacts.panels if p.panel_id == "state_peaks_mu_fwhm"
             )
-            self.assertIn("HIIT sensitivity", panel_e.title)
+            self.assertIn("Sensitivity display", panel_e.title)
             self.assertIn("Peak center and width by state", panel_e.title)
             self.assertIn(
                 f"panel_status={PANEL_STATUS_SENSITIVITY_DISPLAY}",

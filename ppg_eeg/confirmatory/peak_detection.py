@@ -21,6 +21,14 @@ import pandas as pd
 from ..core_eeg_ppg.features_core import _read_raw
 from ..core_eeg_ppg.output_layout import safe_subject_dir_name
 from ..datasets import CanonicalObservation
+from .reason_codes import (
+    INPUT_DISCOVERY_FAILED,
+    MISSING_EVENT_SERIES,
+    MISSING_REQUIRED_MODALITY,
+    STRUCTURED_NC_FIELDS,
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+)
 from ..temporal_coupling.cardiac_common import CardiacObservation
 from ..temporal_coupling.cardiac_detectors import (
     CHANNEL_INVENTORY_FILENAME,
@@ -121,6 +129,65 @@ class PeakDetectionQc:
             "usable": self.usable,
             "warning": self.warning,
         }
+
+    def to_structured_row(self) -> dict[str, object]:
+        """QC export row with StructuredReason fields attached at decision time."""
+        base = self.to_row()
+        base["participant_id"] = self.subject_id
+        base["session_id"] = ""
+        return _enrich_c1b_qc_row(base)
+
+
+def _enrich_c1b_qc_row(row: Mapping[str, object]) -> dict[str, object]:
+    """Attach StructuredReason fields at the C1b peak-QC decision site."""
+    usable = bool(row.get("usable"))
+    warning = str(row.get("warning") or "").strip()
+    if usable:
+        exclusion = ""
+    elif "missing" in warning.casefold() and (
+        "cardiac" in warning.casefold()
+        or "ppg" in warning.casefold()
+        or "ecg" in warning.casefold()
+    ):
+        exclusion = "missing_cardiac_data"
+    elif (
+        "peak" in warning.casefold()
+        or "beat" in warning.casefold()
+        or "ibi" in warning.casefold()
+    ):
+        exclusion = "missing_event_series"
+    elif warning:
+        exclusion = warning.split(";")[0].strip()
+    else:
+        exclusion = "missing_event_series"
+    code = map_exclusion_to_reason_code(exclusion)
+    if not code and not usable:
+        if "modality" in exclusion.casefold() or "cardiac" in exclusion.casefold():
+            code = MISSING_REQUIRED_MODALITY
+        elif exclusion:
+            code = MISSING_EVENT_SERIES
+        else:
+            code = INPUT_DISCOVERY_FAILED
+    return attach_structured_reason(
+        {
+            **dict(row),
+            "exclusion_reason": exclusion,
+            "reason_code": code,
+        },
+        stage="C1b",
+        eligible=usable,
+        reason_code=code,
+        reason=exclusion.replace("_", " ") if exclusion else "",
+        required_evidence=(
+            "usable cardiac peaks with clean IBI coverage" if not usable else ""
+        ),
+        observed_evidence=(
+            f"usable={usable}; n_accepted_peaks={row.get('n_accepted_peaks')}; "
+            f"clean_ibi_coverage_s={row.get('clean_ibi_coverage_s')}; warning={warning}"
+            if not usable
+            else ""
+        ),
+    )
 
 
 def canonical_to_cardiac_observation(obs: CanonicalObservation) -> CardiacObservation:
@@ -704,8 +771,17 @@ def run_confirmatory_c1b(
 
     if qc_rows:
         group_path = output_path / GROUP_PEAK_QC_FILENAME
+        structured = [row.to_structured_row() for row in qc_rows]
+        fieldnames = list(
+            dict.fromkeys(
+                [
+                    *(structured[0].keys() if structured else []),
+                    *STRUCTURED_NC_FIELDS,
+                ]
+            )
+        )
         _atomic_dataframe_to_csv(
-            pd.DataFrame([row.to_row() for row in qc_rows]),
+            pd.DataFrame(structured)[fieldnames],
             group_path,
         )
         if progress:

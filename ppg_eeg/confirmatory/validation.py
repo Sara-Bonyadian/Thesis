@@ -9,6 +9,15 @@ from typing import Iterable
 from ..datasets import CanonicalObservation
 from ..temporal_coupling.data_audit import read_signal_file_info
 from .config import ConfirmatoryDatasetConfig
+from .reason_codes import (
+    CONFIGURATION_VALIDATION_FAILED,
+    INSUFFICIENT_DURATION,
+    MISSING_CONDITION_MAPPING,
+    MISSING_DATASET_ROOT,
+    MISSING_EVENT_SERIES,
+    MISSING_REQUIRED_MODALITY,
+    TOPOGRAPHY_NOT_SUPPORTED,
+)
 
 VALIDATION_REPORT_FILENAME = "configuration_validation_report.txt"
 
@@ -27,10 +36,21 @@ def validate_dataset_configuration(
     """Validate dataset YAML semantics against discovered observations."""
     obs = list(observations)
     issues: list[ValidationIssue] = []
+    raw_root = Path(dataset.paths.raw_root).expanduser()
+    if not raw_root.exists():
+        issues.append(
+            ValidationIssue(
+                code=MISSING_DATASET_ROOT,
+                message=(
+                    f"{dataset.dataset_id}: dataset root missing or unreadable: {raw_root}"
+                ),
+            )
+        )
+        return issues
     if not obs:
         issues.append(
             ValidationIssue(
-                code="configuration_validation_failed",
+                code=CONFIGURATION_VALIDATION_FAILED,
                 message=f"{dataset.dataset_id}: no observations discovered after selection filters.",
             )
         )
@@ -49,7 +69,7 @@ def validate_dataset_configuration(
     if missing_conditions:
         issues.append(
             ValidationIssue(
-                code="missing_condition_mapping",
+                code=MISSING_CONDITION_MAPPING,
                 message=(
                     f"{dataset.dataset_id}: configured conditions missing in data: "
                     + ", ".join(missing_conditions)
@@ -59,7 +79,7 @@ def validate_dataset_configuration(
     if missing_tasks:
         issues.append(
             ValidationIssue(
-                code="configuration_validation_failed",
+                code=CONFIGURATION_VALIDATION_FAILED,
                 message=(
                     f"{dataset.dataset_id}: configured tasks missing in data: "
                     + ", ".join(missing_tasks)
@@ -69,7 +89,7 @@ def validate_dataset_configuration(
     if missing_sessions:
         issues.append(
             ValidationIssue(
-                code="configuration_validation_failed",
+                code=CONFIGURATION_VALIDATION_FAILED,
                 message=(
                     f"{dataset.dataset_id}: configured sessions missing in data: "
                     + ", ".join(missing_sessions)
@@ -81,7 +101,7 @@ def validate_dataset_configuration(
     if not capability.has_hr:
         issues.append(
             ValidationIssue(
-                code="missing_required_modality",
+                code=MISSING_REQUIRED_MODALITY,
                 message=f"{dataset.dataset_id}: has_hr=false; cardiac-dependent analyses become not_computable.",
                 severity="warning",
             )
@@ -89,7 +109,7 @@ def validate_dataset_configuration(
     if capability.cardiac_modality in {"ecg", "both"} and not capability.has_ecg_r_peaks:
         issues.append(
             ValidationIssue(
-                code="missing_event_series",
+                code=MISSING_EVENT_SERIES,
                 message=f"{dataset.dataset_id}: ECG modality declared without ECG peak capability.",
                 severity="warning",
             )
@@ -97,7 +117,7 @@ def validate_dataset_configuration(
     if capability.cardiac_modality in {"ppg", "both"} and not capability.has_ppg_peaks:
         issues.append(
             ValidationIssue(
-                code="missing_event_series",
+                code=MISSING_EVENT_SERIES,
                 message=f"{dataset.dataset_id}: PPG modality declared without PPG peak capability.",
                 severity="warning",
             )
@@ -105,7 +125,7 @@ def validate_dataset_configuration(
     if not capability.supports_d240:
         issues.append(
             ValidationIssue(
-                code="insufficient_duration",
+                code=INSUFFICIENT_DURATION,
                 message=f"{dataset.dataset_id}: supports_d240=false; D240 estimand exported as not_computable.",
                 severity="warning",
             )
@@ -113,7 +133,7 @@ def validate_dataset_configuration(
     if not capability.supports_topography:
         issues.append(
             ValidationIssue(
-                code="insufficient_common_montage",
+                code=TOPOGRAPHY_NOT_SUPPORTED,
                 message=f"{dataset.dataset_id}: supports_topography=false; Panel F exported as not_computable.",
                 severity="warning",
             )
@@ -132,7 +152,7 @@ def validate_dataset_configuration(
     if dataset.capabilities.supports_topography and not eeg_channels:
         issues.append(
             ValidationIssue(
-                code="configuration_validation_failed",
+                code=CONFIGURATION_VALIDATION_FAILED,
                 message=f"{dataset.dataset_id}: unable to read EEG channels for montage validation.",
             )
         )

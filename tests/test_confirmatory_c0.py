@@ -166,6 +166,7 @@ class TestConfirmatoryC0DataAudit(unittest.TestCase):
                 "data_audit.csv",
                 "eligibility_by_duration.csv",
                 "eligibility_qc_summary.csv",
+                "capability_resolution.csv",
                 "stage_status.json",
             }
             c0 = out_root / "C0"

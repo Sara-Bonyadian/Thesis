@@ -26,14 +26,11 @@ from .forest_display import (
     FOREST_EXPORT_FIELDS,
     build_alpha_forest_export,
     draw_alpha_meta_forest,
-    hiit_session_mean_zlpi_cells,
     hiit_session_sensitivity_forest_rows,
-    hiit_session_surrogate_significance_marks,
     primary_meta_alpha_forest_rows,
 )
 from .manifest import FigurePanelSource
 from .null_delta_inference import PRIMARY_NULL_TYPE
-from .protocol_audit import PROTOCOL_SPECS
 
 # Imported after figures constants exist; callers invoke via deferred import.
 def _fig():
@@ -73,7 +70,6 @@ def bootstrap_mean_ci_by_lag(
     by_dataset: dict[str, dict[str, list[str]]] = {}
     participants: set[tuple[str, str]] = set()
 
-    low_labels = f.LOW_DEMAND_CONDITION_LABELS
     for row in curve_rows:
         if f._as_int(row.get("duration_s"), duration_s) != duration_s:
             continue
@@ -87,14 +83,17 @@ def bootstrap_mean_ci_by_lag(
         condition = f._as_str(row.get("condition") or row.get("task")).casefold()
         role = f._as_str(row.get("condition_role") or row.get("state")).casefold()
         if condition_role == "low_demand":
-            if role and role != "low_demand" and condition not in low_labels:
-                continue
-            if not role and condition and condition not in low_labels:
-                if (
-                    "rest" not in condition
-                    and "passive" not in condition
-                    and "low" not in condition
-                ):
+            normalized_state = f._as_str(
+                row.get("normalized_state") or row.get("state_role")
+            ).casefold()
+            if role not in {"low_demand", "state_low"} and normalized_state != "state_low":
+                dataset_id = f._as_str(row.get("dataset_id")).casefold()
+                state_role = ""
+                if dataset_id and condition:
+                    state_role, _time, _session = f.condition_semantics_for(
+                        dataset_id, condition
+                    )
+                if state_role != "state_low":
                     continue
         lag = int(round(f._as_float(row.get("lag_s"))))
         r = f._as_float(row.get("r"))
@@ -185,11 +184,21 @@ def _dataset_role(dataset_id: str, protocol_rows: Sequence[Mapping[str, object]]
         role = f._as_str(row.get("dataset_role")).casefold()
         if role in {"primary", "sensitivity"}:
             return role
-    if key in {d.casefold() for d in f.FIGURE1_PRIMARY_DATASETS}:
-        return "primary"
-    if key in {d.casefold() for d in f.FIGURE1_SENSITIVITY_DATASETS}:
-        return "sensitivity"
     return "other"
+
+
+def _dataset_role_from_config(dataset_id: str) -> str:
+    """Read the configured role when source rows do not carry it."""
+    try:
+        from .config import load_dataset_config, load_master_config
+
+        root = Path(__file__).resolve().parents[2] / "zero-lag-reanalysis-repo"
+        master = load_master_config(root / "master.yaml")
+        return load_dataset_config(
+            root / "datasets" / f"{dataset_id.casefold()}.yaml", master=master
+        ).role
+    except Exception:  # noqa: BLE001
+        return "other"
 
 
 def _cardiac_modality(dataset_id: str, protocol_rows: Sequence[Mapping[str, object]]) -> str:
@@ -202,10 +211,6 @@ def _cardiac_modality(dataset_id: str, protocol_rows: Sequence[Mapping[str, obje
         if modality:
             # Metadata annotation: prefer primary token before semicolon.
             return modality.split(";")[0].strip() or modality
-    spec = PROTOCOL_SPECS.get(key) or PROTOCOL_SPECS.get(f._as_str(dataset_id))
-    if spec is not None:
-        modality = f._as_str(spec.cardiac_modality)
-        return modality.split(";")[0].strip() or modality
     return ""
 
 
@@ -283,18 +288,14 @@ def subject_level_mean_zlpi_cells(
 ) -> list[dict[str, object]]:
     """Dataset × band mean low-demand ZLPI from subject_level_metrics.
 
-    Non-HIIT datasets: one cell per dataset × band (participant-level means as
-    stored in subject_level_metrics). HIIT is a single combined sensitivity row
-    via within-participant averaging of available PH/PS × PRE/POST low-demand
-    ZLPI (see ``hiit_session_mean_zlpi_cells``).
+    Observations with an explicit normalized session are first averaged within
+    participant-session. This provides the former session-sensitive display
+    behavior without relying on a dataset identity.
     """
     f = _fig()
-    buckets: dict[tuple[str, str], list[float]] = {}
+    buckets: dict[tuple[str, str, str], list[float]] = {}
     for row in subject_rows:
         dataset_id = f._as_str(row.get("dataset_id")).casefold()
-        if dataset_id == "hiit":
-            # Handled by hiit_session_mean_zlpi_cells (within-participant combine).
-            continue
         if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
             continue
         if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
@@ -314,15 +315,23 @@ def subject_level_mean_zlpi_cells(
         value = f._as_float(row.get("endpoint_index"))
         if not math.isfinite(value):
             continue
-        key = (f._as_str(row.get("dataset_id")), band)
+        participant = f._as_str(row.get("participant_id") or row.get("subject_id"))
+        session = f._as_str(row.get("session_id"), "single").casefold() or "single"
+        unit = f"{participant}::{session}" if participant else f._as_str(
+            row.get("observation_id"), "unknown"
+        )
+        key = (f._as_str(row.get("dataset_id")), band, unit)
         buckets.setdefault(key, []).append(value)
-    out: list[dict[str, object]] = [
+    by_cell: dict[tuple[str, str], list[float]] = {}
+    for (dataset_id, band, _unit), values in buckets.items():
+        by_cell.setdefault((dataset_id, band), []).append(float(np.mean(values)))
+    return [
         {
             "dataset_id": ds,
             "source_dataset_id": ds,
             "session_id": "",
-            "display_label": "",
-            "dataset_role": "",
+            "display_label": str(ds).upper(),
+            "dataset_role": _dataset_role_from_config(str(ds)),
             "band": band,
             "mean_zlpi": float(np.mean(vals)),
             "n_participants": len(vals),
@@ -330,18 +339,10 @@ def subject_level_mean_zlpi_cells(
             "endpoint_name": ENDPOINT_ZLPI,
             "duration_s": EXPECTED_PRIMARY_DURATION_S,
             "power_representation": f.PRIMARY_REPRESENTATION,
-            "aggregation": "subject_level_endpoint_index",
+            "aggregation": "session_subject_mean_of_available_low_demand_zlpi",
         }
-        for (ds, band), vals in sorted(buckets.items())
+        for (ds, band), vals in sorted(by_cell.items())
     ]
-    out.extend(
-        hiit_session_mean_zlpi_cells(
-            subject_rows,
-            band_order=f.BAND_ORDER,
-            primary_representation=f.PRIMARY_REPRESENTATION,
-        )
-    )
-    return out
 
 
 def surrogate_significance_marks(
@@ -349,16 +350,16 @@ def surrogate_significance_marks(
 ) -> dict[tuple[str, str], bool]:
     """Prespecified display rule: median_empirical_p < α for PRIMARY_NULL_TYPE.
 
-    Non-HIIT: median of condition-level median_empirical_p within (dataset, band).
-    HIIT: one combined mark per band from all low-demand PH/PS × PRE/POST
-    condition-level p-values (see ``hiit_session_surrogate_significance_marks``).
+    Default: median of condition-level median_empirical_p within (dataset, band).
+    Sensitivity cohorts with multi-session protocols may use one combined mark
+    per band from all low-demand pre-/post-intervention condition-level p-values
+    (see ``hiit_session_surrogate_significance_marks`` for the retained HIIT
+    display aggregation).
     """
     f = _fig()
     by_cell: dict[tuple[str, str], list[float]] = {}
     for row in null_summary_rows:
         dataset_id = f._as_str(row.get("dataset_id")).casefold()
-        if dataset_id == "hiit":
-            continue
         if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
             continue
         if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
@@ -387,16 +388,6 @@ def surrogate_significance_marks(
         key: float(np.median(ps)) < f.FIGURE1_PANEL_D_SURROGATE_ALPHA
         for key, ps in by_cell.items()
     }
-    marks.update(
-        hiit_session_surrogate_significance_marks(
-            null_summary_rows,
-            band_order=f.BAND_ORDER,
-            primary_representation=f.PRIMARY_REPRESENTATION,
-            null_type=PRIMARY_NULL_TYPE,
-            alpha=f.FIGURE1_PANEL_D_SURROGATE_ALPHA,
-            low_demand_labels=set(f.LOW_DEMAND_CONDITION_LABELS),
-        )
-    )
     return marks
 
 
@@ -406,9 +397,11 @@ def alpha_replication_forest_rows(
     protocol_rows: Sequence[Mapping[str, object]],
     paired_rows: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
-    """PRIMARY_META alpha rows + display-only combined HIIT sensitivity + pooled.
+    """PRIMARY_META alpha rows + display-only combined sensitivity + pooled.
 
-    Sensitivity rows never set ``enters_meta`` and are not used for pooling.
+    The sensitivity helper remains HIIT-configured for accepted display
+    regression (``hiit_session_sensitivity_forest_rows``). Sensitivity rows
+    never set ``enters_meta`` and are not used for pooling.
     """
     studies, pooled = primary_meta_alpha_forest_rows(
         dataset_effects,
@@ -1458,19 +1451,19 @@ def render_figure1(
             f"- Panel B display-only Gaussian smooth "
             f"(σ = {f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S:g} s); source data unsmoothed.\n"
             "- Panel C: group means ± participant SEM; faint dots (no spaghetti lines).\n"
-            "- Panel D values: subject-level mean ZLPI; HIIT shown as one combined "
-            "sensitivity row (within-participant mean of available PH/PS × PRE/POST "
-            "low-demand ZLPI); surrogate mark uses "
+            "- Panel D values: subject-level mean ZLPI; sensitivity datasets may "
+            "show one combined row (within session-condition mean of available "
+            "pre-/post-intervention low-demand ZLPI); surrogate mark uses "
             f"`median_empirical_p < {f.FIGURE1_PANEL_D_SURROGATE_ALPHA}` for "
-            f"`{PRIMARY_NULL_TYPE}` (circular-shift significance only; HIIT marks "
-            "from combined low-demand condition p-values).\n"
+            f"`{PRIMARY_NULL_TYPE}` (circular-shift significance only; sensitivity "
+            "marks from combined low-demand condition p-values).\n"
             "- Panel E: alpha band display of equal four-band PRIMARY_META "
-            "(not an alpha-only hierarchy); one combined HIIT display-only "
-            "sensitivity row (within-participant mean of available contrasts) "
+            "(not an alpha-only hierarchy); one combined display-only "
+            "sensitivity row (within session-condition mean of available contrasts) "
             "never enters RE pooling.\n"
             "- Panel F: Option C near-zero central peak (flank baseline + "
             "baseline-adjusted Gaussian on |τ|≤20); participant-nested MixedLM "
-            "μ/FWHM (HIIT PH/PS within participant) + hierarchical μ TOST; "
+            "μ/FWHM (protocol session conditions as units) + hierarchical μ TOST; "
             "data-driven axis limits; FWHM hierarchical CI (log-scale fit).\n"
             "- Footer: multi-line below panels E/F to avoid overlap.\n"
             "- No ECG–vs–PPG comparison; no max-|r| / argmax metrics.\n"

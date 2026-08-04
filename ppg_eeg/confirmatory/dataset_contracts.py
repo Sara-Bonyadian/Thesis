@@ -37,10 +37,11 @@ class DatasetCapabilities:
     has_low_high_task_pair: bool
     has_pre_post_pair: bool
     has_behavior: bool
-    supports_d180: bool
-    supports_d240: bool
-    supports_topography: bool
-    supports_gamma: bool
+    supports_d120: bool = True
+    supports_d180: bool = True
+    supports_d240: bool = True
+    supports_topography: bool = True
+    supports_gamma: bool = True
     sensitivity_only: bool = False
     has_artifact_controls: bool = True
 

@@ -36,7 +36,8 @@ capabilities:
   has_low_high_task_pair: false
   has_pre_post_pair: true
   has_behavior: false
-  # Short recordings: SWPI (D60) / MWPI (D120) only; not standard ZLPI durations.
+  # Short recordings: SWPI (D60) only; not MWPI/ZLPI durations.
+  supports_d120: false
   supports_d180: false
   supports_d240: false
   supports_topography: true

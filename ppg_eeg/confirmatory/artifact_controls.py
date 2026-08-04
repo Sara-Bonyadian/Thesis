@@ -39,6 +39,12 @@ from .duration_contracts import (
 )
 from .group_tables import PAIRED_CONTRASTS_FILENAME, SUBJECT_LEVEL_FILENAME
 from .nulls import compute_endpoint_index_from_series
+from .reason_codes import (
+    ARTIFACT_CONTROL_NOT_AVAILABLE,
+    STRUCTURED_NC_FIELDS,
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+)
 
 SENSITIVITY_RESULTS_FILENAME = "sensitivity_results.csv"
 ARTIFACT_CONTROL_RESULTS_FILENAME = "artifact_control_results.csv"
@@ -559,21 +565,17 @@ def participant_duration_sensitivity_effects(
         buckets: dict[tuple[str, str, str], list[float]] = {}
         for row in filtered:
             dataset_id = _as_str(row.get("dataset_id")).casefold()
-            # HIIT: Panel-B-aligned session subject unit (PH/PS separate).
-            if dataset_id == "hiit":
-                subject = _as_str(row.get("subject_id")).casefold()
-                session = _as_str(row.get("session_id"), "single").casefold()
-                biological = _as_str(row.get("participant_id")).casefold()
-                if subject:
-                    participant_id = subject
-                elif session not in {"", "single"} and biological:
-                    participant_id = f"{biological}_{session}"
-                else:
-                    participant_id = biological or _as_str(row.get("subject_id"))
-            else:
-                participant_id = _as_str(
-                    row.get("participant_id") or row.get("subject_id")
-                )
+            session = _as_str(row.get("session_id"), "single").casefold()
+            biological = _as_str(
+                row.get("participant_id") or row.get("subject_id")
+            ).casefold()
+            participant_id = _as_str(
+                row.get("participant_unit_id") or row.get("analysis_unit_id")
+            ).casefold() or (
+                f"{biological}_{session}"
+                if session not in {"", "single"} and biological
+                else biological
+            )
             band = _as_str(row.get("band")).casefold()
             delta = _as_float(row.get("delta_endpoint_index"))
             if not participant_id or not math.isfinite(delta):
@@ -1715,13 +1717,66 @@ def _write_csv(
     rows: Sequence[Mapping[str, object]],
     fieldnames: Sequence[str],
 ) -> None:
+    fields = list(dict.fromkeys([*fieldnames, *STRUCTURED_NC_FIELDS]))
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
+        writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in rows:
+            status_raw = str(row.get("status") or row.get("table_status") or "")
+            code = map_exclusion_to_reason_code(
+                row.get("reason_code")
+                or (
+                    ARTIFACT_CONTROL_NOT_AVAILABLE
+                    if status_raw
+                    in {
+                        STATUS_UNAVAILABLE,
+                        TABLE_STATUS_SKIPPED_NOT_REQUESTED,
+                        TABLE_STATUS_SKIPPED_NOT_APPLICABLE,
+                        TABLE_STATUS_SKIPPED_UNAVAILABLE,
+                    }
+                    else status_raw
+                )
+            )
+            enriched = attach_structured_reason(
+                {
+                    **dict(row),
+                    "reason_code": code,
+                    "notes": row.get("notes", ""),
+                },
+                stage="C6",
+                status=(
+                    "computed"
+                    if status_raw
+                    in {STATUS_OK, STATUS_PRIMARY, STATUS_SENSITIVITY_ONLY, ""}
+                    and not code
+                    else (
+                        "not_computable"
+                        if status_raw
+                        in {
+                            STATUS_UNAVAILABLE,
+                            STATUS_INSUFFICIENT,
+                            TABLE_STATUS_SKIPPED_NOT_REQUESTED,
+                            TABLE_STATUS_SKIPPED_NOT_APPLICABLE,
+                            TABLE_STATUS_SKIPPED_UNAVAILABLE,
+                        }
+                        else "computed"
+                    )
+                ),
+                reason_code=code,
+                reason=str(row.get("notes") or code.replace("_", " ")),
+                required_evidence=(
+                    "control signal retained and applicable"
+                    if code
+                    else ""
+                ),
+                observed_evidence=str(row.get("notes") or status_raw),
+                specification_id=str(
+                    row.get("control_id") or row.get("specification_id") or path.stem
+                ),
+            )
             payload: dict[str, object] = {}
-            for field in fieldnames:
-                value = row.get(field, "")
+            for field in fields:
+                value = enriched.get(field, "")
                 if isinstance(value, float) and not math.isfinite(value):
                     payload[field] = ""
                 elif isinstance(value, bool):
@@ -1765,6 +1820,7 @@ def write_artifact_control_outputs(
                 "control_applied": False,
                 "table_status": TABLE_STATUS_SKIPPED_NOT_REQUESTED,
                 "status": STATUS_UNAVAILABLE,
+                "reason_code": ARTIFACT_CONTROL_NOT_AVAILABLE,
                 "notes": (
                     "Artifact-control table empty: optional CFA/series_controls "
                     "were not requested for this run (not a failure)."

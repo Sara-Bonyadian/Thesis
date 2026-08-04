@@ -29,6 +29,11 @@ from .duration_contracts import (
     contract_for_duration,
 )
 from .harmonize import ALIGNED_FEATURES_TEMPLATE
+from .reason_codes import (
+    STRUCTURED_NC_FIELDS,
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+)
 
 FS_HZ = 1.0
 DEFAULT_LAG_STEP_S = EXPECTED_LAG_STEP_S
@@ -88,40 +93,46 @@ CURVE_FIELDS = IDENTITY_FIELDS + (
     "n_overlap",
 )
 
-QC_FIELDS = IDENTITY_FIELDS + (
-    "duration_s",
-    "duration_role",
-    "lag_analysis_role",
-    "endpoint_name",
-    "endpoint_alias",
-    "is_standard_zlpi",
-    "pool_with_standard_zlpi",
-    "flank_inner_s",
-    "flank_outer_s",
-    "shoulders_inner_s",
-    "shoulders_outer_s",
-    "cardiac_variable",
-    "band",
-    "power_representation",
-    "is_primary_representation",
-    "pair",
-    "n_samples",
-    "n_lags",
-    "lag_min_s",
-    "lag_max_s",
-    "lag_step_s",
-    "n_common_support",
-    "overlap_is_constant",
-    "n_finite_r",
-    "n_nonfinite_r",
-    "min_n_overlap",
-    "max_n_overlap",
-    "n_overlap_at_zero",
-    "r_at_zero",
-    "peak_r",
-    "peak_abs_r",
-    "peak_lag_s",
-    "exclusion_reason",
+QC_FIELDS = tuple(
+    dict.fromkeys(
+        IDENTITY_FIELDS
+        + (
+            "duration_s",
+            "duration_role",
+            "lag_analysis_role",
+            "endpoint_name",
+            "endpoint_alias",
+            "is_standard_zlpi",
+            "pool_with_standard_zlpi",
+            "flank_inner_s",
+            "flank_outer_s",
+            "shoulders_inner_s",
+            "shoulders_outer_s",
+            "cardiac_variable",
+            "band",
+            "power_representation",
+            "is_primary_representation",
+            "pair",
+            "n_samples",
+            "n_lags",
+            "lag_min_s",
+            "lag_max_s",
+            "lag_step_s",
+            "n_common_support",
+            "overlap_is_constant",
+            "n_finite_r",
+            "n_nonfinite_r",
+            "min_n_overlap",
+            "max_n_overlap",
+            "n_overlap_at_zero",
+            "r_at_zero",
+            "peak_r",
+            "peak_abs_r",
+            "peak_lag_s",
+            "exclusion_reason",
+        )
+        + STRUCTURED_NC_FIELDS
+    )
 )
 
 
@@ -556,38 +567,56 @@ def compute_signed_lag_curves(
                     )
 
                 qc_rows.append(
-                    {
-                        **identity,
-                        "duration_s": int(duration_s),
-                        "duration_role": duration_role,
-                        **_contract_row_fields(spec),
-                        "cardiac_variable": cardiac_variable_name,
-                        "band": band,
-                        "power_representation": representation,
-                        "is_primary_representation": bool(is_primary),
-                        "pair": pair,
-                        "n_samples": n_samples,
-                        "n_lags": int(spec.n_lags),
-                        "lag_min_s": int(spec.lag_min_s),
-                        "lag_max_s": int(spec.lag_max_s),
-                        "lag_step_s": int(spec.lag_step_s),
-                        "n_common_support": n_common_support,
-                        "overlap_is_constant": bool(overlap_is_constant),
-                        "n_finite_r": len(finite_rs),
-                        "n_nonfinite_r": int(spec.n_lags) - len(finite_rs),
-                        "min_n_overlap": int(min(overlaps)) if overlaps else 0,
-                        "max_n_overlap": int(max(overlaps)) if overlaps else 0,
-                        "n_overlap_at_zero": (
-                            int(zero_point.n_overlap) if zero_point is not None else 0
+                    attach_structured_reason(
+                        {
+                            **identity,
+                            "duration_s": int(duration_s),
+                            "duration_role": duration_role,
+                            **_contract_row_fields(spec),
+                            "cardiac_variable": cardiac_variable_name,
+                            "band": band,
+                            "power_representation": representation,
+                            "is_primary_representation": bool(is_primary),
+                            "pair": pair,
+                            "n_samples": n_samples,
+                            "n_lags": int(spec.n_lags),
+                            "lag_min_s": int(spec.lag_min_s),
+                            "lag_max_s": int(spec.lag_max_s),
+                            "lag_step_s": int(spec.lag_step_s),
+                            "n_common_support": n_common_support,
+                            "overlap_is_constant": bool(overlap_is_constant),
+                            "n_finite_r": len(finite_rs),
+                            "n_nonfinite_r": int(spec.n_lags) - len(finite_rs),
+                            "min_n_overlap": int(min(overlaps)) if overlaps else 0,
+                            "max_n_overlap": int(max(overlaps)) if overlaps else 0,
+                            "n_overlap_at_zero": (
+                                int(zero_point.n_overlap) if zero_point is not None else 0
+                            ),
+                            "r_at_zero": (
+                                float(zero_point.r) if zero_point is not None else float("nan")
+                            ),
+                            "peak_r": peak_r,
+                            "peak_abs_r": peak_abs_r,
+                            "peak_lag_s": peak_lag_s,
+                            "exclusion_reason": exclusion_reason,
+                            "reason_code": map_exclusion_to_reason_code(exclusion_reason),
+                        },
+                        stage="C2",
+                        eligible=not bool(exclusion_reason),
+                        reason_code=map_exclusion_to_reason_code(exclusion_reason),
+                        reason=exclusion_reason.replace("_", " ") if exclusion_reason else "",
+                        required_evidence=(
+                            f"lag_grid anchors with min_overlap>={min_overlap}"
+                            if exclusion_reason
+                            else ""
                         ),
-                        "r_at_zero": (
-                            float(zero_point.r) if zero_point is not None else float("nan")
+                        observed_evidence=(
+                            f"n_samples={n_samples}; n_common_support={n_common_support}"
+                            if exclusion_reason
+                            else ""
                         ),
-                        "peak_r": peak_r,
-                        "peak_abs_r": peak_abs_r,
-                        "peak_lag_s": peak_lag_s,
-                        "exclusion_reason": exclusion_reason,
-                    }
+                        specification_id=str(spec.endpoint_name or pair),
+                    )
                 )
 
     return ConfirmatoryCorrelationResult(

@@ -34,10 +34,18 @@ from .protocol_audit import (
     _session_id,
     protocol_spec,
 )
+from .reason_codes import (
+    MISSING_PAIRED_OBSERVATION,
+    STRUCTURED_NC_FIELDS,
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+    with_structured_nc_fields,
+)
 
 SUBJECT_LEVEL_FILENAME = "subject_level_metrics.csv"
 PAIRED_CONTRASTS_FILENAME = "paired_contrasts.csv"
 PAIRING_QC_FILENAME = "pairing_qc.csv"
+AGGREGATION_MANIFEST_FILENAME = "aggregation_manifest.csv"
 
 _SES_RE = re.compile(r"(?:^|[-_])ses[-_]?([a-zA-Z0-9]+)(?:$|[-_])", re.IGNORECASE)
 
@@ -220,7 +228,7 @@ def _semicolon_join(values: Sequence[str]) -> str:
 
 
 def infer_session_label(row: Mapping[str, object]) -> str:
-    """Best-effort session label when M6/M7 rows omit ``session_label``."""
+    """Best-effort generic session label when M6/M7 rows omit it."""
     for key in ("session_id", "session_label"):
         if key in row and _as_str(row.get(key)):
             return _as_str(row.get(key)).casefold()
@@ -230,23 +238,26 @@ def infer_session_label(row: Mapping[str, object]) -> str:
     if match:
         return match.group(1).casefold()
 
-    dataset_id = _as_str(row.get("dataset_id")).casefold()
+    # Session-qualified subject IDs (e.g. ``01_ph`` / ``01_ps``) encode the
+    # protocol session as a suffix. Prefer that over inventing ``single``.
     subject_id = _as_str(row.get("subject_id")).casefold()
-    if dataset_id == "hiit" and "_" in subject_id:
-        return subject_id.rsplit("_", 1)[-1].casefold()
-    if dataset_id == "mindfulness":
-        # mindfulness-{participant}-{session}-task-{condition}
-        parts = observation_id.split("-")
-        if len(parts) >= 4 and parts[0] == "mindfulness":
-            # mbd-01 may occupy two tokens; session follows participant block.
-            task_idx = observation_id.find("-task-")
-            if task_idx > 0:
-                head = observation_id[:task_idx]
-                # head = mindfulness-mbd-01-part1
-                tokens = head.split("-")
-                if len(tokens) >= 4:
-                    return tokens[-1].casefold()
+    if "_" in subject_id:
+        stem, suffix = subject_id.rsplit("_", 1)
+        if stem and suffix and not suffix.isdigit():
+            return suffix
+
     return "single"
+
+
+def _participant_from_observation_id(dataset_id: str, observation_id: str) -> str:
+    """Generic legacy-table fallback; normalized IDs remain authoritative."""
+    prefix = f"{dataset_id.casefold()}-"
+    remainder = observation_id.casefold().removeprefix(prefix)
+    if "-ses-" in remainder:
+        return remainder.split("-ses-", 1)[0]
+    if "-task-" in remainder:
+        return remainder.split("-task-", 1)[0]
+    return remainder.split("-", 1)[0]
 
 
 def normalize_keys(row: Mapping[str, object]) -> dict[str, str]:
@@ -274,6 +285,20 @@ def normalize_keys(row: Mapping[str, object]) -> dict[str, str]:
             "subject_id": subject_id,
         }
 
+    # Prefer a clean subject_id as the legacy analysis identity. When subject_id
+    # embeds BIDS ses/run tokens (legacy exploratory strings), fall back to
+    # observation-id parsing so participant stays biological (e.g. ``ab4``).
+    subject_embeds_bids = (
+        "-ses-" in subject_id
+        or "_ses-" in subject_id
+        or "-run-" in subject_id
+        or "_run-" in subject_id
+    )
+    participant_hint = (
+        subject_id
+        if subject_id and not subject_embeds_bids
+        else _participant_from_observation_id(dataset_id, observation_id)
+    ) or subject_id or _participant_from_observation_id(dataset_id, observation_id)
     obs = CanonicalObservation(
         dataset_id=dataset_id or "unknown",
         observation_id=observation_id or "unknown",
@@ -284,6 +309,7 @@ def normalize_keys(row: Mapping[str, object]) -> dict[str, str]:
         eeg_format="n/a",
         ppg_source="n/a",
         session_label=session_label,
+        participant_id=participant_hint or None,
     )
     return {
         "dataset_id": dataset_id,
@@ -533,7 +559,7 @@ def _contrast_eligibility(
     if low_ok and effort_ok:
         return True, ""
     if not low_ok and not effort_ok:
-        return False, "both_endpoint_ineligible"
+        return False, MISSING_PAIRED_OBSERVATION
     if not low_ok:
         return False, "low_endpoint_ineligible"
     return False, "effort_endpoint_ineligible"
@@ -951,12 +977,53 @@ def _write_csv(
     rows: Sequence[Mapping[str, object]],
     fieldnames: Sequence[str],
 ) -> None:
+    fields = list(dict.fromkeys([*fieldnames, *STRUCTURED_NC_FIELDS]))
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
+        writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in rows:
+            exclusion = (
+                row.get("reason_code")
+                or row.get("contrast_exclusion_reason")
+                or row.get("exclusion_reason")
+                or row.get("pairing_status")
+                or ""
+            )
+            mapped = map_exclusion_to_reason_code(exclusion)
+            enriched_input = {
+                **dict(row),
+                "exclusion_reason": row.get("exclusion_reason") or exclusion,
+                "reason_code": row.get("reason_code") or mapped,
+            }
+            if "pairing_status" in row and str(row.get("pairing_status") or ""):
+                status = (
+                    "computed"
+                    if str(row.get("pairing_status")).casefold()
+                    in {"paired", "ok", "eligible"}
+                    else "excluded"
+                )
+                row = attach_structured_reason(
+                    enriched_input,
+                    stage="C5",
+                    status=status,
+                    reason_code=mapped,
+                    reason=str(row.get("notes") or mapped.replace("_", " ")),
+                    specification_id=str(
+                        row.get("specification_id")
+                        or row.get("contrast_id")
+                        or path.stem
+                    ),
+                )
+            else:
+                row = with_structured_nc_fields(
+                    enriched_input,
+                    stage="C5",
+                    specification_id=str(
+                        row.get("specification_id") or path.stem
+                    ),
+                )
             payload = {}
-            for field in fieldnames:
+            for field in fields:
                 value = row.get(field, "")
                 if isinstance(value, float) and not math.isfinite(value):
                     payload[field] = ""
@@ -967,22 +1034,89 @@ def _write_csv(
             writer.writerow(payload)
 
 
+def build_aggregation_manifest(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    dataset_roles: Mapping[str, str] | None = None,
+) -> list[dict[str, object]]:
+    """Export inclusion decisions without pooling incompatible endpoints."""
+    roles = {
+        _as_str(key).casefold(): _as_str(value).casefold()
+        for key, value in (dataset_roles or {}).items()
+    }
+    manifest: list[dict[str, object]] = []
+    for row in rows:
+        endpoint = _as_str(row.get("endpoint_name")).casefold()
+        duration_s = _as_int(row.get("duration_s"))
+        family = (
+            "standard_zlpi"
+            if endpoint == "zlpi" and duration_s in {180, 240}
+            else ("mwpi" if endpoint == "mid_window_proximal_index" else "swpi")
+        )
+        included = _as_bool(row.get("contrast_eligible"))
+        dataset_id = _as_str(row.get("dataset_id")).casefold()
+        exclusion_reason = _as_str(row.get("contrast_exclusion_reason") or row.get("exclusion_reason"))
+        mapped = map_exclusion_to_reason_code(exclusion_reason)
+        manifest.append(
+            with_structured_nc_fields(
+                {
+                    "dataset_id": dataset_id,
+                    "dataset_role": roles.get(
+                        dataset_id, _as_str(row.get("dataset_role"))
+                    ),
+                    "specification_id": (
+                        f"paired_{endpoint}_d{duration_s}_"
+                        f"{_as_str(row.get('power_representation'), 'unknown')}"
+                    ),
+                    "endpoint_name": endpoint,
+                    "endpoint_family": family,
+                    "units": "participant_within_session_paired_delta",
+                    "included": included,
+                    "exclusion_reason": exclusion_reason,
+                    "status": "computed" if included else "excluded",
+                    "reason_code": mapped,
+                    "n_participants": row.get("n_participants", ""),
+                    "n_observations": row.get("n_observations", ""),
+                    "participant_id": row.get("participant_id", ""),
+                    "session_id": row.get("session_id", ""),
+                    "observation_id": row.get("observation_id", ""),
+                },
+                stage="C5",
+            )
+        )
+    return manifest
+
+
 def write_group_table_outputs(
     result: GroupTableResult,
     output_dir: str | Path,
+    *,
+    dataset_roles: Mapping[str, str] | None = None,
 ) -> dict[str, Path]:
     output_path = Path(output_dir).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
     subject_path = output_path / SUBJECT_LEVEL_FILENAME
     contrast_path = output_path / PAIRED_CONTRASTS_FILENAME
     qc_path = output_path / PAIRING_QC_FILENAME
+    manifest_path = output_path / AGGREGATION_MANIFEST_FILENAME
     _write_csv(subject_path, result.subject_level_rows, SUBJECT_LEVEL_FIELDS)
     _write_csv(contrast_path, result.paired_contrast_rows, PAIRED_CONTRAST_FIELDS)
     _write_csv(qc_path, result.pairing_qc_rows, PAIRING_QC_FIELDS)
+    manifest_rows = build_aggregation_manifest(
+        result.paired_contrast_rows, dataset_roles=dataset_roles
+    )
+    manifest_fields = list(manifest_rows[0]) if manifest_rows else [
+        "dataset_id", "dataset_role", "specification_id", "endpoint_name",
+        "endpoint_family", "units", "included", "exclusion_reason", "status",
+        "reason_code", "reason", "required_evidence", "observed_evidence",
+        "stage", "n_participants", "n_observations",
+    ]
+    _write_csv(manifest_path, manifest_rows, manifest_fields)
     return {
         "subject_level_metrics": subject_path,
         "paired_contrasts": contrast_path,
         "pairing_qc": qc_path,
+        "aggregation_manifest": manifest_path,
     }
 
 
@@ -1030,6 +1164,7 @@ def run_confirmatory_group_tables(
     *,
     peaks_dir: str | Path | None = None,
     dataset_ids: Sequence[str] | None = None,
+    dataset_roles: Mapping[str, str] | None = None,
 ) -> GroupTableResult:
     endpoint_rows, peak_rows = load_endpoint_and_peak_rows(
         endpoints_dir, peaks_dir=peaks_dir
@@ -1037,12 +1172,13 @@ def run_confirmatory_group_tables(
     result = build_group_tables(
         endpoint_rows, peak_rows, dataset_ids=dataset_ids
     )
-    write_group_table_outputs(result, output_dir)
+    write_group_table_outputs(result, output_dir, dataset_roles=dataset_roles)
     return result
 
 
 __all__ = [
     "PAIRING_QC_FILENAME",
+    "AGGREGATION_MANIFEST_FILENAME",
     "PAIRING_QC_FIELDS",
     "PAIRED_CONTRASTS_FILENAME",
     "PAIRED_CONTRAST_FIELDS",
@@ -1050,6 +1186,7 @@ __all__ = [
     "SUBJECT_LEVEL_FIELDS",
     "GroupTableResult",
     "build_group_tables",
+    "build_aggregation_manifest",
     "build_paired_contrasts",
     "build_subject_level_metrics",
     "combine_endpoint_and_peak_rows",

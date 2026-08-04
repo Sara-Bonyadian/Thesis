@@ -31,11 +31,21 @@ from .harmonize import BAND_ORDER, harmonize_observation
 from .nulls import compute_endpoint_index_from_series
 from .paired_delta_inference import DEFAULT_CLUSTER_BOOTSTRAP_DRAWS
 from .protocol_audit import condition_semantics_for
+from .reason_codes import (
+    ARTIFACT_CONTROL_NOT_AVAILABLE,
+    INSUFFICIENT_COMMON_MONTAGE,
+    MISSING_SENSOR_LOCATIONS,
+    NO_CHANNEL_LEVEL_ENDPOINT_VALUES,
+    STRUCTURED_NC_FIELDS,
+    TOPOGRAPHY_NOT_SUPPORTED,
+    UNSUPPORTED_CONTROL_FOR_MODALITY,
+    with_structured_nc_fields,
+)
 
 PANEL_F_STEM = "figure3_panel_f_topography_gamma"
 PANEL_F_TITLE = "F. Topography and gamma specificity"
 PANEL_F_FIGURE_TITLE = "Figure 3F | Topography and gamma specificity"
-PANEL_F_SUBTITLE = "D240 absolute_log10 ZLPI · HIIT sensitivity dataset"
+PANEL_F_SUBTITLE = "D240 absolute_log10 ZLPI · capability-qualified dataset analysis"
 PANEL_F_SECOND_LINE_TEMPLATE = (
     "Alpha common montage: n={n_alpha} · Gamma paired observations: n={n_gamma}"
 )
@@ -60,8 +70,9 @@ MAP_ORDER = (
     MAP_GAMMA_AFTER,
 )
 MAP_TITLES = {
-    MAP_REST_ALPHA: "F1. Rest alpha",
-    MAP_TASK_ATTENUATION: "F2. Task − Rest alpha",
+    # Map ids retain rest/task tokens for export compatibility; titles are general.
+    MAP_REST_ALPHA: "F1. Low-demand alpha",
+    MAP_TASK_ATTENUATION: "F2. High − low demand alpha",
     MAP_GAMMA_BEFORE: "F3. Gamma before exclusion",
     MAP_GAMMA_AFTER: "F4. Gamma after ECG-prone exclusion",
 }
@@ -90,26 +101,34 @@ UNAVAILABLE_CONTROLS = (
         "control": "ICA muscle-component rejection",
         "status": "not_available",
         "reason": "Confirmatory preprocessing is non-ICA; no ICA muscle pipeline",
+        "reason_code": ARTIFACT_CONTROL_NOT_AVAILABLE,
     },
     {
         "control": "EMG residualization",
         "status": "not_available",
         "reason": "No retained EMG / muscle-artifact summary",
+        "reason_code": ARTIFACT_CONTROL_NOT_AVAILABLE,
     },
     {
         "control": "Motion",
         "status": "not_available",
         "reason": "No retained motion / accelerometer summary",
+        "reason_code": ARTIFACT_CONTROL_NOT_AVAILABLE,
     },
     {
         "control": "EOG",
         "status": "not_available",
         "reason": "No retained ocular-artifact summary",
+        "reason_code": ARTIFACT_CONTROL_NOT_AVAILABLE,
     },
     {
         "control": "Cardiac-template subtraction",
         "status": "not_computable",
-        "reason": "Not applied at channel-level topography; HIIT is PPG-only for ECG templates",
+        "reason": (
+            "Not applied at channel-level topography; ECG templates require ECG "
+            "modality (unavailable when the dataset is PPG-only)"
+        ),
+        "reason_code": UNSUPPORTED_CONTROL_FOR_MODALITY,
     },
 )
 
@@ -164,11 +183,38 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, object]], fieldnames: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fields = list(dict.fromkeys([*fieldnames, *STRUCTURED_NC_FIELDS]))
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(fieldnames), extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow({k: row.get(k, "") for k in fieldnames})
+            raw_reason = _as_str(
+                row.get("reason_code")
+                or row.get("not_computable_reason")
+                or row.get("reason")
+            )
+            if raw_reason in {"missing_rest_or_task_channel_zlpi", NO_CHANNEL_LEVEL_ENDPOINT_VALUES}:
+                code = NO_CHANNEL_LEVEL_ENDPOINT_VALUES
+            elif "montage" in raw_reason.casefold() and (
+                "empty" in raw_reason.casefold() or "insufficient" in raw_reason.casefold()
+            ):
+                code = INSUFFICIENT_COMMON_MONTAGE
+            elif "sensor" in raw_reason.casefold() and "loc" in raw_reason.casefold():
+                code = MISSING_SENSOR_LOCATIONS
+            elif "topograph" in raw_reason.casefold():
+                code = TOPOGRAPHY_NOT_SUPPORTED
+            else:
+                code = _as_str(row.get("reason_code")) or raw_reason
+            enriched = with_structured_nc_fields(
+                {
+                    **dict(row),
+                    "reason_code": code,
+                    "reason": _as_str(row.get("reason") or row.get("not_computable_reason")),
+                },
+                stage="C7",
+                specification_id=str(row.get("specification_id") or path.stem),
+            )
+            writer.writerow({k: enriched.get(k, "") for k in fields})
 
 
 def load_ecg_prone_channels(yaml_path: Path = ECG_PRONE_YAML) -> tuple[str, tuple[str, ...]]:
@@ -458,13 +504,32 @@ def compute_observation_channel_zlpi(
 
 
 def _infer_state(condition: str) -> str:
+    """Map condition label to normalized state role (legacy rest/tetris accepted)."""
     text = condition.casefold()
     state_role, _time_role, _session = condition_semantics_for("unknown", text)
     if state_role == "state_high":
-        return "tetris"
+        return "high_demand"
     if state_role == "state_low":
-        return "rest"
+        return "low_demand"
+    if text in {"tetris", "task", "high_demand", "cognitive_effort"}:
+        return "high_demand"
+    if text in {"rest", "low_demand", "passive"}:
+        return "low_demand"
     return ""
+
+
+def _is_low_demand_state(state: str) -> bool:
+    return _as_str(state).casefold() in {"low_demand", "rest", "state_low", "passive"}
+
+
+def _is_high_demand_state(state: str) -> bool:
+    return _as_str(state).casefold() in {
+        "high_demand",
+        "tetris",
+        "task",
+        "state_high",
+        "cognitive_effort",
+    }
 
 
 def _select_paired_alpha_rows(paired_rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
@@ -491,7 +556,7 @@ def build_or_load_channel_zlpi_table(
     cache_path: Path | None = None,
     force_recompute: bool = False,
 ) -> list[dict[str, object]]:
-    """Build observation×channel ZLPI for all Rest/Tetris observations in paired set."""
+    """Build observation×channel ZLPI for all low-/high-demand observations in paired set."""
     stages = resolve_stage_roots(confirmatory_root)
     c1a, c1b = stages["c1a"], stages["c1b"]
     if cache_path is None:
@@ -520,9 +585,11 @@ def build_or_load_channel_zlpi_table(
                 "participant_id": pid,
                 "session_id": sid,
                 "condition": _as_str(row.get("low_demand_condition")),
-                "state": "rest",
+                "state": "low_demand",
+                # Deprecated aliases for existing exports / caches.
+                "state_legacy": "rest",
                 "subject_id": f"{pid}_{sid}" if sid else pid,
-                "task": "rest",
+                "task": "low_demand",
             }
         if effort:
             obs_meta[effort] = {
@@ -530,9 +597,10 @@ def build_or_load_channel_zlpi_table(
                 "participant_id": pid,
                 "session_id": sid,
                 "condition": _as_str(row.get("cognitive_effort_condition")),
-                "state": "tetris",
+                "state": "high_demand",
+                "state_legacy": "tetris",
                 "subject_id": f"{pid}_{sid}" if sid else pid,
-                "task": "tetris",
+                "task": "high_demand",
             }
 
     all_rows: list[dict[str, object]] = []
@@ -744,7 +812,7 @@ def _paired_task_minus_rest_alpha(
                         "observation_id": f"{low}__{effort}",
                         "low_observation_id": low,
                         "effort_observation_id": effort,
-                        "state": "task_minus_rest",
+                        "state": "task_minus_rest",  # legacy token; high − low demand
                         "band": PANEL_F_ALPHA_BAND,
                         "channel": ch,
                         "control_status": "before_controls",
@@ -752,6 +820,7 @@ def _paired_task_minus_rest_alpha(
                         "zpli_value": float("nan"),
                         "computable": False,
                         "not_computable_reason": "missing_rest_or_task_channel_zlpi",
+                        "reason_code": NO_CHANNEL_LEVEL_ENDPOINT_VALUES,
                         "duration_s": PANEL_F_DURATION_S,
                         "endpoint_name": PANEL_F_ENDPOINT,
                         "endpoint_units": "Fisher_z_delta_ZLPI",
@@ -772,7 +841,7 @@ def _paired_task_minus_rest_alpha(
                     "observation_id": f"{low}__{effort}",
                     "low_observation_id": low,
                     "effort_observation_id": effort,
-                    "state": "task_minus_rest",
+                    "state": "task_minus_rest",  # legacy token; high − low demand
                     "band": PANEL_F_ALPHA_BAND,
                     "channel": ch,
                     "control_status": "before_controls",
@@ -903,7 +972,7 @@ def compute_panel_f_topography(
     rest_alpha_obs = [
         r for r in before_rows
         if _as_str(r.get("band")).casefold() == PANEL_F_ALPHA_BAND
-        and _as_str(r.get("state")).casefold() == "rest"
+        and _is_low_demand_state(_as_str(r.get("state")))
         and _as_bool(r.get("computable"))
         and math.isfinite(_as_float(r.get("channel_x")))
     ]
@@ -914,13 +983,13 @@ def compute_panel_f_topography(
     gamma_full_obs = [
         r for r in before_rows
         if _as_str(r.get("band")).casefold() == PANEL_F_GAMMA_BAND
-        and _as_str(r.get("state")).casefold() == "rest"
+        and _is_low_demand_state(_as_str(r.get("state")))
         and _as_bool(r.get("computable"))
         and math.isfinite(_as_float(r.get("channel_x")))
     ]
     gamma_restricted_obs = [
         r for r in after_rows
-        if _as_str(r.get("state")).casefold() == "rest"
+        if _is_low_demand_state(_as_str(r.get("state")))
         and _as_bool(r.get("computable"))
         and math.isfinite(_as_float(r.get("channel_x")))
     ]
@@ -1284,7 +1353,10 @@ def compute_panel_f_topography(
             "power_representation": PANEL_F_REPRESENTATION,
             "alpha_band": PANEL_F_ALPHA_BAND,
             "gamma_band": PANEL_F_GAMMA_BAND,
-            "task_attenuation_definition": "ZLPI_task - ZLPI_rest (negative = attenuation)",
+            "task_attenuation_definition": (
+                "ZLPI_high - ZLPI_low (negative = attenuation); "
+                "legacy alias ZLPI_task - ZLPI_rest"
+            ),
         },
         "gamma_maps": {
             "F3": "full usable pre-exclusion montage; ECG-prone sensors marked",
@@ -1412,8 +1484,9 @@ def panel_f_caption(result: PanelFResult) -> str:
         "",
         "Gamma sensitivity to ECG-prone channel exclusion.",
         "",
-        "F, Topography and gamma specificity. Rest alpha ZLPI (F1) and task-minus-rest "
-        "alpha ZLPI (F2) use the retained common montage. Low-gamma maps show restricted-"
+        "F, Topography and gamma specificity. Low-demand alpha ZLPI (F1) and "
+        "high-minus-low-demand alpha ZLPI (F2) use the retained common montage. "
+        "Low-gamma maps show restricted-"
         "montage sensitivity to "
         f"{ECG_PRONE_SET_ID} exclusion: F3 is the full usable pre-exclusion montage "
         "(ECG-prone sensors marked); F4 is the restricted montage after ECG-prone channel "
@@ -1456,8 +1529,10 @@ def verify_panel_f_integrity(result: PanelFResult) -> list[str]:
         for r in result.montage_rows
         if _as_bool(r.get("in_gamma_full_montage"))
     }
-    if not retained:
-        failures.append("retained / common montage is empty")
+    # An empty montage is an explicit unsupported-map outcome. The renderer
+    # displays labeled no-channel slots; it is not a scientific integrity
+    # failure and must not abort all Figure 3 exports.
+    empty_montage_nc = not retained
 
     by_map: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in result.summary_rows:
@@ -1508,6 +1583,13 @@ def verify_panel_f_integrity(result: PanelFResult) -> list[str]:
                     f"noncomputable assigned numerical zero: {row.get('panel_map')} {row.get('channel')}"
                 )
 
+    if empty_montage_nc:
+        for row in result.summary_rows:
+            if math.isfinite(_as_float(row.get("estimate"))):
+                failures.append(
+                    "empty montage has finite map estimate; unsupported maps must be NC"
+                )
+
     # Deterministic identity must not be bootstrapped.
     for row in result.gamma_comparison_rows:
         metric = _as_str(row.get("metric"))
@@ -1547,9 +1629,12 @@ def verify_panel_f_integrity(result: PanelFResult) -> list[str]:
             if not math.isfinite(_as_float(r.get("estimate"))):
                 failures.append(f"{map_id}/{r.get('channel')}: non-finite summary estimate")
 
-    if "ZLPI_task - ZLPI_rest" not in str(
-        result.metadata.get("locked_estimand", {}).get("task_attenuation_definition", "")
-    ):
+    atten_def = str(
+        (result.metadata.get("locked_estimand") or {}).get("task_attenuation_definition", "")
+        if isinstance(result.metadata.get("locked_estimand"), dict)
+        else result.metadata.get("task_attenuation_definition", "")
+    )
+    if "ZLPI_high - ZLPI_low" not in atten_def and "ZLPI_task - ZLPI_rest" not in atten_def:
         failures.append("task attenuation definition missing or reversed")
 
     framing = _as_str(result.metadata.get("analysis_framing"))
@@ -1683,7 +1768,7 @@ def _plot_topomap(
         vals.append(float(v))
     if not keep:
         ax.set_axis_off()
-        ax.set_title(title + "\n(no channels)", fontsize=11, fontweight="semibold", pad=10)
+        ax.set_title(title + "\n(no channels)", fontsize=11, fontweight="bold", pad=10)
         return None, None, [], []
 
     import mne
@@ -1706,7 +1791,7 @@ def _plot_topomap(
         border="mean",
         res=64,
     )
-    ax.set_title(title, fontsize=11, fontweight="semibold", pad=10)
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
     return im, info, keep, vals
 
 
@@ -1882,22 +1967,31 @@ def render_panel_f_figure(
     gamma_cbar_ax = fig.add_axes([0.53, 0.14, 0.40, 0.025])
     alpha_im = images[0]
     gamma_im = images[2]
-    if alpha_im is None or gamma_im is None:
-        raise ValueError("Panel F topomap images missing; cannot build color bars")
-    alpha_cbar = fig.colorbar(alpha_im, cax=alpha_cbar_ax, orientation="horizontal")
-    gamma_cbar = fig.colorbar(gamma_im, cax=gamma_cbar_ax, orientation="horizontal")
-    alpha_cbar.set_label(PANEL_F_CBAR_ALPHA, fontsize=FS_TICK - 1)
-    gamma_cbar.set_label(PANEL_F_CBAR_GAMMA, fontsize=FS_TICK - 1)
-    _format_cbar_ticks(alpha_cbar, alpha_vmax)
-    _format_cbar_ticks(gamma_cbar, gamma_vmax)
-    # Gamma color-bar ticks must match F3/F4 shared limits exactly.
-    if list(gamma_cbar.get_ticks()) != list(alpha_cbar.get_ticks()):
-        pass  # scales differ by design; gamma ticks checked below
-    gamma_ticks = list(gamma_cbar.get_ticks())
-    if len(gamma_ticks) != 3 or not np.isclose(gamma_ticks[0], -gamma_vmax) or not np.isclose(
-        gamma_ticks[2], gamma_vmax
-    ):
-        raise ValueError("gamma color-bar ticks do not match shared gamma vmax")
+    if alpha_im is not None:
+        alpha_cbar = fig.colorbar(alpha_im, cax=alpha_cbar_ax, orientation="horizontal")
+        alpha_cbar.set_label(PANEL_F_CBAR_ALPHA, fontsize=FS_TICK - 1)
+        _format_cbar_ticks(alpha_cbar, alpha_vmax)
+    else:
+        alpha_cbar_ax.set_axis_off()
+        alpha_cbar_ax.text(
+            0.5, 0.5, "NC: no common alpha montage", ha="center", va="center",
+            fontsize=FS_TICK - 2,
+        )
+    if gamma_im is not None:
+        gamma_cbar = fig.colorbar(gamma_im, cax=gamma_cbar_ax, orientation="horizontal")
+        gamma_cbar.set_label(PANEL_F_CBAR_GAMMA, fontsize=FS_TICK - 1)
+        _format_cbar_ticks(gamma_cbar, gamma_vmax)
+        gamma_ticks = list(gamma_cbar.get_ticks())
+        if len(gamma_ticks) != 3 or not np.isclose(
+            gamma_ticks[0], -gamma_vmax
+        ) or not np.isclose(gamma_ticks[2], gamma_vmax):
+            raise ValueError("gamma color-bar ticks do not match shared gamma vmax")
+    else:
+        gamma_cbar_ax.set_axis_off()
+        gamma_cbar_ax.text(
+            0.5, 0.5, "NC: no common gamma montage", ha="center", va="center",
+            fontsize=FS_TICK - 2,
+        )
 
     # Compact ECG-prone legend centered under F3–F4.
     legend_handles = [

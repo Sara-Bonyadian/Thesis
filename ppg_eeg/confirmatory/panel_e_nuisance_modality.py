@@ -1,7 +1,7 @@
 """Figure 3 Panel E: nuisance and modality robustness (standalone sheet).
 
-Primary analysis uses within-pair Tetris−Rest nuisance *changes* so the OLS
-intercept is the Rest–Tetris ΔZLPI at zero nuisance change. The legacy
+Primary analysis uses within-pair high-demand − low-demand nuisance *changes*
+so the OLS intercept is the paired ΔZLPI at zero nuisance change. The legacy
 pair-average + centered-covariate construction is retained only as an internal
 audit (algebraically forces intercept = unadjusted mean).
 """
@@ -29,6 +29,7 @@ from matplotlib.gridspec import GridSpec
 
 from .duration_contracts import ENDPOINT_ZLPI, EXPECTED_PRIMARY_DURATION_S
 from .paired_delta_inference import DEFAULT_CLUSTER_BOOTSTRAP_DRAWS
+from .reason_codes import STRUCTURED_NC_FIELDS, with_structured_nc_fields
 
 PANEL_E_BAND = "alpha"
 PANEL_E_DURATION_S = int(EXPECTED_PRIMARY_DURATION_S)
@@ -37,8 +38,8 @@ PANEL_E_REPRESENTATION = "absolute_log10"
 PANEL_E_STEM = "figure3_panel_e_nuisance_modality"
 PANEL_E_FIGURE_TITLE = "Figure 3E | Nuisance and modality robustness"
 PANEL_E_SUBTITLE = (
-    "D240 alpha ZLPI Rest–Tetris contrast; participant-clustered 95% CIs; "
-    "HIIT sensitivity dataset"
+    "D240 alpha ZLPI low-demand versus high-demand contrast; "
+    "participant-clustered 95% CIs"
 )
 
 BOOTSTRAP_DRAWS = int(DEFAULT_CLUSTER_BOOTSTRAP_DRAWS)
@@ -132,7 +133,7 @@ UNAVAILABLE_TABLE: tuple[dict[str, str], ...] = (
     {
         "planned_adjustment": "Eye state",
         "status": "Not identifiable",
-        "reason": "Fixed by Rest versus Tetris condition",
+        "reason": "Fixed by low-demand versus high-demand protocol condition",
     },
     {
         "planned_adjustment": "EMG",
@@ -142,7 +143,7 @@ UNAVAILABLE_TABLE: tuple[dict[str, str], ...] = (
     {
         "planned_adjustment": "ECG/PPG modality",
         "status": "Not identifiable",
-        "reason": "All HIIT observations use PPG",
+        "reason": "Cardiac modality is constant within this dataset (PPG)",
     },
 )
 
@@ -153,7 +154,7 @@ BROADBAND_DEFINITION = {
         "channels": "confirmatory multitaper channel set (whole-scalp usable montage)",
         "transform": (
             "per-band absolute_log10_power, then nanmean across theta/beta/low_gamma "
-            "at each 1 Hz sample, then mean over D240; Tetris−Rest difference"
+            "at each 1 Hz sample, then mean over D240; high-demand − low-demand difference"
         ),
         "includes_alpha": False,
         "role": "preferred_manuscript_nuisance",
@@ -173,7 +174,7 @@ BROADBAND_DEFINITION = {
         "channels": "confirmatory multitaper channel set (whole-scalp usable montage)",
         "transform": (
             "per-band absolute_log10_power, then nanmean across bands at each 1 Hz "
-            "sample, then mean over D240; Tetris−Rest difference"
+            "sample, then mean over D240; high-demand − low-demand difference"
         ),
         "includes_alpha": True,
         "role": "sensitivity_only_potentially_circular",
@@ -238,12 +239,18 @@ def _read_csv(path: Path | None) -> list[dict[str, object]]:
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, object]], fields: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    export_fields = list(dict.fromkeys([*fields, *STRUCTURED_NC_FIELDS]))
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(fields))
+        writer = csv.DictWriter(handle, fieldnames=export_fields)
         writer.writeheader()
         for row in rows:
+            row = with_structured_nc_fields(
+                row,
+                stage="C7",
+                specification_id=str(row.get("specification_id") or path.stem),
+            )
             payload: dict[str, object] = {}
-            for field in fields:
+            for field in export_fields:
                 value = row.get(field, "")
                 if isinstance(value, float) and not math.isfinite(value):
                     payload[field] = ""
@@ -355,7 +362,7 @@ def build_panel_e_contrast_rows(
     peak_qc_rows: Sequence[Mapping[str, object]] = (),
     protocol_rows: Sequence[Mapping[str, object]] = (),
 ) -> list[dict[str, object]]:
-    """Build paired analysis rows with within-pair Tetris−Rest nuisance changes."""
+    """Build paired analysis rows with within-pair high−low demand nuisance changes."""
     del protocol_rows  # retained for API compatibility; eye-state handled as non-identifiable
     features = _observation_feature_summaries(aligned_rows)
     modality = _modality_lookup(data_audit_rows, peak_qc_rows)
@@ -430,21 +437,29 @@ def build_panel_e_contrast_rows(
                 "power_representation": PANEL_E_REPRESENTATION,
                 "delta_endpoint_index": delta,
                 # Within-pair changes (primary predictors).
-                "rest_mean_hr": rest_hr,
-                "tetris_mean_hr": tet_hr,
+                # Canonical low-/high-demand names.
+                "low_demand_mean_hr": rest_hr,
+                "high_demand_mean_hr": tet_hr,
                 "delta_mean_hr": (tet_hr - rest_hr)
                 if math.isfinite(tet_hr) and math.isfinite(rest_hr)
                 else float("nan"),
-                "rest_broadband_power": rest_bb,
-                "tetris_broadband_power": tet_bb,
+                "low_demand_broadband_power": rest_bb,
+                "high_demand_broadband_power": tet_bb,
                 "delta_broadband_power": (tet_bb - rest_bb)
                 if math.isfinite(tet_bb) and math.isfinite(rest_bb)
                 else float("nan"),
-                "rest_broadband_power_ex_alpha": rest_bb_ex,
-                "tetris_broadband_power_ex_alpha": tet_bb_ex,
+                "low_demand_broadband_power_ex_alpha": rest_bb_ex,
+                "high_demand_broadband_power_ex_alpha": tet_bb_ex,
                 "delta_broadband_power_ex_alpha": (tet_bb_ex - rest_bb_ex)
                 if math.isfinite(tet_bb_ex) and math.isfinite(rest_bb_ex)
                 else float("nan"),
+                # Deprecated aliases (HIIT Rest/Tetris labels); keep for existing exports.
+                "rest_mean_hr": rest_hr,  # deprecated: use low_demand_mean_hr
+                "tetris_mean_hr": tet_hr,  # deprecated: use high_demand_mean_hr
+                "rest_broadband_power": rest_bb,  # deprecated
+                "tetris_broadband_power": tet_bb,  # deprecated
+                "rest_broadband_power_ex_alpha": rest_bb_ex,  # deprecated
+                "tetris_broadband_power_ex_alpha": tet_bb_ex,  # deprecated
                 # Legacy pair averages (audit only).
                 "legacy_pairavg_mean_hr": legacy_hr,
                 "legacy_pairavg_broadband_power": legacy_bb,
@@ -460,7 +475,7 @@ def build_observation_level_rows(
     contrast_rows: Sequence[Mapping[str, object]],
     endpoint_rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """Expand each contrast into Rest/Tetris observation rows for sensitivity models."""
+    """Expand each contrast into low-/high-demand observation rows for sensitivity models."""
     ep_lookup: dict[str, float] = {}
     for row in endpoint_rows:
         if _as_int_duration(row.get("duration_s")) != PANEL_E_DURATION_S:
@@ -1000,7 +1015,7 @@ def _spec_row(
         "plotted": status == STATUS_COMPUTED and analysis_family == "paired_delta" and spec_id in ESTIMABLE_SPEC_ORDER,
         "plot_order": plot_order,
         "predictors_centered": False,
-        "zero_nuisance_interpretation": "no Rest–Tetris nuisance change",
+        "zero_nuisance_interpretation": "no low-demand–high-demand nuisance change",
     }
 
 
@@ -1115,7 +1130,7 @@ def _audit_centered_identity(rows: Sequence[Mapping[str, object]]) -> list[dict[
             f"normal equations give b0 = mean(y). |b0-mean(y)|={abs_diff:.3e}. "
             f"Covariate means before centering={means}; design col means after centering="
             f"{[float(v) for v in col_means]}. "
-            "Corrected model uses uncentered Tetris−Rest changes; intercept is E[ΔZLPI|ΔN=0]."
+            "Corrected model uses uncentered high−low demand changes; intercept is E[ΔZLPI|ΔN=0]."
         )
         audit.append(
             {
@@ -1340,7 +1355,7 @@ def compute_panel_e_nuisance_modality(
             "available": False,
             "n_finite": 0,
             "n_total": len(contrast_rows),
-            "definition": "not identifiable: determined by Rest/Tetris",
+            "definition": "not identifiable: determined by low-/high-demand protocol condition",
         },
         {
             "variable": "modality_ecg_ppg",
@@ -1403,7 +1418,7 @@ def compute_panel_e_nuisance_modality(
             "endpoint_name": PANEL_E_ENDPOINT,
             "band": PANEL_E_BAND,
             "power_representation": PANEL_E_REPRESENTATION,
-            "outcome": "paired Rest–Tetris delta_endpoint_index (Tetris − Rest)",
+            "outcome": "paired low-/high-demand delta_endpoint_index (high − low)",
             "coefficient_definition": (
                 "OLS intercept of ΔZLPI ~ 1 + ΔNuisance(s), evaluated at zero "
                 "within-pair nuisance change (predictors not mean-centered)"
@@ -1435,10 +1450,11 @@ def compute_panel_e_nuisance_modality(
             "Original zero Δβ values were a consequence of centered-covariate OLS algebra "
             "(intercept identically equals unadjusted mean ΔZLPI), not an empirical stability finding."
         ),
-        "hiit_robustness_scope": (
-            "HIIT alone cannot support full nuisance/modality robustness claims: most planned "
-            "nuisance variables are unavailable and ECG/PPG modality has no variation. "
-            "Broader multi-dataset execution is required to test ECG-versus-PPG modality."
+        "hiit_robustness_scope": (  # deprecated key name; value is dataset-general
+            "A single-dataset run cannot support full nuisance/modality robustness claims "
+            "when most planned nuisance variables are unavailable and ECG/PPG modality has "
+            "no within-dataset variation. Multi-dataset execution is required to test "
+            "ECG-versus-PPG modality."
         ),
         "common_sample_note": (
             f"Common sample: {len(common_rows)} paired contrasts from "
@@ -1456,15 +1472,22 @@ def compute_panel_e_nuisance_modality(
         "low_observation_id",
         "effort_observation_id",
         "delta_endpoint_index",
+        "low_demand_mean_hr",
+        "high_demand_mean_hr",
+        "delta_mean_hr",
+        "low_demand_broadband_power",
+        "high_demand_broadband_power",
+        "delta_broadband_power",
+        "low_demand_broadband_power_ex_alpha",
+        "high_demand_broadband_power_ex_alpha",
+        "delta_broadband_power_ex_alpha",
+        # Deprecated aliases for existing exports.
         "rest_mean_hr",
         "tetris_mean_hr",
-        "delta_mean_hr",
         "rest_broadband_power",
         "tetris_broadband_power",
-        "delta_broadband_power",
         "rest_broadband_power_ex_alpha",
         "tetris_broadband_power_ex_alpha",
-        "delta_broadband_power_ex_alpha",
         "legacy_pairavg_mean_hr",
         "legacy_pairavg_broadband_power",
         "cardiac_signal_type",
@@ -1526,8 +1549,8 @@ def panel_e_caption(result: PanelEResult) -> str:
         "",
         f"Estimates use {n_pairs} common-sample paired contrasts from {n_part} participants "
         f"(PPG {meta.get('n_ppg')}, ECG {meta.get('n_ecg')}). "
-        "Nuisance predictors are uncentered Tetris−Rest changes; the plotted coefficient "
-        "is the OLS intercept (expected ΔZLPI at zero nuisance change) with "
+        "Nuisance predictors are uncentered high-demand − low-demand changes; the plotted "
+        "coefficient is the OLS intercept (expected ΔZLPI at zero nuisance change) with "
         "participant-clustered bootstrap 95% CIs. Δβ uncertainty uses paired bootstrap "
         "coefficient differences. "
         "Mean HR adjustment produces negligible coefficient change. "
@@ -1536,8 +1559,9 @@ def panel_e_caption(result: PanelEResult) -> str:
         "it partially overlaps the alpha series entering ZLPI and is not an independent "
         "nuisance control. "
         "Unavailable variables were not proxied or imputed. "
-        "Eye state and ECG/PPG modality are non-identifiable in this HIIT-only dataset; "
-        "broader datasets are required to assess ECG-versus-PPG robustness. "
+        "Eye state and ECG/PPG modality are non-identifiable when constant within the "
+        "dataset; broader multi-modality datasets are required to assess ECG-versus-PPG "
+        "robustness. "
         "Combinations of missing channels (for example EOG with eye state, or modality "
         "with other physiology) remain untestable for the same reasons.",
     ]
@@ -1827,7 +1851,9 @@ def render_panel_e_figure(
     ax_delta.set_ylim(-0.55, n - 0.45)
     ax.set_title("Adjusted estimate, 95% CI", fontsize=FS_TICK - 1, pad=8, loc="left")
     ax_delta.set_title("Change from baseline, 95% CI", fontsize=FS_TICK - 1, pad=8, loc="left")
-    ax.set_xlabel("Adjusted Rest–Tetris ΔZLPI\nAlpha, Fisher z", fontsize=FS_AXIS - 3)
+    ax.set_xlabel(
+        "Adjusted low–high demand ΔZLPI\nAlpha, Fisher z", fontsize=FS_AXIS - 3
+    )
     ax_delta.set_xlabel("Δβ from baseline\nPaired-bootstrap 95% CI", fontsize=FS_AXIS - 3)
     for a in (ax, ax_delta):
         a.grid(False)

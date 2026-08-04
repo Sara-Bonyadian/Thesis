@@ -15,7 +15,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-from ..datasets import CanonicalObservation, build_observations
+from ..datasets import (
+    CanonicalObservation,
+    canonical_observation_identity,
+    build_observations,
+    validate_observation_identities,
+)
 from .config import (
     EXPECTED_DURATIONS_S,
     ConfirmatoryDatasetConfig,
@@ -40,6 +45,8 @@ from .reason_codes import (
     MISSING_PAIRED_OBSERVATION,
     MISSING_REQUIRED_MODALITY,
     STANDARD_ZLPI_NOT_APPLICABLE,
+    STRUCTURED_NC_FIELDS,
+    map_exclusion_to_reason_code,
 )
 
 PROTOCOL_AUDIT_FILENAME = "protocol_audit.csv"
@@ -142,10 +149,27 @@ class EligibilityDecision:
     standard_zlpi_reason_code: str = ""
 
     def to_row(self) -> dict[str, object]:
+        required = (
+            f"duration_s>={self.duration_s}; "
+            f"eeg+cardiac present; pairing resolved when required"
+        )
+        observed = (
+            f"raw_overlap_s={self.raw_overlap_s}; "
+            f"clean_beat_span_s={self.clean_beat_span_s}; "
+            f"eeg_exists={self.eeg_exists}; cardiac_exists={self.cardiac_exists}; "
+            f"pairing_resolved={self.pairing_resolved}; "
+            f"paired_state_available={self.paired_state_available}"
+        )
+        reason_code = map_exclusion_to_reason_code(
+            self.endpoint_reason_code or self.exclusion_code
+        )
+        # Preserve protocol eligibility status vocabulary (eligible/ineligible/
+        # not_computable/not_supplied). Structured reason fields ride alongside.
         return {
             "dataset_id": self.dataset_id,
             "observation_id": self.observation_id,
             "participant_id": self.participant_id,
+            "session_id": "",
             "condition": self.condition,
             "contrast_id": self.contrast_id,
             "duration_s": self.duration_s,
@@ -174,6 +198,15 @@ class EligibilityDecision:
             "endpoint_reason_code": self.endpoint_reason_code,
             "standard_zlpi_computable": self.standard_zlpi_computable,
             "standard_zlpi_reason_code": self.standard_zlpi_reason_code,
+            "reason_code": reason_code if self.status != "eligible" or not self.endpoint_computable else "",
+            "reason": (
+                self.notes
+                or (reason_code.replace("_", " ") if reason_code else "")
+            ),
+            "required_evidence": required if self.status != "eligible" or not self.endpoint_computable else "",
+            "observed_evidence": observed if self.status != "eligible" or not self.endpoint_computable else "",
+            "stage": "C1",
+            "specification_id": f"{self.endpoint_name or 'endpoint'}_d{self.duration_s}",
         }
 
 
@@ -386,37 +419,79 @@ def condition_semantics_for(dataset_id: str, condition: str) -> tuple[str, str, 
     return state, time_role, session_role
 
 
-def _participant_id(observation: CanonicalObservation) -> str:
-    if observation.participant_id:
+def _protocol_participant_id(
+    observation: CanonicalObservation,
+    participant_id_from: str,
+) -> str:
+    """Resolve participant identity using a YAML-declared source strategy."""
+    source = participant_id_from.strip().casefold() or "auto"
+    if source in {"participant_id", "column"} and observation.participant_id:
         return observation.participant_id.casefold()
-    dataset_id = observation.dataset_id.casefold()
-    obs_id = observation.observation_id.casefold()
-    subject_id = observation.subject_id.casefold()
+    if source in {"subject_id", "subject"}:
+        return observation.subject_id.casefold()
+    if source in {"observation_id", "bids", "auto"}:
+        obs_id = observation.observation_id.casefold()
+        dataset_prefix = f"{observation.dataset_id.casefold()}-"
+        remainder = obs_id.removeprefix(dataset_prefix)
+        if "-ses-" in remainder:
+            return remainder.split("-ses-", 1)[0]
+        if "-task-" in remainder:
+            return remainder.split("-task-", 1)[0]
+        token = remainder.split("-", 1)[0]
+        if token:
+            return token
+    return (observation.participant_id or observation.subject_id).casefold()
 
-    if dataset_id in {"ds003838", "ds006848"}:
-        return subject_id
-    if dataset_id in {"ds003690", "ds003816", "ds004582", "ds004587"}:
-        prefix = f"{dataset_id}-"
-        remainder = obs_id[len(prefix) :] if obs_id.startswith(prefix) else obs_id
-        return remainder.split("-ses-", 1)[0]
-    if dataset_id == "hiit":
-        parts = obs_id.split("-")
-        return parts[1] if len(parts) >= 2 else subject_id.rsplit("_", 1)[0]
-    if dataset_id == "mindfulness":
-        match = re.match(r"mindfulness-(mbd-\d+)-", obs_id)
-        return match.group(1) if match else subject_id.split("_", 1)[0]
-    return subject_id
+
+def _protocol_session_id(
+    observation: CanonicalObservation,
+    session_id_from: str,
+) -> str:
+    """Resolve session identity using a YAML-declared source strategy."""
+    source = session_id_from.strip().casefold() or "auto"
+    if source in {"session_id", "column"} and observation.session_id:
+        return observation.session_id.casefold()
+    if source in {"session_label", "bids", "auto"} and observation.session_label:
+        return observation.session_label.casefold()
+    if source == "subject_suffix":
+        subject = observation.subject_id.casefold()
+        return subject.rsplit("_", 1)[-1] if "_" in subject else "single"
+    if source == "observation_id":
+        match = _SES_RE.search(observation.observation_id)
+        if match:
+            return match.group(1).casefold()
+    return "single"
+
+
+def _participant_id(observation: CanonicalObservation) -> str:
+    """Biological / protocol participant identity (not session-qualified subject).
+
+    Prefer an already-normalized ``participant_id``. Otherwise apply the generic
+    observation-id / BIDS parsing strategy before falling back to ``subject_id``.
+    Session-qualified subjects such as ``01_ph`` remain available via
+    ``subject_id`` for Panel-B analysis units.
+    """
+    if observation.participant_id:
+        return str(observation.participant_id).strip().casefold()
+    return _protocol_participant_id(observation, "auto")
 
 
 def _run_id(observation: CanonicalObservation) -> str:
-    match = _RUN_RE.search(observation.observation_id)
-    return match.group(1).casefold() if match else "single"
+    return canonical_observation_identity(observation).run_id
 
 
 def _session_id(observation: CanonicalObservation) -> str:
     if observation.session_id:
-        return observation.session_id.casefold()
-    return (observation.session_label or "single").strip().casefold()
+        return str(observation.session_id).strip().casefold()
+    if observation.session_label:
+        return str(observation.session_label).strip().casefold()
+    # Generic session-qualified subject suffix (e.g. ``01_ph`` → ``ph``).
+    subject = str(observation.subject_id or "").strip().casefold()
+    if "_" in subject:
+        suffix = subject.rsplit("_", 1)[-1]
+        if suffix and not suffix.isdigit():
+            return suffix
+    return canonical_observation_identity(observation).session_id
 
 
 def _dataset_contracts(
@@ -443,17 +518,28 @@ def _normalize_observation_with_contracts(
     *,
     contracts: DatasetContracts,
 ) -> CanonicalObservation:
-    participant = _participant_id(observation)
-    session = _session_id(observation)
+    participant = _protocol_participant_id(
+        observation, contracts.participant_id_from
+    )
+    session = _protocol_session_id(observation, contracts.session_id_from)
     semantic = contracts.semantic_for_condition(observation.condition_label.casefold())
     normalized_state = semantic.normalized_state if semantic else STATE_OTHER
     normalized_time = semantic.normalized_time if semantic else TIME_NA
     if semantic and semantic.session_alias:
         session = semantic.session_alias
-    return replace(
+    identity = canonical_observation_identity(
         observation,
         participant_id=participant,
         session_id=session,
+        condition_id=observation.condition_label,
+    )
+    return replace(
+        observation,
+        participant_id=identity.participant_id,
+        session_id=identity.session_id,
+        run_id=identity.run_id,
+        condition_id=identity.condition_id,
+        pairing_id=identity.pairing_id,
         normalized_state=normalized_state,
         normalized_time=normalized_time,
         cardiac_modality=contracts.capabilities.cardiac_modality,
@@ -465,10 +551,11 @@ def _pair_key(
     observation: CanonicalObservation,
     contrast: ContrastSpec,
 ) -> tuple[str, ...]:
+    identity = observation.identity
     values = {
-        "participant_id": _participant_id(observation),
-        "session_id": _session_id(observation),
-        "run_id": _run_id(observation),
+        "participant_id": identity.participant_id,
+        "session_id": identity.session_id,
+        "run_id": identity.run_id,
     }
     return tuple(values[field] for field in contrast.pair_within)
 
@@ -883,33 +970,37 @@ def write_duration_eligibility(
     output_path.mkdir(parents=True, exist_ok=True)
     decisions = evaluate_all_durations(metadata_rows)
 
+    sample_row = EligibilityDecision(
+        dataset_id="",
+        observation_id="",
+        participant_id="",
+        condition="",
+        contrast_id="",
+        duration_s=240,
+        status="not_supplied",
+        exclusion_code="data_not_supplied",
+        raw_overlap_s=None,
+        clean_beat_span_s=None,
+        source_data_supplied=False,
+        eeg_exists=None,
+        cardiac_exists=None,
+        requires_paired_state=False,
+        paired_state_available=None,
+        pairing_resolved=None,
+        protocol_match=None,
+        notes="",
+    ).to_row()
     eligibility_columns = list(
-        EligibilityDecision(
-            dataset_id="",
-            observation_id="",
-            participant_id="",
-            condition="",
-            contrast_id="",
-            duration_s=240,
-            status="not_supplied",
-            exclusion_code="data_not_supplied",
-            raw_overlap_s=None,
-            clean_beat_span_s=None,
-            source_data_supplied=False,
-            eeg_exists=None,
-            cardiac_exists=None,
-            requires_paired_state=False,
-            paired_state_available=None,
-            pairing_resolved=None,
-            protocol_match=None,
-            notes="",
-        ).to_row()
+        dict.fromkeys([*sample_row.keys(), *STRUCTURED_NC_FIELDS])
     )
     eligibility_path = output_path / ELIGIBILITY_BY_DURATION_FILENAME
     with eligibility_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=eligibility_columns)
         writer.writeheader()
-        writer.writerows(decision.to_row() for decision in decisions)
+        for decision in decisions:
+            writer.writerow(
+                {field: decision.to_row().get(field, "") for field in eligibility_columns}
+            )
 
     summary_columns = [
         "dataset_id",
@@ -974,10 +1065,12 @@ def observations_from_dataset_config(
     )
     spec = protocol_spec(config.dataset_id)
     contracts = _dataset_contracts(config, spec)
-    return [
+    normalized = [
         _normalize_observation_with_contracts(obs, contracts=contracts)
         for obs in observations
     ]
+    validate_observation_identities(normalized)
+    return normalized
 
 
 def eligibility_metadata_from_observations(

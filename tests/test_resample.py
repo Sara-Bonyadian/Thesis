@@ -124,8 +124,10 @@ class TestResample(unittest.TestCase):
             dataset_id="ds-test",
             subject_id="sub-001",
             task="rest",
+            condition="rest",
             observation_id="ds-test-sub-001-task-rest",
             eeg_file=Path("dummy.set"),
+            eeg_format="eeglab",
         )
         qc = build_alignment_qc(
             obs,
@@ -207,8 +209,10 @@ class TestResample(unittest.TestCase):
             dataset_id="ds-test",
             subject_id="sub-001",
             task="rest",
+            condition="rest",
             observation_id="ds-test-sub-001-task-rest",
             eeg_file=Path("dummy.set"),
+            eeg_format="eeglab",
         )
         qc = build_alignment_qc(
             obs,

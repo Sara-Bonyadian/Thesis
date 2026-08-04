@@ -2,6 +2,11 @@
 
 Presentation layer only. Does not alter ``enters_meta``, PRIMARY_META membership,
 or random-effects pooling.
+
+HIIT session-condition aggregation helpers below are retained for the accepted
+HIIT display regression. Shared manuscript captions/titles must not hard-code
+Rest/Tetris/PH/PS narrative; use general low-/high-demand and pre-/post-
+intervention language with optional dataset labels from YAML.
 """
 
 from __future__ import annotations
@@ -20,7 +25,8 @@ ROW_TYPE_SENSITIVITY_DISPLAY = "sensitivity_display"
 ROW_TYPE_POOLED = "pooled"
 
 HIIT_DATASET_ID = "hiit"
-# All Rest–Tetris ΔZLPI contrasts (PH/PS × PRE/POST) for combined forest display.
+# All low–high demand ΔZLPI contrasts (protocol session × pre/post) for combined
+# forest display. Contrast IDs are HIIT YAML tokens (retained adapter contract).
 HIIT_ALL_CONTRASTS = frozenset(
     {
         "ph_pre_rest__tetris",
@@ -166,7 +172,7 @@ def hiit_session_sensitivity_forest_rows(
     """One combined HIIT sensitivity forest row (display-only).
 
     Panel-B-aligned: each PH/PS session subject is one unit. Within a session,
-    average available Rest–Tetris ΔZLPI contrasts for that session, then
+    average available low–high demand ΔZLPI contrasts for that session, then
     Student-t mean/CI across session subjects (n≈40, not biological n≈20).
     """
     # session_unit -> {contrast_id: delta}
