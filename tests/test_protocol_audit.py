@@ -99,6 +99,7 @@ class TestProtocolMetadata(unittest.TestCase):
 
     def test_single_state_and_nonprespecified_datasets_have_no_contrast(self) -> None:
         self.assertEqual(PROTOCOL_SPECS["ds004582"].contrasts, ())
+        self.assertEqual(PROTOCOL_SPECS["ds004587"].contrasts, ())
         self.assertEqual(PROTOCOL_SPECS["ds003816"].contrasts, ())
 
 
@@ -392,6 +393,7 @@ class TestDurationEligibility(unittest.TestCase):
                 "unresolved_pairing",
                 "protocol_mismatch",
                 "data_not_supplied",
+                "excluded_by_manuscript_design",
             },
         )
 

@@ -22,12 +22,18 @@ from .duration_contracts import (
     contract_for_duration,
 )
 from .endpoints import fisher_z
+from .dataset_roles import (
+    ROLE_UNKNOWN,
+    has_prespecified_contrast,
+    resolve_dataset_role,
+    role_tag,
+)
 from .forest_display import (
     FOREST_EXPORT_FIELDS,
     build_alpha_forest_export,
     draw_alpha_meta_forest,
-    hiit_session_sensitivity_forest_rows,
     primary_meta_alpha_forest_rows,
+    sensitivity_forest_rows,
 )
 from .manifest import FigurePanelSource
 from .null_delta_inference import PRIMARY_NULL_TYPE
@@ -176,29 +182,20 @@ def bootstrap_mean_ci_by_lag(
 
 
 def _dataset_role(dataset_id: str, protocol_rows: Sequence[Mapping[str, object]]) -> str:
-    f = _fig()
-    key = f._as_str(dataset_id).casefold()
-    for row in protocol_rows:
-        if f._as_str(row.get("dataset_id")).casefold() != key:
-            continue
-        role = f._as_str(row.get("dataset_role")).casefold()
-        if role in {"primary", "sensitivity"}:
-            return role
-    return "other"
+    """Centralized role lookup: C0 rows first, then ``master.yaml``.
+
+    The config fallback matters when a run's C0 ``protocol_audit`` table is
+    missing or stale; without it a configured sensitivity dataset rendered as an
+    unknown role.
+    """
+    role = resolve_dataset_role(dataset_id, protocol_rows=protocol_rows)
+    return "other" if role == ROLE_UNKNOWN else role
 
 
 def _dataset_role_from_config(dataset_id: str) -> str:
     """Read the configured role when source rows do not carry it."""
-    try:
-        from .config import load_dataset_config, load_master_config
-
-        root = Path(__file__).resolve().parents[2] / "zero-lag-reanalysis-repo"
-        master = load_master_config(root / "master.yaml")
-        return load_dataset_config(
-            root / "datasets" / f"{dataset_id.casefold()}.yaml", master=master
-        ).role
-    except Exception:  # noqa: BLE001
-        return "other"
+    role = resolve_dataset_role(dataset_id)
+    return "other" if role == ROLE_UNKNOWN else role
 
 
 def _cardiac_modality(dataset_id: str, protocol_rows: Sequence[Mapping[str, object]]) -> str:
@@ -397,11 +394,11 @@ def alpha_replication_forest_rows(
     protocol_rows: Sequence[Mapping[str, object]],
     paired_rows: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
-    """PRIMARY_META alpha rows + display-only combined sensitivity + pooled.
+    """PRIMARY_META alpha rows + display-only per-sensitivity-dataset rows + pooled.
 
-    The sensitivity helper remains HIIT-configured for accepted display
-    regression (``hiit_session_sensitivity_forest_rows``). Sensitivity rows
-    never set ``enters_meta`` and are not used for pooling.
+    Sensitivity rows are built for every dataset whose centralized role is
+    ``sensitivity`` (not just HIIT). They never set ``enters_meta`` and are not
+    used for pooling.
     """
     studies, pooled = primary_meta_alpha_forest_rows(
         dataset_effects,
@@ -409,8 +406,52 @@ def alpha_replication_forest_rows(
         protocol_rows,
         cardiac_modality_fn=_cardiac_modality,
     )
-    sensitivity = hiit_session_sensitivity_forest_rows(paired_rows or [])
+    sensitivity = sensitivity_forest_rows(
+        paired_rows or [], protocol_rows=protocol_rows
+    )
     return studies, sensitivity, pooled
+
+
+def _forest_unavailable_message(
+    paired_rows: Sequence[Mapping[str, object]] | None,
+    protocol_rows: Sequence[Mapping[str, object]],
+) -> str:
+    """Explain an empty ΔZLPI forest by estimand availability, not by role.
+
+    A sensitivity role alone never empties this panel. When a dataset declares no
+    prespecified low-demand vs high-demand contrast there is no ΔZLPI estimand to
+    plot, and that genuine gap is what gets reported.
+    """
+    f = _fig()
+    datasets = sorted(
+        {
+            f._as_str(row.get("dataset_id")).casefold()
+            for row in (paired_rows or ())
+            if f._as_str(row.get("dataset_id"))
+        }
+        or {
+            f._as_str(row.get("dataset_id")).casefold()
+            for row in protocol_rows
+            if f._as_str(row.get("dataset_id"))
+        }
+    )
+    without_contrast = [ds for ds in datasets if not has_prespecified_contrast(ds)]
+    if datasets and len(without_contrast) == len(datasets):
+        names = ", ".join(f._dataset_display(ds) for ds in without_contrast)
+        return (
+            f"Not computable — {names} declares no prespecified low-demand vs "
+            "high-demand contrast, so no Δ ZLPI estimand exists for this panel."
+        )
+    if datasets and not any(
+        resolve_dataset_role(ds, protocol_rows=protocol_rows) == "primary"
+        for ds in datasets
+    ):
+        return (
+            "No eligible paired Δ ZLPI observations in this sensitivity run; "
+            "sensitivity rows are displayed when pairs are available and are "
+            "never pooled."
+        )
+    return "No PRIMARY_META alpha study effects in this run."
 
 
 def _panel_c_group_summaries(
@@ -971,7 +1012,7 @@ def render_figure1(
                 ylabels.append("")
             else:
                 role = _dataset_role(ds, protocol)
-                tag = "P" if role == "primary" else ("S" if role == "sensitivity" else "?")
+                tag = role_tag(role)
                 base = label_map.get(ds) or f._dataset_display(ds)
                 ylabels.append(f"{base} [{tag}]")
         ax_d.set_yticks(range(len(row_datasets)))
@@ -1055,6 +1096,13 @@ def render_figure1(
         sensitivity_studies=sensitivity_studies,
         pooled=pooled,
     )
+    # Title states which estimate class is on the axes: primary studies + pooled
+    # diamond, or sensitivity-only display rows.
+    panel_e_title = (
+        f.sensitivity_display_title("alpha Δ ZLPI")
+        if sensitivity_studies and not studies
+        else "Alpha replication (PRIMARY_META display)"
+    )
     drawn = draw_alpha_meta_forest(
         ax_e,
         primary_studies=studies,
@@ -1065,7 +1113,7 @@ def render_figure1(
         ref_vline_fn=f._ref_vline,
         style_axes_fn=f._style_axes,
         set_panel_title_fn=f._set_panel_title,
-        panel_title="Alpha replication (PRIMARY_META display)",
+        panel_title=panel_e_title,
         xlabel=f"Δ {_endpoint_label()} ({f.ZLPI_METRIC}; {f.CI_95_LABEL})",
         marker_size=f.MARKER_SIZE,
         line_width=f.LINE_WIDTH,
@@ -1076,11 +1124,11 @@ def render_figure1(
     if not drawn:
         f._mark_empty_panel(
             ax_e,
-            "No PRIMARY_META alpha study effects in this run.",
+            _forest_unavailable_message(paired, protocol),
             xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
             ylabel="Dataset",
         )
-        f._set_panel_title(ax_e, "Alpha replication (PRIMARY_META display)")
+        f._set_panel_title(ax_e, panel_e_title)
     f._add_panel_label(ax_e, "E")
     panel_e_csv = source_dir / "figure1_panel_e_alpha_replication_forest.csv"
     f.write_source_csv(

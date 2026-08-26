@@ -69,13 +69,15 @@ confirmatory:
     hr_mode: instantaneous
 
   dataset_roles:
+    # Path-routing roles. Scientific families live in dataset_roles.py
+    # (paired state-dependent / external generalization / duration / etc.).
     primary:
       - ds003838
       - ds006848
       - ds003690
-      - ds004587
     sensitivity:
       - ds004582
+      - ds004587
       - ds003816
       - hiit
       - mindfulness

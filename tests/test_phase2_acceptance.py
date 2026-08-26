@@ -27,7 +27,10 @@ from ppg_eeg.confirmatory.reason_codes import STRUCTURED_NC_FIELDS
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIRMATORY = ROOT / "ppg_eeg" / "confirmatory"
-DS004587 = Path("derivatives/confirmatory_temporal_coupling/primary/ds004587")
+DS004587 = Path("derivatives/confirmatory_temporal_coupling/sensitivity/ds004587")
+DS004587_LEGACY = Path("derivatives/confirmatory_temporal_coupling/primary/ds004587")
+DS004587_STALE_MARKER = DS004587_LEGACY / "STALE_INVALIDATED.txt"
+
 
 HIIT_DISPLAY_TOKENS = ("Rest", "Tetris", "PH/PS", "PRE/POST")
 SHARED_SCIENTIFIC = (
@@ -80,7 +83,7 @@ class TestPhase2CaptionMetadata(unittest.TestCase):
         title = sensitivity_display_title(
             "matched lag curves", dataset_id="ds004587"
         )
-        self.assertTrue(title.startswith("Sensitivity display"))
+        self.assertTrue(title.startswith("External generalization"))
         self.assertNotIn("Rest", title)
         self.assertNotIn("Tetris", title)
 
@@ -220,7 +223,7 @@ class TestPhase2FontWarnings(unittest.TestCase):
 
 @unittest.skipUnless(
     (DS004587 / "C4" / "C4_COMPLETE.json").is_file(),
-    "production ds004587 C4_COMPLETE.json absent",
+    "production ds004587 C4_COMPLETE.json absent under sensitivity/",
 )
 class TestPhase2Ds004587ProductionC4(unittest.TestCase):
     def test_c4_has_500_surrogates(self) -> None:
@@ -253,7 +256,7 @@ class TestPhase2Ds004587ProductionC4(unittest.TestCase):
 
 @unittest.skipUnless(
     (DS004587 / "C5" / "aggregation_manifest.csv").is_file(),
-    "ds004587 C5 aggregation_manifest absent",
+    "ds004587 C5 aggregation_manifest absent under sensitivity/",
 )
 class TestPhase2AggregationFamilies(unittest.TestCase):
     def test_manifest_keeps_endpoint_families(self) -> None:

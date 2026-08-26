@@ -1,11 +1,14 @@
-# Confirmatory zero-lag analysis — ds004587 full cohort (ig + rest).
+# Confirmatory zero-lag analysis — ds004587 (ig + rest).
+# Scientific role: single-condition dedicated-ECG external-generalization cohort.
+# Rest and IG remain available for lag-zero replication; do not force a paired
+# rest–task contrast into the primary state-dependent meta-analysis.
 schema_version: 1
 dataset_id: ds004587
-role: primary
+role: sensitivity
 
 paths:
   raw_root: ../../data/raw/ds004587
-  output_subdir: primary/ds004587
+  output_subdir: sensitivity/ds004587
 
 selection:
   subjects: []
@@ -21,7 +24,7 @@ protocol:
 normalization:
   condition_semantics:
     rest: { state: state_low, time: time_na, session: single }
-    ig: { state: state_high, time: time_na, session: single }
+    ig: { state: state_other, time: time_na, session: single }
 
 capabilities:
   has_eeg: true
@@ -29,12 +32,12 @@ capabilities:
   cardiac_modality: ecg
   has_ecg_r_peaks: true
   has_ppg_peaks: false
-  has_low_high_task_pair: true
+  has_low_high_task_pair: false
   has_pre_post_pair: false
   has_behavior: false
   supports_d180: true
   supports_d240: true
   supports_topography: true
   supports_gamma: true
-  sensitivity_only: false
+  sensitivity_only: true
   has_artifact_controls: true

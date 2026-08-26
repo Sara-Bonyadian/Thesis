@@ -118,7 +118,6 @@ def _synthetic_state_effect_subjects(
         ("ds003838", "rest", "memory", "rest__memory"),
         ("ds006848", "rest", "verbalwm", "rest__verbalwm"),
         ("ds003690", "passive", "gonogo", "passive__gonogo"),
-        ("ds004587", "rest", "ig", "rest__ig"),
     )
     rows: list[dict[str, object]] = []
     for dataset_id, low, effort, _contrast in datasets:
@@ -163,7 +162,6 @@ def _synthetic_paired_from_subjects(
         ("ds006848", "verbalwm"): ("rest", "rest__verbalwm"),
         ("ds003690", "gonogo"): ("passive", "passive__gonogo"),
         ("ds003690", "simplert"): ("passive", "passive__simplert"),
-        ("ds004587", "ig"): ("rest", "rest__ig"),
     }
     by_key: dict[tuple[str, ...], float] = {}
     for row in subject_rows:
@@ -248,7 +246,11 @@ class TestKnownAndNullEffects(unittest.TestCase):
         paired = _synthetic_paired_from_subjects(subjects)
         effects = estimate_dataset_effects(paired)
         primary = [e for e in effects if e["is_primary_analysis"] and e["band"] == "theta"]
-        self.assertGreaterEqual(len(primary), 4)
+        self.assertGreaterEqual(len(primary), 3)
+        self.assertEqual(
+            {e["dataset_id"] for e in primary if e.get("enters_meta")},
+            {"ds003838", "ds006848", "ds003690"},
+        )
         for row in primary:
             self.assertLess(float(row["effect_mean"]), -0.2)
         metas = run_meta_analysis(effects)
@@ -550,15 +552,15 @@ class TestPrimaryMetaMembership(unittest.TestCase):
                     ("ds003838", "rest__memory"),
                     ("ds006848", "rest__verbalwm"),
                     ("ds003690", "passive__gonogo"),
-                    ("ds004587", "rest__ig"),
                 }
             ),
         )
         self.assertIn("passive__simplert", PRIMARY_STATE_CONTRASTS)
         self.assertIn("passive__gonogo", PRIMARY_STATE_CONTRASTS)
+        self.assertNotIn("rest__ig", PRIMARY_STATE_CONTRASTS)
         self.assertEqual(
             META_EXCLUDED_DATASETS,
-            frozenset({"ds003816", "ds004582", "hiit", "mindfulness"}),
+            frozenset({"ds003816", "ds004582", "ds004587", "hiit", "mindfulness"}),
         )
 
     def test_only_prespecified_contrasts_enter_meta(self) -> None:

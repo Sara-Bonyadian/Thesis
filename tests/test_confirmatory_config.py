@@ -81,11 +81,11 @@ class TestConfirmatoryMasterConfig(unittest.TestCase):
         self.assertIn("confirmatory", str(cfg.output_root).casefold())
         self.assertEqual(
             cfg.dataset_roles.primary,
-            ("ds003838", "ds006848", "ds003690", "ds004587"),
+            ("ds003838", "ds006848", "ds003690"),
         )
         self.assertEqual(
             cfg.dataset_roles.sensitivity,
-            ("ds004582", "ds003816", "hiit", "mindfulness"),
+            ("ds004582", "ds004587", "ds003816", "hiit", "mindfulness"),
         )
 
     def test_unknown_key_rejected_at_top_level_and_nested_level(self) -> None:

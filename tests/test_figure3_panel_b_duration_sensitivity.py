@@ -386,6 +386,7 @@ class TestPanelCDurationSensitivity(unittest.TestCase):
                     self.assertNotEqual(r["endpoint_name"], ENDPOINT_ZLPI)
 
             ds816 = [r for r in eligible if r["dataset_id"] == "ds003816"]
+            # Locked manuscript rule: ds003816 enters only duration-matched D60 (SWPI).
             self.assertEqual(
                 sorted({int(float(r["duration_s"])) for r in ds816}),
                 [60],
@@ -394,7 +395,10 @@ class TestPanelCDurationSensitivity(unittest.TestCase):
                 all(r["endpoint_name"] == ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX for r in ds816)
             )
             self.assertTrue(
-                all(r["dataset_id"] != "ds003816" or int(float(r["duration_s"])) == 60 for r in plotted)
+                all(
+                    r["dataset_id"] != "ds003816" or int(float(r["duration_s"])) == 60
+                    for r in plotted
+                )
             )
 
             # Observation-level identity matches summary.

@@ -1,7 +1,7 @@
-# Confirmatory smoke — ds004587 (16-subject subset).
+# Confirmatory smoke — ds004587 (16-subject subset; external generalization).
 schema_version: 1
 dataset_id: ds004587
-role: primary
+role: sensitivity
 
 # Smoke null battery; production default is 500 (DEFAULT_N_SURROGATES).
 n_surrogates: 20

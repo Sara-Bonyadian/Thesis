@@ -1,4 +1,7 @@
 # Confirmatory zero-lag analysis — ds003816 full cohort (D60 sensitivity only).
+# Locked: short-duration ECG/EEG sensitivity cohort. Exclude from D240 primary
+# and from D120/D180. Enter only the fully duration-matched D60 (SWPI) analysis.
+# No prespecified low-demand vs cognitive-effort confirmatory contrast.
 schema_version: 1
 dataset_id: ds003816
 role: sensitivity

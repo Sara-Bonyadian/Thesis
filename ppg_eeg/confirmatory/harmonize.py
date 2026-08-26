@@ -227,11 +227,107 @@ def place_centered_segment(
 
 def build_duration_segments(
     block: ContiguousBlock | None,
+    *,
+    allowed_durations_s: frozenset[int] | None = None,
 ) -> tuple[float | None, dict[int, DurationSegment]]:
-    """Create nested 240/180/120 segments and a separate 60-s sensitivity segment."""
+    """Create nested 240/180/120 segments and a separate 60-s sensitivity segment.
+
+    ``allowed_durations_s`` applies locked manuscript duration eligibility
+    (e.g. ds003816 → {60} only). Disallowed durations are returned as
+    ineligible with ``excluded_by_manuscript_design``.
+    """
+    allowed = (
+        frozenset(EXPECTED_DURATIONS_S)
+        if allowed_durations_s is None
+        else frozenset(int(d) for d in allowed_durations_s)
+    )
+
+    def _disallowed(duration: int) -> DurationSegment:
+        return DurationSegment(
+            duration_s=duration,
+            role=(
+                "primary"
+                if duration == EXPECTED_PRIMARY_DURATION_S
+                else (
+                    "nested_sensitivity"
+                    if duration in NESTED_DURATIONS_S
+                    else "separate_sensitivity"
+                )
+            ),
+            start_s=float("nan"),
+            end_s=float("nan"),
+            center_s=float("nan"),
+            time_s=(),
+            eligible=False,
+            exclusion_reason="excluded_by_manuscript_design",
+        )
+
     if block is None:
         return None, {
-            duration: DurationSegment(
+            duration: (
+                _disallowed(duration)
+                if duration not in allowed
+                else DurationSegment(
+                    duration_s=duration,
+                    role=(
+                        "primary"
+                        if duration == EXPECTED_PRIMARY_DURATION_S
+                        else (
+                            "nested_sensitivity"
+                            if duration in NESTED_DURATIONS_S
+                            else "separate_sensitivity"
+                        )
+                    ),
+                    start_s=float("nan"),
+                    end_s=float("nan"),
+                    center_s=float("nan"),
+                    time_s=(),
+                    eligible=False,
+                    exclusion_reason="no_common_support",
+                )
+            )
+            for duration in EXPECTED_DURATIONS_S
+        }
+
+    nested_available = [
+        d for d in NESTED_DURATIONS_S if d in allowed and block.n_samples >= d
+    ]
+    nested_center: float | None = None
+    segments: dict[int, DurationSegment] = {}
+    for duration in EXPECTED_DURATIONS_S:
+        if duration not in allowed:
+            segments[duration] = _disallowed(duration)
+
+    if nested_available:
+        primary_nested = nested_available[0]
+        anchor = place_centered_segment(block, primary_nested, center_s=None)
+        nested_center = anchor.center_s
+        for duration in NESTED_DURATIONS_S:
+            if duration not in allowed:
+                continue
+            segments[duration] = place_centered_segment(
+                block, duration, center_s=nested_center
+            )
+        if SENSITIVITY_DURATION_S in allowed:
+            segments[SENSITIVITY_DURATION_S] = place_centered_segment(
+                block, SENSITIVITY_DURATION_S, center_s=nested_center
+            )
+    else:
+        for duration in NESTED_DURATIONS_S:
+            if duration not in allowed:
+                continue
+            segments[duration] = place_centered_segment(block, duration)
+        if SENSITIVITY_DURATION_S in allowed:
+            segments[SENSITIVITY_DURATION_S] = place_centered_segment(
+                block, SENSITIVITY_DURATION_S, center_s=None
+            )
+            if segments[SENSITIVITY_DURATION_S].eligible:
+                nested_center = segments[SENSITIVITY_DURATION_S].center_s
+    # Ensure every locked duration key exists.
+    for duration in EXPECTED_DURATIONS_S:
+        segments.setdefault(
+            duration,
+            DurationSegment(
                 duration_s=duration,
                 role=(
                     "primary"
@@ -247,35 +343,13 @@ def build_duration_segments(
                 center_s=float("nan"),
                 time_s=(),
                 eligible=False,
-                exclusion_reason="no_common_support",
-            )
-            for duration in EXPECTED_DURATIONS_S
-        }
-
-    nested_available = [d for d in NESTED_DURATIONS_S if block.n_samples >= d]
-    nested_center: float | None = None
-    segments: dict[int, DurationSegment] = {}
-    if nested_available:
-        primary_nested = nested_available[0]
-        anchor = place_centered_segment(block, primary_nested, center_s=None)
-        nested_center = anchor.center_s
-        for duration in NESTED_DURATIONS_S:
-            segments[duration] = place_centered_segment(
-                block, duration, center_s=nested_center
-            )
-        segments[SENSITIVITY_DURATION_S] = place_centered_segment(
-            block, SENSITIVITY_DURATION_S, center_s=nested_center
+                exclusion_reason=(
+                    "excluded_by_manuscript_design"
+                    if duration not in allowed
+                    else "no_common_support"
+                ),
+            ),
         )
-    else:
-        for duration in NESTED_DURATIONS_S:
-            segments[duration] = place_centered_segment(block, duration)
-        # D60 remains available as its own sensitivity placement when nested
-        # family support is absent.
-        segments[SENSITIVITY_DURATION_S] = place_centered_segment(
-            block, SENSITIVITY_DURATION_S, center_s=None
-        )
-        if segments[SENSITIVITY_DURATION_S].eligible:
-            nested_center = segments[SENSITIVITY_DURATION_S].center_s
     return nested_center, segments
 
 
@@ -426,7 +500,13 @@ def harmonize_observation(
     n_common = int(common_times.size)
     blocks = contiguous_blocks(common_times, max_gap_s=max_gap_s)
     selected = select_longest_block(blocks)
-    center_s, segments = build_duration_segments(selected)
+    from .dataset_roles import eligible_durations_for
+
+    dataset_id = str(ids.get("dataset_id") or "")
+    allowed = eligible_durations_for(dataset_id) if dataset_id else None
+    center_s, segments = build_duration_segments(
+        selected, allowed_durations_s=allowed
+    )
     available_duration_s = (
         float(selected.duration_s) if selected is not None else 0.0
     )

@@ -210,12 +210,11 @@ MSG_NOT_INCLUDED = "Not included in the confirmatory analysis."
 MSG_NOT_APPLICABLE = "Not applicable for this dataset"
 LOW_DEMAND_CONDITION_LABELS = {"rest", "passive", "step1", "low_demand"}
 
-# Master.yaml dataset_roles mirrored for figure cohort splitting when audit omits role.
-FIGURE1_PRIMARY_DATASETS = frozenset(
-    {"ds003838", "ds006848", "ds003690", "ds004587"}
-)
+# Master.yaml path-routing roles (fallback when C0 audit omits role).
+# Prefer dataset_roles.primary_dataset_ids / sensitivity_dataset_ids at runtime.
+FIGURE1_PRIMARY_DATASETS = frozenset({"ds003838", "ds006848", "ds003690"})
 FIGURE1_SENSITIVITY_DATASETS = frozenset(
-    {"ds004582", "ds003816", "hiit", "mindfulness"}
+    {"ds004582", "ds004587", "ds003816", "hiit", "mindfulness"}
 )
 FIGURE1_BOOTSTRAP_N = 2000
 FIGURE1_BOOTSTRAP_SEED = 20260715
@@ -358,6 +357,21 @@ def primary_meta_expected_na_message(detail: str) -> str:
     return (
         f"Expected not applicable — {detail} "
         "PRIMARY_META panels are empty by design for sensitivity-only runs."
+    )
+
+
+def paired_estimand_not_computable_message(detail: str) -> str:
+    """On-figure notice when no paired ΔZLPI estimand exists for the run's datasets.
+
+    Used instead of :func:`primary_meta_expected_na_message` when the panel is
+    empty because the dataset declares no prespecified low-demand vs high-demand
+    contrast. A sensitivity role on its own is never a reason to empty a panel,
+    so the two cases must read differently on the figure.
+    """
+    detail = detail.strip()
+    return (
+        f"Not computable — {detail} Sensitivity datasets are displayed wherever "
+        "the estimand exists; they are excluded only from pooled primary estimates."
     )
 
 
@@ -1264,10 +1278,15 @@ def format_role_display(
 
 
 def sensitivity_display_title(body: str, *, dataset_id: str | None = None) -> str:
-    """Manuscript panel title for sensitivity-only display (metadata-driven)."""
+    """Manuscript panel title for sensitivity / external / duration display."""
+    from .dataset_roles import analysis_family_for, family_display_label
+
     body = body.strip()
     if dataset_id:
-        return f"Sensitivity display ({_dataset_display(dataset_id)}): {body}"
+        family = family_display_label(analysis_family_for(dataset_id))
+        return (
+            f"{family} ({_dataset_display(dataset_id)}): {body}"
+        )
     return f"Sensitivity display: {body}"
 
 
@@ -3140,27 +3159,28 @@ def _plot_panel_b_cross_subject_innovations(
 
 
 def _panel_c_dataset_role(dataset_id: str, dataset_roles: Mapping[str, str]) -> str:
+    from .dataset_roles import resolve_dataset_role
+
     ds = _as_str(dataset_id).casefold()
     role = _as_str(dataset_roles.get(ds)).casefold()
     if role:
         return role
-    if ds in FIGURE1_PRIMARY_DATASETS:
-        return "primary"
-    if ds in FIGURE1_SENSITIVITY_DATASETS:
-        return "sensitivity"
-    return "unknown"
+    return resolve_dataset_role(ds)
 
 
 def _panel_c_supported_durations(dataset_id: str) -> frozenset[int]:
-    """Return duration set allowed for Panel C from YAML capabilities.
+    """Return duration set allowed for Panel C from locked profile + YAML.
 
-    Declared capability alone never computes an endpoint; this only gates which
-    duration contracts may appear for a dataset. Missing YAML → all locked
-    durations (eligibility still decides computability).
+    Scientific registry is authoritative for manuscript duration eligibility
+    (e.g. ds003816 = D60 only). YAML capabilities may further restrict.
+    Declared capability alone never computes an endpoint.
     """
+    from .dataset_roles import eligible_durations_for
+
     ds = _as_str(dataset_id).casefold()
     if not ds:
         return frozenset(EXPECTED_DURATIONS_S)
+    locked = set(eligible_durations_for(ds))
     try:
         import yaml
 
@@ -3170,7 +3190,6 @@ def _panel_c_supported_durations(dataset_id: str) -> frozenset[int]:
         dataset_yaml = repo_root / "datasets" / f"{ds}.yaml"
         master_yaml = repo_root / "master.yaml"
         if not dataset_yaml.is_file() or not master_yaml.is_file():
-            # Lightweight parse when master is unavailable.
             if dataset_yaml.is_file():
                 raw = yaml.safe_load(dataset_yaml.read_text(encoding="utf-8")) or {}
                 caps = raw.get("capabilities") or {}
@@ -3181,8 +3200,8 @@ def _panel_c_supported_durations(dataset_id: str) -> frozenset[int]:
                     allowed.add(180)
                 if bool(caps.get("supports_d240", True)):
                     allowed.add(240)
-                return frozenset(allowed)
-            return frozenset(EXPECTED_DURATIONS_S)
+                return frozenset(allowed & locked)
+            return frozenset(locked or EXPECTED_DURATIONS_S)
         master = load_master_config(master_yaml)
         cfg = load_dataset_config(dataset_yaml, master=master)
         caps = cfg.capabilities
@@ -3193,9 +3212,9 @@ def _panel_c_supported_durations(dataset_id: str) -> frozenset[int]:
             allowed.add(180)
         if caps.supports_d240:
             allowed.add(240)
-        return frozenset(allowed)
+        return frozenset(allowed & locked)
     except Exception:  # noqa: BLE001
-        return frozenset(EXPECTED_DURATIONS_S)
+        return frozenset(locked or EXPECTED_DURATIONS_S)
 
 
 def _split_observation_ids(raw_ids: object) -> list[str]:
@@ -3897,7 +3916,7 @@ def _plot_panel_c_dataset_trajectories(
             role = _as_str(ds_rows[0].get("dataset_role")).casefold()
             ls = "-" if role == "primary" else "--"
             # Connect only within-dataset supported durations (no interpolation).
-            if len(x_plot) >= 2 and ds != "ds003816":
+            if len(x_plot) >= 2:
                 ax.plot(
                     x_plot,
                     y_plot,
@@ -5731,7 +5750,7 @@ def render_figure3(
                 "d120=mwpi",
                 "d180=zlpi",
                 "d240=zlpi",
-                "ds003816_only_at_60_swpi=true",
+                "duration_support=yaml_capabilities",
                 "unit=biological_participant_clustered",
                 "uncertainty=participant_cluster_bootstrap_2000",
             ],
@@ -5966,8 +5985,9 @@ def render_figure3(
             "lines connect supported durations within the same dataset only. "
             "Endpoint identity is shown beneath the duration axis: D60 = SWPI, "
             "D120 = MWPI, and D180/D240 = ZLPI. "
-            "ds003816 contributes only to the fully duration-matched 60-second SWPI "
-            "analysis and is excluded at 120, 180, and 240 seconds. Because the "
+            "Supported durations follow each dataset's YAML capabilities and "
+            "observation-level eligibility; datasets without a low/high contrast "
+            "remain empty for this panel. Because the "
             "endpoint lag support and reference windows differ across durations, "
             "changes across the trajectory reflect both analysis duration and "
             "endpoint definition and should not be interpreted as a pure duration "
@@ -6413,6 +6433,7 @@ __all__ = [
     "FIGURE2_PANEL_AB_DISPLAY_SMOOTH_NOTE",
     "FIGURE2_PANEL_AB_DISPLAY_SMOOTH_SIGMA_S",
     "FIGURE2_PANEL_A_SENSITIVITY_NOTE",
+    "paired_estimand_not_computable_message",
     "FIGURE2_PANEL_B_SENSITIVITY_NOTE",
     "FIGURE2_PANEL_E_SENSITIVITY_NOTE",
     "FIGURE2_PANEL_A_HIIT_SENSITIVITY_NOTE",  # deprecated alias

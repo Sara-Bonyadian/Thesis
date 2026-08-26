@@ -15,11 +15,12 @@ independent biological subjects. Intercept-only MixedLM is diagnostic only
 (numerically unreliable as a primary estimator at these sample sizes).
 
 Primary attenuation meta membership is gated by PRIMARY_META_CONTRASTS: one
-study effect per primary dataset (ds003838/rest__memory, ds006848/rest__verbalwm,
-ds003690/passive__gonogo, ds004587/rest__ig). Additional contrasts
-(e.g. passive__simplert) remain in dataset-level and FDR analyses but do not
-enter primary meta. Sensitivity datasets (hiit, mindfulness, ds004582,
-ds003816) are excluded from primary meta.
+study effect per primary paired state-dependent dataset
+(ds003838/rest__memory, ds006848/rest__verbalwm, ds003690/passive__gonogo).
+Additional contrasts (e.g. passive__simplert) remain in dataset-level and FDR
+analyses but do not enter primary meta. Sensitivity / external-generalization /
+duration cohorts (hiit, mindfulness, ds004582, ds004587, ds003816) are
+excluded from primary meta.
 """
 
 from __future__ import annotations
@@ -128,17 +129,18 @@ MIXED_MODEL_CONTRAST_FIELDS = (
 )
 
 # Datasets excluded from primary attenuation meta (protocol / role reasons).
-# ds004582: unpaired single-state; ds003816: no confirmatory paired contrast /
-# short-window only; hiit / mindfulness: sensitivity role (nested or graded
-# contrasts; not primary confirmatory family).
-META_EXCLUDED_DATASETS = frozenset({"ds003816", "ds004582", "hiit", "mindfulness"})
+# ds004582 / ds004587: dedicated-ECG external generalization (no forced paired
+# rest–task contrast); ds003816: duration-matched D60 only / no confirmatory
+# paired contrast; hiit / mindfulness: sensitivity / internal-attention families.
+META_EXCLUDED_DATASETS = frozenset(
+    {"ds003816", "ds004582", "ds004587", "hiit", "mindfulness"}
+)
 
 # Prespecified primary paired datasets and state-attenuation contrasts.
 PRIMARY_PAIRED_DATASETS = (
     "ds003838",
     "ds006848",
     "ds003690",
-    "ds004587",
 )
 # Primary FDR family still includes both ds003690 contrasts (tested separately).
 PRIMARY_STATE_CONTRASTS = (
@@ -146,7 +148,6 @@ PRIMARY_STATE_CONTRASTS = (
     "rest__verbalwm",
     "passive__simplert",
     "passive__gonogo",
-    "rest__ig",
 )
 # Exactly one study effect per primary dataset for cross-dataset RE meta.
 # Chosen by protocol comparability to low-demand vs cognitive effort (a priori);
@@ -156,7 +157,6 @@ PRIMARY_META_CONTRASTS: frozenset[tuple[str, str]] = frozenset(
         ("ds003838", "rest__memory"),
         ("ds006848", "rest__verbalwm"),
         ("ds003690", "passive__gonogo"),
-        ("ds004587", "rest__ig"),
     }
 )
 

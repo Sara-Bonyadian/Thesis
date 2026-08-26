@@ -43,7 +43,6 @@ class Figure2PanelDMarginalEstimatesTests(unittest.TestCase):
             ("ds003838", "rest", "memory"),
             ("ds006848", "rest", "verbalwm"),
             ("ds003690", "passive", "gonogo"),
-            ("ds004587", "rest", "ig"),
         )
         self.subjects: list[dict[str, object]] = []
         for dataset_id, low, effort in datasets:

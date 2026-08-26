@@ -17,6 +17,15 @@ from typing import Mapping, Sequence
 import numpy as np
 from scipy import stats
 
+from .dataset_roles import (
+    analysis_family_for,
+    dataset_contrast_ids,
+    dataset_low_demand_conditions,
+    is_sensitivity_dataset,
+    role_tag,
+    session_alias_for_condition,
+    session_unit_key,
+)
 from .duration_contracts import ENDPOINT_ZLPI, EXPECTED_PRIMARY_DURATION_S
 from .inference import PRIMARY_POWER_REPRESENTATION
 
@@ -52,6 +61,14 @@ HIIT_PS_LOW_DEMAND = frozenset({"ps_pre_rest", "ps_post_rest"})
 
 SENSITIVITY_SECTION_LABEL = "Sensitivity (not pooled)"
 HIIT_FOREST_DISPLAY_LABEL = "HIIT [S]"
+
+
+def sensitivity_forest_display_label(dataset_id: str) -> str:
+    """Role-tagged forest row label for any sensitivity dataset (e.g. ``DS003816 [S]``)."""
+    from . import figures as _f
+
+    base = _f._dataset_display(_as_str(dataset_id))
+    return f"{base} [{role_tag('sensitivity')}]"
 
 
 def _as_str(value: object, default: str = "") -> str:
@@ -164,76 +181,121 @@ def _hiit_session_unit_key(row: Mapping[str, object]) -> str:
     return participant
 
 
+def sensitivity_forest_rows(
+    paired_rows: Sequence[Mapping[str, object]],
+    *,
+    band: str = "alpha",
+    protocol_rows: Sequence[Mapping[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    """One combined display-only forest row per sensitivity dataset present.
+
+    Role-driven: any dataset whose centralized role is ``sensitivity`` and which
+    declares prespecified low–high demand contrasts contributes a row. Each
+    protocol session subject is one analysis unit; within a session, available
+    ΔZLPI contrasts are averaged, then Student-t mean/CI across session subjects.
+    Rows never set ``enters_meta`` and are never pooled.
+    """
+    # dataset -> session_unit -> {contrast_id: delta}
+    buckets: dict[str, dict[str, dict[str, float]]] = {}
+    contrast_sets: dict[str, frozenset[str]] = {}
+    session_tokens: dict[str, set[str]] = {}
+    for row in paired_rows:
+        dataset_id = _as_str(row.get("dataset_id")).casefold()
+        if not dataset_id:
+            continue
+        if not is_sensitivity_dataset(dataset_id, protocol_rows=protocol_rows):
+            continue
+        if not _primary_slice_ok(row, band=band):
+            continue
+        allowed = contrast_sets.setdefault(dataset_id, dataset_contrast_ids(dataset_id))
+        if not allowed:
+            continue
+        contrast = _as_str(row.get("contrast_id")).casefold()
+        if contrast not in allowed:
+            continue
+        delta = _as_float(row.get("delta_endpoint_index"))
+        if not math.isfinite(delta):
+            continue
+        unit = session_unit_key(row, dataset_id=dataset_id)
+        if not unit:
+            continue
+        buckets.setdefault(dataset_id, {}).setdefault(unit, {})[contrast] = delta
+        alias = session_alias_for_condition(dataset_id, contrast.split("__", 1)[0])
+        if alias:
+            session_tokens.setdefault(dataset_id, set()).add(alias)
+
+    out: list[dict[str, object]] = []
+    for dataset_id, by_unit in sorted(buckets.items()):
+        allowed = contrast_sets.get(dataset_id, frozenset())
+        session_avgs: list[float] = []
+        for _unit, by_contrast in sorted(by_unit.items()):
+            vals = [
+                by_contrast[c]
+                for c in sorted(allowed)
+                if c in by_contrast and math.isfinite(by_contrast[c])
+            ]
+            if not vals:
+                continue
+            session_avgs.append(float(np.mean(np.asarray(vals, dtype=float))))
+
+        summary = student_t_effect_summary(session_avgs)
+        n_sessions = int(summary["n_pairs"])
+        if n_sessions < 1:
+            continue
+        sessions = sorted(session_tokens.get(dataset_id, set()))
+        out.append(
+            {
+                "dataset_id": dataset_id,
+                "dataset_role": "sensitivity",
+                "analysis_family": analysis_family_for(dataset_id),
+                "contrast_id": f"{dataset_id}_combined_session_mean",
+                "band": band.casefold(),
+                "endpoint_name": ENDPOINT_ZLPI,
+                "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "effect_mean": summary["effect_mean"],
+                "effect_sd": summary["effect_sd"],
+                "effect_se": summary["effect_se"],
+                "ci_low": summary["ci_low"],
+                "ci_high": summary["ci_high"],
+                "n_pairs": n_sessions,
+                "n_participants": n_sessions,
+                "n_participant_sessions": n_sessions,
+                "enters_meta": False,
+                "cardiac_modality": "",
+                "prediction_low": "",
+                "prediction_high": "",
+                "n_datasets": "",
+                "row_type": ROW_TYPE_SENSITIVITY_DISPLAY,
+                "display_label": sensitivity_forest_display_label(dataset_id),
+                "session_id": "|".join(sessions),
+                "aggregation": "session_subject_mean_of_available_delta",
+            }
+        )
+    return out
+
+
 def hiit_session_sensitivity_forest_rows(
     paired_rows: Sequence[Mapping[str, object]],
     *,
     band: str = "alpha",
 ) -> list[dict[str, object]]:
-    """One combined HIIT sensitivity forest row (display-only).
+    """HIIT-scoped view of :func:`sensitivity_forest_rows` (accepted regression).
 
-    Panel-B-aligned: each PH/PS session subject is one unit. Within a session,
-    average available low–high demand ΔZLPI contrasts for that session, then
-    Student-t mean/CI across session subjects (n≈40, not biological n≈20).
+    Retained so the locked HIIT display contract keeps its ``hiit_combined_*``
+    contrast id, ``ph|ps`` session token and ``HIIT [S]`` label verbatim.
     """
-    # session_unit -> {contrast_id: delta}
-    buckets: dict[str, dict[str, float]] = {}
-    for row in paired_rows:
-        if _as_str(row.get("dataset_id")).casefold() != HIIT_DATASET_ID:
-            continue
-        if not _primary_slice_ok(row, band=band):
-            continue
-        contrast = _as_str(row.get("contrast_id")).casefold()
-        if contrast not in HIIT_ALL_CONTRASTS:
-            continue
-        delta = _as_float(row.get("delta_endpoint_index"))
-        if not math.isfinite(delta):
-            continue
-        unit = _hiit_session_unit_key(row)
-        if not unit:
-            continue
-        buckets.setdefault(unit, {})[contrast] = delta
-
-    session_avgs: list[float] = []
-    for _unit, by_contrast in sorted(buckets.items()):
-        vals = [
-            by_contrast[c]
-            for c in sorted(HIIT_ALL_CONTRASTS)
-            if c in by_contrast and math.isfinite(by_contrast[c])
-        ]
-        if not vals:
-            continue
-        session_avgs.append(float(np.mean(np.asarray(vals, dtype=float))))
-
-    summary = student_t_effect_summary(session_avgs)
-    n_sessions = int(summary["n_pairs"])
-    if n_sessions < 1:
-        return []
-    return [
-        {
-            "dataset_id": HIIT_DATASET_ID,
-            "contrast_id": "hiit_combined_ph_ps_pre_post_mean",
-            "band": band.casefold(),
-            "endpoint_name": ENDPOINT_ZLPI,
-            "duration_s": EXPECTED_PRIMARY_DURATION_S,
-            "effect_mean": summary["effect_mean"],
-            "effect_sd": summary["effect_sd"],
-            "effect_se": summary["effect_se"],
-            "ci_low": summary["ci_low"],
-            "ci_high": summary["ci_high"],
-            "n_pairs": n_sessions,
-            "n_participants": n_sessions,
-            "n_participant_sessions": n_sessions,
-            "enters_meta": False,
-            "cardiac_modality": "",
-            "prediction_low": "",
-            "prediction_high": "",
-            "n_datasets": "",
-            "row_type": ROW_TYPE_SENSITIVITY_DISPLAY,
-            "display_label": HIIT_FOREST_DISPLAY_LABEL,
-            "session_id": "ph|ps",
-            "aggregation": "session_subject_mean_of_available_pre_post_delta",
-        }
+    rows = [
+        row
+        for row in paired_rows
+        if _as_str(row.get("dataset_id")).casefold() == HIIT_DATASET_ID
     ]
+    out = sensitivity_forest_rows(rows, band=band)
+    for row in out:
+        row["contrast_id"] = "hiit_combined_ph_ps_pre_post_mean"
+        row["display_label"] = HIIT_FOREST_DISPLAY_LABEL
+        row["session_id"] = "ph|ps"
+        row["aggregation"] = "session_subject_mean_of_available_pre_post_delta"
+    return out
 
 
 def hiit_session_mean_zlpi_cells(
@@ -402,6 +464,8 @@ def primary_meta_alpha_forest_rows(
         studies.append(
             {
                 "dataset_id": dataset_id,
+                "dataset_role": "primary",
+                "analysis_family": analysis_family_for(dataset_id),
                 "contrast_id": _as_str(row.get("contrast_id")),
                 "band": "alpha",
                 "endpoint_name": ENDPOINT_ZLPI,
@@ -678,6 +742,8 @@ def draw_alpha_meta_forest(
 
 FOREST_EXPORT_FIELDS = (
     "dataset_id",
+    "dataset_role",
+    "analysis_family",
     "contrast_id",
     "band",
     "endpoint_name",
@@ -718,5 +784,7 @@ __all__ = [
     "hiit_session_sensitivity_forest_rows",
     "hiit_session_surrogate_significance_marks",
     "primary_meta_alpha_forest_rows",
+    "sensitivity_forest_display_label",
+    "sensitivity_forest_rows",
     "student_t_effect_summary",
 ]

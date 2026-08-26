@@ -26,6 +26,7 @@ UNDEFINED_NULL_VARIANCE = "undefined_null_variance"
 CONFIGURATION_VALIDATION_FAILED = "configuration_validation_failed"
 STANDARD_ZLPI_NOT_APPLICABLE = "standard_zlpi_not_applicable"
 ENDPOINT_CONTRACT_NON_ZLPI = "endpoint_contract_non_zlpi"
+EXCLUDED_BY_MANUSCRIPT_DESIGN = "excluded_by_manuscript_design"
 
 REASON_CODES: tuple[str, ...] = (
     MISSING_DATASET_ROOT,
@@ -48,6 +49,7 @@ REASON_CODES: tuple[str, ...] = (
     CONFIGURATION_VALIDATION_FAILED,
     STANDARD_ZLPI_NOT_APPLICABLE,
     ENDPOINT_CONTRACT_NON_ZLPI,
+    EXCLUDED_BY_MANUSCRIPT_DESIGN,
 )
 
 # Legacy / stage-local exclusion strings → taxonomy codes.
@@ -72,6 +74,7 @@ _EXCLUSION_ALIASES: dict[str, str] = {
     "insufficient_length": INSUFFICIENT_DURATION,
     "insufficient_blocks": INSUFFICIENT_DURATION,
     "d240_segment_not_available": INSUFFICIENT_DURATION,
+    "excluded_by_manuscript_design": EXCLUDED_BY_MANUSCRIPT_DESIGN,
     "insufficient_lag_support": INSUFFICIENT_LAG_SUPPORT,
     "incomplete_lag_grid": INSUFFICIENT_LAG_SUPPORT,
     "incomplete_endpoint_windows": INSUFFICIENT_LAG_SUPPORT,

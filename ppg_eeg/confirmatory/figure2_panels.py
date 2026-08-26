@@ -24,6 +24,13 @@ from .duration_contracts import (
     contract_for_duration,
 )
 from .endpoints import fisher_z
+from .dataset_roles import (
+    dataset_contrast_ids,
+    has_prespecified_contrast,
+    is_sensitivity_dataset,
+    resolve_dataset_role,
+    session_unit_key,
+)
 from .forest_display import (
     FOREST_EXPORT_FIELDS,
     HIIT_ALL_CONTRASTS,
@@ -32,8 +39,8 @@ from .forest_display import (
     _hiit_session_unit_key,
     build_alpha_forest_export,
     draw_alpha_meta_forest,
-    hiit_session_sensitivity_forest_rows,
     primary_meta_alpha_forest_rows,
+    sensitivity_forest_rows,
 )
 from .inference import (
     MIXED_MODEL_CONTRAST_FIELDS,
@@ -124,22 +131,35 @@ def filter_primary_meta_paired_rows(
     return selected
 
 
-def filter_hiit_sensitivity_paired_rows(
+def filter_sensitivity_paired_rows(
     paired_rows: Sequence[Mapping[str, object]],
+    *,
+    protocol_rows: Sequence[Mapping[str, object]] | None = None,
 ) -> list[dict[str, object]]:
-    """C5 HIIT low–high demand pairs for display-only Panel A/B sensitivity curves.
+    """C5 low–high demand pairs of any sensitivity dataset, for display-only panels.
 
-    Uses the locked HIIT YAML contrast set and primary ZLPI / D240 / absolute_log10
-    slice. Does not admit the sensitivity cohort into PRIMARY_META.
+    Role-driven: admits every dataset whose centralized role is ``sensitivity``
+    using that dataset's own prespecified contrast set, on the primary
+    ZLPI / D240 / absolute_log10 slice. Does not admit any of them into
+    PRIMARY_META.
     """
     f = _fig()
     selected: list[dict[str, object]] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
+    allowed_by_dataset: dict[str, frozenset[str]] = {}
     for row in paired_rows:
-        if f._as_str(row.get("dataset_id")).casefold() != HIIT_DATASET_ID:
+        dataset_id = f._as_str(row.get("dataset_id")).casefold()
+        if not dataset_id:
+            continue
+        if not is_sensitivity_dataset(dataset_id, protocol_rows=protocol_rows):
+            continue
+        allowed = allowed_by_dataset.setdefault(
+            dataset_id, dataset_contrast_ids(dataset_id)
+        )
+        if not allowed:
             continue
         contrast_id = f._as_str(row.get("contrast_id")).casefold()
-        if contrast_id not in HIIT_ALL_CONTRASTS:
+        if contrast_id not in allowed:
             continue
         if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold() != ENDPOINT_ZLPI:
             continue
@@ -159,12 +179,24 @@ def filter_hiit_sensitivity_paired_rows(
             continue
         participant_id = f._as_str(row.get("participant_id"))
         session_id = f._as_str(row.get("session_id"), "single")
-        key = (participant_id, session_id, contrast_id, band)
+        key = (dataset_id, participant_id, session_id, contrast_id, band)
         if key in seen:
             continue
         seen.add(key)
         selected.append(dict(row))
     return selected
+
+
+def filter_hiit_sensitivity_paired_rows(
+    paired_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """HIIT-scoped view of :func:`filter_sensitivity_paired_rows`."""
+    rows = [
+        row
+        for row in paired_rows
+        if _fig()._as_str(row.get("dataset_id")).casefold() == HIIT_DATASET_ID
+    ]
+    return filter_sensitivity_paired_rows(rows)
 
 
 def collapse_hiit_session_lag_series(
@@ -242,31 +274,48 @@ def collapse_hiit_session_lag_series(
     return collapsed
 
 
-def build_hiit_sensitivity_panel_a_series(
+def build_sensitivity_panel_a_series(
     paired_rows: Sequence[Mapping[str, object]],
     curve_index: Mapping[tuple[str, str], Mapping[int, float]],
+    *,
+    protocol_rows: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Reconstruct matched HIIT lag curves for Panel A/B observation-level fallback.
+    """Reconstruct matched lag curves for any sensitivity dataset (Panel A/B).
 
-    Each C5 pre-/post-intervention pair is retained separately (no pre/post or
-    protocol-session averaging). ``cluster_id`` marks the session condition for
-    clustered bootstrap CIs. Series rows include ``z_low``, ``z_effort``, and
-    ``delta_z`` for Panel A (states) and Panel B (difference).
+    Each C5 pair is retained separately (no pre/post or protocol-session
+    averaging). ``cluster_id`` marks the session condition for clustered
+    bootstrap CIs. Series rows include ``z_low``, ``z_effort``, and ``delta_z``
+    for Panel A (states) and Panel B (difference).
     """
     f = _fig()
-    hiit_pairs = filter_hiit_sensitivity_paired_rows(paired_rows)
-    series, gaps = reconstruct_matched_pair_curves(hiit_pairs, curve_index)
+    pairs = filter_sensitivity_paired_rows(paired_rows, protocol_rows=protocol_rows)
+    series, gaps = reconstruct_matched_pair_curves(pairs, curve_index)
     annotated: list[dict[str, object]] = []
     for row in series:
         out = dict(row)
-        cluster = _hiit_session_unit_key(out)
+        dataset_id = f._as_str(out.get("dataset_id")).casefold()
+        cluster = session_unit_key(out, dataset_id=dataset_id)
         contrast = f._as_str(out.get("contrast_id")).casefold()
         out["cluster_id"] = cluster
         out["pair_id"] = f"{cluster}::{contrast}" if cluster and contrast else cluster
         out["aggregation"] = HIIT_MATCHED_PAIR_AGGREGATION
         out["row_type"] = ROW_TYPE_SENSITIVITY_DISPLAY
+        out["dataset_role"] = "sensitivity"
         annotated.append(out)
     return annotated, gaps
+
+
+def build_hiit_sensitivity_panel_a_series(
+    paired_rows: Sequence[Mapping[str, object]],
+    curve_index: Mapping[tuple[str, str], Mapping[int, float]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """HIIT-scoped view of :func:`build_sensitivity_panel_a_series`."""
+    rows = [
+        row
+        for row in paired_rows
+        if _fig()._as_str(row.get("dataset_id")).casefold() == HIIT_DATASET_ID
+    ]
+    return build_sensitivity_panel_a_series(rows, curve_index)
 
 
 PANEL_E_STATE_LONG_FIELDS = (
@@ -331,7 +380,8 @@ def _panel_e_period_from_contrast(contrast_id: str) -> str:
 
 
 def _panel_e_dataset_role(*, hiit_sensitivity: bool, dataset_id: str) -> str:
-    if hiit_sensitivity or dataset_id.casefold() == HIIT_DATASET_ID:
+    """Role stamped on Panel E export rows, from centralized metadata."""
+    if hiit_sensitivity or is_sensitivity_dataset(dataset_id):
         return "sensitivity"
     return "primary_meta"
 
@@ -1108,6 +1158,82 @@ def _load_panel_d_tables(
     return marginal, contrasts, coef_rows
 
 
+def panel_d_rows_are_sensitivity_only(
+    marginal_rows: Sequence[Mapping[str, object]],
+    *,
+    protocol_rows: Sequence[Mapping[str, object]] | None = None,
+) -> bool:
+    """True when Panel D estimates come only from sensitivity-role datasets.
+
+    Panel D is computed from subject-level ZLPI and needs no paired contrast, so
+    it populates for sensitivity datasets that have no ΔZLPI estimand. Its label
+    must therefore be derived from the rows themselves rather than from whether
+    Panel A found matched curves.
+    """
+    f = _fig()
+    if not marginal_rows:
+        return False
+    scopes = {f._as_str(row.get("dataset_scope")).casefold() for row in marginal_rows}
+    scopes.discard("")
+    if scopes and all("sensitivity" in scope for scope in scopes):
+        return True
+    datasets = {
+        f._as_str(row.get("dataset_id")).casefold()
+        for row in marginal_rows
+        if f._as_str(row.get("dataset_id"))
+    }
+    if not datasets:
+        return False
+    return all(
+        is_sensitivity_dataset(ds, protocol_rows=protocol_rows) for ds in datasets
+    )
+
+
+def paired_panel_unavailable(
+    datasets_in_run: Sequence[str],
+    *,
+    primary_meta_detail: str,
+) -> tuple[str, str, bool]:
+    """Explain an empty paired panel: ``(detail, on_figure_message, is_true_nc)``.
+
+    ``is_true_nc`` is True when every dataset in the run declares no prespecified
+    low-demand vs high-demand contrast, i.e. the ΔZLPI estimand does not exist.
+    External-generalization cohorts are labeled scientifically not applicable
+    rather than failed. Otherwise the panel is empty for the pre-existing
+    PRIMARY_META reason.
+    """
+    from .dataset_roles import (
+        PANEL_STATUS_NOT_APPLICABLE,
+        is_external_generalization_dataset,
+        panel_reason_for_empty_paired,
+    )
+
+    f = _fig()
+    datasets = sorted({str(ds).strip().casefold() for ds in datasets_in_run if str(ds).strip()})
+    without_contrast = [ds for ds in datasets if not has_prespecified_contrast(ds)]
+    if datasets and len(without_contrast) == len(datasets):
+        names = ", ".join(f._dataset_display(ds) for ds in without_contrast)
+        statuses = {panel_reason_for_empty_paired(ds)[0] for ds in without_contrast}
+        if statuses == {PANEL_STATUS_NOT_APPLICABLE} or all(
+            is_external_generalization_dataset(ds) for ds in without_contrast
+        ):
+            detail = (
+                f"{names}: scientifically not applicable for a paired state "
+                "contrast (external-generalization / single-condition cohort)."
+            )
+            return detail, f.MSG_NOT_APPLICABLE + f" — {detail}", True
+        detail = (
+            f"{names} declares no prespecified low-demand vs high-demand contrast, "
+            "so no paired ΔZLPI estimand exists."
+        )
+        return detail, f.paired_estimand_not_computable_message(detail), True
+    return (
+        primary_meta_detail,
+        f.primary_meta_expected_na_message(primary_meta_detail),
+        False,
+    )
+
+
 def _panel_d_band_index(band: str) -> int:
     key = str(band).strip().casefold()
     try:
@@ -1141,12 +1267,13 @@ def _render_panel_d_estimation_plot(
     contrast_rows: Sequence[Mapping[str, object]],
     *,
     panel_d_hiit_sensitivity: bool,
+    sensitivity_title_dataset: str | None = None,
 ) -> tuple[str, list[plt.Line2D]]:
     """Draw Panel D estimates/contrasts. Title/legend are placed by the caller."""
     f = _fig()
     title = (
         f.sensitivity_display_title(
-            "band × state interaction", dataset_id="hiit"
+            "band × state interaction", dataset_id=sensitivity_title_dataset
         )
         if panel_d_hiit_sensitivity
         else "Band × state interaction"
@@ -1353,22 +1480,41 @@ def render_figure2(
 
     meta_pairs = filter_primary_meta_paired_rows(paired)
     curve_index = build_curve_lag_index(curves)
-    # Panels C–F keep PRIMARY_META-only inputs. Panels A/B may fall back to HIIT.
+    # Panels A/B fall back to display-only curves for any sensitivity dataset.
     series_rows, wiring_gaps = reconstruct_matched_pair_curves(meta_pairs, curve_index)
     panel_a_series = series_rows
     panel_a_gaps = wiring_gaps
     panel_a_hiit_sensitivity = False
+    # Datasets in this run, from any available table: a sensitivity dataset with no
+    # paired contrast still needs its name on the unpaired panels it does populate.
+    datasets_in_run = {
+        f._as_str(row.get("dataset_id")).casefold()
+        for table in (paired, protocol, f.read_csv_rows(inputs.get("subject_level")))
+        for row in table
+        if f._as_str(row.get("dataset_id"))
+    }
+    sensitivity_dataset_ids_in_run = sorted(
+        ds
+        for ds in datasets_in_run
+        if is_sensitivity_dataset(ds, protocol_rows=protocol)
+    )
     if not meta_pairs:
-        hiit_series, hiit_gaps = build_hiit_sensitivity_panel_a_series(
-            paired, curve_index
+        sens_series, sens_gaps = build_sensitivity_panel_a_series(
+            paired, curve_index, protocol_rows=protocol
         )
-        if hiit_series:
-            panel_a_series = hiit_series
-            panel_a_gaps = hiit_gaps
+        if sens_series:
+            panel_a_series = sens_series
+            panel_a_gaps = sens_gaps
             panel_a_hiit_sensitivity = True
         else:
-            panel_a_gaps = hiit_gaps
-    # Panel B uses the same matched series as Panel A (PRIMARY_META or HIIT).
+            panel_a_gaps = sens_gaps
+    # Dataset label used on sensitivity-display titles (single-dataset runs).
+    sensitivity_title_dataset = (
+        sensitivity_dataset_ids_in_run[0]
+        if len(sensitivity_dataset_ids_in_run) == 1
+        else None
+    )
+    # Panel B uses the same matched series as Panel A (PRIMARY_META or sensitivity).
     panel_b_series = panel_a_series
     panel_b_gaps = panel_a_gaps
     panel_b_hiit_sensitivity = panel_a_hiit_sensitivity
@@ -1392,7 +1538,7 @@ def render_figure2(
     ax_a0: plt.Axes | None = None
     panel_a_title = (
         f.sensitivity_display_title(
-            "matched low vs high-demand curves", dataset_id="hiit"
+            "matched low vs high-demand curves", dataset_id=sensitivity_title_dataset
         )
         if panel_a_hiit_sensitivity
         else "Matched low vs effort curves"
@@ -1527,11 +1673,13 @@ def render_figure2(
         if panel_a_gaps:
             msg = f.FIGURE2_WIRING_GAP_NOTE
         else:
-            panel_a_na_detail = (
-                "No PRIMARY_META C5 pairs with reconstructable C2 curves."
+            panel_a_na_detail, msg, _panel_a_true_nc = paired_panel_unavailable(
+                datasets_in_run,
+                primary_meta_detail=(
+                    "No PRIMARY_META C5 pairs with reconstructable C2 curves."
+                ),
             )
             panel_a_expected_na = True
-            msg = f.primary_meta_expected_na_message(panel_a_na_detail)
         f._mark_empty_panel(ax_a, msg, xlabel=f.LAG_XLABEL, ylabel=f.Z_YLABEL)
         f._set_panel_title(ax_a, panel_a_title)
         f._add_panel_label(ax_a, "A")
@@ -1609,7 +1757,7 @@ def render_figure2(
         ]
         panel_a_notes = f.FIGURE2_PANEL_A_SENSITIVITY_NOTE
         panel_a_panel_title = f.sensitivity_display_title(
-            "matched low vs high-demand lag curves", dataset_id="hiit"
+            "matched low vs high-demand lag curves", dataset_id=sensitivity_title_dataset
         )
     elif panel_a_expected_na:
         panel_a_keys = [
@@ -1675,7 +1823,7 @@ def render_figure2(
     has_b_nested = False
     panel_b_title = (
         f.sensitivity_display_title(
-            "matched lag-difference curves", dataset_id="hiit"
+            "matched lag-difference curves", dataset_id=sensitivity_title_dataset
         )
         if panel_b_hiit_sensitivity
         else "Matched lag-difference curves"
@@ -1753,11 +1901,13 @@ def render_figure2(
             panel_b_expected_na = False
             panel_b_na_detail = ""
         else:
-            panel_b_na_detail = (
-                "No PRIMARY_META C5 pairs with reconstructable C2 curves."
+            panel_b_na_detail, msg, _panel_b_true_nc = paired_panel_unavailable(
+                datasets_in_run,
+                primary_meta_detail=(
+                    "No PRIMARY_META C5 pairs with reconstructable C2 curves."
+                ),
             )
             panel_b_expected_na = True
-            msg = f.primary_meta_expected_na_message(panel_b_na_detail)
         f._mark_empty_panel(ax_b, msg, xlabel=f.LAG_XLABEL, ylabel=f"Δ {f.Z_YLABEL}")
         f._set_panel_title(ax_b, panel_b_title)
         f._add_panel_label(ax_b, "B")
@@ -1814,7 +1964,7 @@ def render_figure2(
         ]
         panel_b_notes = f.FIGURE2_PANEL_B_SENSITIVITY_NOTE
         panel_b_panel_title = f.sensitivity_display_title(
-            "matched lag-difference curves", dataset_id="hiit"
+            "matched lag-difference curves", dataset_id=sensitivity_title_dataset
         )
     elif panel_b_expected_na:
         panel_b_keys = [
@@ -1875,7 +2025,7 @@ def render_figure2(
         protocol,
         cardiac_modality_fn=_cardiac_modality,
     )
-    sensitivity_studies = hiit_session_sensitivity_forest_rows(paired)
+    sensitivity_studies = sensitivity_forest_rows(paired, protocol_rows=protocol)
     forest_export = build_alpha_forest_export(
         primary_studies=studies,
         sensitivity_studies=sensitivity_studies,
@@ -1883,7 +2033,9 @@ def render_figure2(
     )
     panel_c_hiit_only = bool(sensitivity_studies) and not studies
     panel_c_title = (
-        f.sensitivity_display_title("Alpha ΔZLPI", dataset_id="hiit")
+        f.sensitivity_display_title(
+            "Alpha ΔZLPI", dataset_id=sensitivity_title_dataset
+        )
         if panel_c_hiit_only
         else "Alpha PRIMARY_META ΔZLPI"
     )
@@ -1910,10 +2062,13 @@ def render_figure2(
         panel_c_na_detail = ""
     else:
         panel_c_expected_na = True
-        panel_c_na_detail = "No PRIMARY_META alpha study effects in this run."
+        panel_c_na_detail, panel_c_msg, _panel_c_true_nc = paired_panel_unavailable(
+            datasets_in_run,
+            primary_meta_detail="No PRIMARY_META alpha study effects in this run.",
+        )
         f._mark_empty_panel(
             ax_c,
-            f.primary_meta_expected_na_message(panel_c_na_detail),
+            panel_c_msg,
             xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
             ylabel="Dataset",
         )
@@ -1942,7 +2097,7 @@ def render_figure2(
             "PRIMARY_META RE pooling; not a primary confirmatory claim."
         )
         panel_c_panel_title = f.sensitivity_display_title(
-            "Alpha absolute ΔZLPI", dataset_id="hiit"
+            "Alpha absolute ΔZLPI", dataset_id=sensitivity_title_dataset
         )
     elif panel_c_expected_na:
         panel_c_keys = [
@@ -2003,13 +2158,17 @@ def render_figure2(
         inputs,
         panel_a_hiit_sensitivity=panel_a_hiit_sensitivity,
     )
-    panel_d_hiit_sensitivity = bool(marginal_rows) and panel_a_hiit_sensitivity
+    panel_d_hiit_sensitivity = bool(marginal_rows) and (
+        panel_a_hiit_sensitivity
+        or panel_d_rows_are_sensitivity_only(marginal_rows, protocol_rows=protocol)
+    )
     panel_d_title, panel_d_legend_handles = _render_panel_d_estimation_plot(
         ax_d_main,
         ax_d_contrast,
         marginal_rows,
         contrast_rows,
         panel_d_hiit_sensitivity=panel_d_hiit_sensitivity,
+        sensitivity_title_dataset=sensitivity_title_dataset,
     )
     panel_d_marginal_csv = source_dir / "figure2_panel_d_marginal_estimates.csv"
     panel_d_contrast_csv = source_dir / "figure2_panel_d_contrasts.csv"
@@ -2073,7 +2232,7 @@ def render_figure2(
             "Excluded from PRIMARY_META; not a primary confirmatory claim."
         )
         panel_d_panel_title = f.sensitivity_display_title(
-            "band × state interaction", dataset_id="hiit"
+            "band × state interaction", dataset_id=sensitivity_title_dataset
         )
     else:
         panel_d_keys = [
@@ -2131,9 +2290,11 @@ def render_figure2(
             peak_params_rows=peak_params,
         )
     else:
-        hiit_peak_pairs = filter_hiit_sensitivity_paired_rows(paired)
+        sensitivity_peak_pairs = filter_sensitivity_paired_rows(
+            paired, protocol_rows=protocol
+        )
         peak_export = build_panel_e_peak_export(
-            hiit_peak_pairs,
+            sensitivity_peak_pairs,
             hiit_sensitivity=True,
             peak_params_rows=peak_params,
         )
@@ -2404,8 +2565,10 @@ def render_figure2(
         ]
     else:
         panel_e_expected_na = True
-        panel_e_na_detail = "No PRIMARY_META paired peak rows."
-        msg = f.primary_meta_expected_na_message(panel_e_na_detail)
+        panel_e_na_detail, msg, _panel_e_true_nc = paired_panel_unavailable(
+            datasets_in_run,
+            primary_meta_detail="No PRIMARY_META paired peak rows.",
+        )
         ax_e_n.axis("off")
         f._mark_empty_panel(
             ax_e_mu,
@@ -2447,7 +2610,7 @@ def render_figure2(
         ]
         panel_e_notes = f.FIGURE2_PANEL_E_SENSITIVITY_NOTE
         panel_e_panel_title = f.sensitivity_display_title(
-            "Peak center and width by state", dataset_id="hiit"
+            "Peak center and width by state", dataset_id=sensitivity_title_dataset
         )
     elif panel_e_expected_na:
         panel_e_keys = [
@@ -2887,11 +3050,15 @@ __all__ = [
     "build_hiit_sensitivity_panel_a_series",
     "build_panel_e_peak_export",
     "build_panel_e_state_summaries",
+    "build_sensitivity_panel_a_series",
     "collapse_hiit_session_lag_series",
     "filter_hiit_sensitivity_paired_rows",
     "filter_primary_meta_paired_rows",
+    "filter_sensitivity_paired_rows",
     "hiit_matched_pair_cluster_bootstrap_ci",
+    "paired_panel_unavailable",
     "paired_participant_bootstrap_ci",
+    "panel_d_rows_are_sensitivity_only",
     "reconstruct_matched_pair_curves",
     "render_figure2",
 ]

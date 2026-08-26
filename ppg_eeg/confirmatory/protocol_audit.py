@@ -38,6 +38,7 @@ from .duration_contracts import (
 )
 from .reason_codes import (
     ENDPOINT_CONTRACT_NON_ZLPI,
+    EXCLUDED_BY_MANUSCRIPT_DESIGN,
     INSUFFICIENT_DURATION,
     INSUFFICIENT_LAG_SUPPORT,
     INPUT_DISCOVERY_FAILED,
@@ -64,6 +65,7 @@ EXCLUSION_CODES = (
     "unresolved_pairing",
     "protocol_mismatch",
     "data_not_supplied",
+    "excluded_by_manuscript_design",
 )
 
 
@@ -268,16 +270,22 @@ PROTOCOL_SPECS: dict[str, ProtocolSpec] = {
     ),
     "ds004587": ProtocolSpec(
         dataset_id="ds004587",
-        low_demand_conditions=("rest",),
-        cognitive_effort_conditions=("ig",),
-        contrasts=(ContrastSpec("rest__ig", "rest", "ig"),),
+        low_demand_conditions=("rest", "ig"),
+        cognitive_effort_conditions=(),
+        contrasts=(),
         cardiac_modality="ECG",
         cardiac_source="ECGBIT in external BIDS physio (OXIBIT also available)",
         eye_state="rest eyes closed; IG task eye state not explicitly recorded",
         posture="unknown",
-        task_timing="rest is first 480 s of session-start IG EEG; IG uses run 01",
+        task_timing=(
+            "rest and IG retained as separate single-state recordings for "
+            "external lag-zero replication; no confirmatory paired contrast"
+        ),
         nuisance_signals=("OXIBIT", "device HR"),
-        run_pairing_policy="normalize IG run-01 and pair within participant/session",
+        run_pairing_policy=(
+            "single-condition external generalization; do not force rest–IG "
+            "into a primary paired state contrast"
+        ),
         unresolved_assumptions=(
             "Confirm posture and IG eye-state description.",
             "Treat ECGBIT as primary cardiac source for HR; OXIBIT is inventory-only.",
@@ -747,7 +755,14 @@ def evaluate_duration_eligibility(
 
     status = "eligible"
     exclusion_code = ""
-    if not metadata.source_data_supplied:
+    # Locked scientific registry: e.g. ds003816 may enter D60 only.
+    from .dataset_roles import eligible_for_duration_analysis
+
+    if metadata.dataset_id and not eligible_for_duration_analysis(
+        metadata.dataset_id, duration_s
+    ):
+        status, exclusion_code = "ineligible", "excluded_by_manuscript_design"
+    elif not metadata.source_data_supplied:
         status, exclusion_code = "not_supplied", "data_not_supplied"
     elif metadata.protocol_match is False:
         status, exclusion_code = "ineligible", "protocol_mismatch"
@@ -823,6 +838,7 @@ def evaluate_duration_eligibility(
         "missing_cardiac_data": MISSING_REQUIRED_MODALITY,
         "protocol_mismatch": MISSING_CONDITION_MAPPING,
         "data_not_supplied": INPUT_DISCOVERY_FAILED,
+        "excluded_by_manuscript_design": EXCLUDED_BY_MANUSCRIPT_DESIGN,
     }
     if status == "not_supplied":
         endpoint_status = "not_supplied"
