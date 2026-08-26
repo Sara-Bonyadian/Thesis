@@ -223,5 +223,11 @@ def include_if_in_filter(value: str | None, allowed: set[str] | None) -> bool:
 
 
 def unique_sorted_paths(paths: Iterable[Path]) -> list[Path]:
-    deduped = {Path(p) for p in paths}
+    """Deduplicate and sort paths, dropping macOS AppleDouble ``._*`` files.
+
+    External volumes often store Finder metadata as ``._sub-..._eeg.set``.
+    Those names still match ``*_eeg.set`` globs and parse as BIDS entities
+    (``._sub-AB10_...`` splits to ``sub-AB10``), so they must be filtered here.
+    """
+    deduped = {Path(p) for p in paths if not Path(p).name.startswith("._")}
     return sorted(deduped, key=lambda p: str(p))

@@ -5,9 +5,11 @@ import unittest
 from pathlib import Path
 
 from ppg_eeg.datasets import build_observations
+from ppg_eeg.datasets.ds003690 import DS003690Adapter
 from ppg_eeg.datasets.ds003838 import DS003838Adapter
 from ppg_eeg.datasets.ds006848 import DS006848Adapter
 from ppg_eeg.datasets.hiit import HIITAdapter
+from ppg_eeg.temporal_coupling.data_audit import _read_bids_sidecar_payload
 
 
 def _touch(path: Path) -> None:
@@ -110,6 +112,22 @@ class TestDatasetAdapters(unittest.TestCase):
             )
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].condition_label, "ph_post_rest")
+
+    def test_ds003690_skips_macos_appledouble_set_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            eeg = Path(tmp) / "ds003690" / "sub-AB10" / "eeg"
+            _touch(eeg / "sub-AB10_task-gonogo_run-1_eeg.set")
+            _touch(eeg / "._sub-AB10_task-gonogo_run-1_eeg.set")
+            rows = DS003690Adapter().build_observations(Path(tmp))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].eeg_path.name, "sub-AB10_task-gonogo_run-1_eeg.set")
+
+    def test_bids_sidecar_ignores_non_utf8_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "sub-AB10_task-gonogo_run-1_eeg.json"
+            sidecar.write_bytes(b'{"SamplingFrequency": 50' + bytes([0xB0]) + b"}")
+            payload = _read_bids_sidecar_payload(sidecar.with_suffix(".set"))
+            self.assertIsNone(payload)
 
 
 if __name__ == "__main__":

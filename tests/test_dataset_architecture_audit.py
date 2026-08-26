@@ -121,6 +121,10 @@ class TestDs003690GradedDemand(unittest.TestCase):
         self.assertEqual(profile.available_states, ("passive", "simplert", "gonogo"))
         self.assertTrue(profile.supports_graded_demand)
         self.assertTrue(profile.preserve_condition_identity)
+        self.assertEqual(
+            eligible_durations_for("ds003690"),
+            frozenset({60, 120, 180, 240}),
+        )
         spec = PROTOCOL_SPECS["ds003690"]
         self.assertEqual(spec.low_demand_conditions, ("passive",))
         self.assertEqual(spec.cognitive_effort_conditions, ("simplert", "gonogo"))
