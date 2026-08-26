@@ -8,20 +8,53 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from ..datasets import CanonicalObservation
-from .config import ConfirmatoryDatasetConfig
+from ..temporal_coupling.data_audit import read_signal_file_info
+from .config import EXPECTED_BANDS_HZ, ConfirmatoryDatasetConfig
 from .dataset_contracts import DatasetCapabilities
 from .reason_codes import (
+    INSUFFICIENT_COMMON_MONTAGE,
     INSUFFICIENT_DURATION,
     MISSING_CONDITION_MAPPING,
     MISSING_EVENT_SERIES,
     MISSING_PAIRED_OBSERVATION,
+    MISSING_REQUIRED_BAND,
     MISSING_REQUIRED_MODALITY,
+    MISSING_SENSOR_LOCATIONS,
     STRUCTURED_NC_FIELDS,
     TOPOGRAPHY_NOT_SUPPORTED,
     with_structured_nc_fields,
 )
 
 CAPABILITY_RESOLUTION_FILENAME = "capability_resolution.csv"
+# Panel F spatial maps need more than "an EEG file exists": enough scalp
+# channels must join MNE standard_1020 so a common montage can be drawn.
+MIN_STANDARD_1020_CHANNELS = 8
+_EEG_CHANNEL_TYPES = frozenset({"eeg"})
+_LOW_GAMMA_HIGH_HZ = float(EXPECTED_BANDS_HZ["low_gamma"][1])
+_STANDARD_1020_KEYS: frozenset[str] | None = None
+
+
+@dataclass(frozen=True)
+class PanelFChannelEvidence:
+    n_eeg_channels: int
+    n_standard_1020: int
+    sfreq_hz: float | None
+    nyquist_hz: float | None
+    source: str
+    supports_topography: bool
+    supports_gamma: bool
+    topography_reason_code: str
+    gamma_reason_code: str
+
+    def evidence_str(self) -> str:
+        sfreq = "none" if self.sfreq_hz is None else f"{self.sfreq_hz:g}"
+        nyquist = "none" if self.nyquist_hz is None else f"{self.nyquist_hz:g}"
+        return (
+            f"n_eeg_channels={self.n_eeg_channels}; "
+            f"n_standard_1020={self.n_standard_1020}; "
+            f"sfreq_hz={sfreq}; nyquist_hz={nyquist}; "
+            f"source={self.source or 'none'}"
+        )
 
 
 @dataclass(frozen=True)
@@ -39,6 +72,120 @@ class CapabilityResolutionRow:
 
 def _bool_str(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _standard_1020_keys() -> frozenset[str]:
+    global _STANDARD_1020_KEYS
+    if _STANDARD_1020_KEYS is not None:
+        return _STANDARD_1020_KEYS
+    try:
+        import mne
+
+        pos = mne.channels.make_standard_montage("standard_1020").get_positions()["ch_pos"]
+        _STANDARD_1020_KEYS = frozenset(str(name).casefold() for name in pos)
+    except Exception:
+        _STANDARD_1020_KEYS = frozenset()
+    return _STANDARD_1020_KEYS
+
+
+def _eeg_channel_names(
+    ch_names: Sequence[str],
+    ch_types: Sequence[str],
+) -> tuple[str, ...]:
+    names = [str(name).strip() for name in ch_names]
+    types = [str(typ).strip().casefold() for typ in ch_types]
+    if len(types) < len(names):
+        types.extend([""] * (len(names) - len(types)))
+    out: list[str] = []
+    montage = _standard_1020_keys()
+    for name, typ in zip(names, types):
+        if not name:
+            continue
+        if typ in _EEG_CHANNEL_TYPES:
+            out.append(name)
+            continue
+        # Sidecars sometimes omit type; 10-20 membership is still scalp EEG.
+        if not typ and name.casefold() in montage:
+            out.append(name)
+    return tuple(out)
+
+
+def _n_standard_1020(channel_names: Sequence[str]) -> int:
+    keys = _standard_1020_keys()
+    if not keys:
+        return 0
+    return sum(1 for name in channel_names if str(name).casefold() in keys)
+
+
+def _as_existing_path(value: object) -> Path | None:
+    if not isinstance(value, Path):
+        return None
+    try:
+        if value.name.startswith("._"):
+            return None
+        if not value.is_file():
+            return None
+    except OSError:
+        return None
+    return value
+
+
+def inspect_panel_f_channel_evidence(
+    observations: Sequence[CanonicalObservation],
+) -> PanelFChannelEvidence:
+    """Inspect one readable EEG recording for Panel F topography/gamma gates."""
+    info = None
+    for observation in observations:
+        path = _as_existing_path(getattr(observation, "eeg_path", None))
+        if path is None:
+            continue
+        try:
+            info = read_signal_file_info(
+                path,
+                data_format=getattr(observation, "eeg_format", None),
+            )
+        except (OSError, TypeError, ValueError):
+            info = None
+        if info is not None:
+            break
+
+    if info is None:
+        return PanelFChannelEvidence(
+            n_eeg_channels=0,
+            n_standard_1020=0,
+            sfreq_hz=None,
+            nyquist_hz=None,
+            source="",
+            supports_topography=False,
+            supports_gamma=False,
+            topography_reason_code=MISSING_SENSOR_LOCATIONS,
+            gamma_reason_code=MISSING_REQUIRED_BAND,
+        )
+
+    eeg_names = _eeg_channel_names(info.ch_names, info.ch_types)
+    n_1020 = _n_standard_1020(eeg_names)
+    sfreq = float(info.sfreq) if info.sfreq and info.sfreq > 0 else None
+    nyquist = (sfreq / 2.0) if sfreq is not None else None
+    has_topo = n_1020 >= MIN_STANDARD_1020_CHANNELS
+    has_gamma = bool(eeg_names) and nyquist is not None and nyquist >= _LOW_GAMMA_HIGH_HZ
+    if has_topo:
+        topo_reason = ""
+    elif n_1020 > 0:
+        topo_reason = INSUFFICIENT_COMMON_MONTAGE
+    else:
+        topo_reason = MISSING_SENSOR_LOCATIONS
+    gamma_reason = "" if has_gamma else MISSING_REQUIRED_BAND
+    return PanelFChannelEvidence(
+        n_eeg_channels=len(eeg_names),
+        n_standard_1020=n_1020,
+        sfreq_hz=sfreq,
+        nyquist_hz=nyquist,
+        source=str(info.source or ""),
+        supports_topography=has_topo,
+        supports_gamma=has_gamma,
+        topography_reason_code=topo_reason,
+        gamma_reason_code=gamma_reason,
+    )
 
 
 def resolve_effective_capabilities(
@@ -121,6 +268,7 @@ def resolve_effective_capabilities(
     max_overlap = max(overlaps) if overlaps else None
     supports_d240_obs = max_overlap is not None and max_overlap >= 240
     supports_d180_obs = max_overlap is not None and max_overlap >= 180
+    panel_f = inspect_panel_f_channel_evidence(obs)
 
     effective = DatasetCapabilities(
         has_eeg=bool(declared.has_eeg and has_eeg_files),
@@ -143,8 +291,12 @@ def resolve_effective_capabilities(
         ),
         supports_d180=bool(declared.supports_d180 and (supports_d180_obs if max_overlap is not None else False)),
         supports_d240=bool(declared.supports_d240 and (supports_d240_obs if max_overlap is not None else False)),
-        supports_topography=bool(declared.supports_topography and has_eeg_files),
-        supports_gamma=bool(declared.supports_gamma and has_eeg_files),
+        supports_topography=bool(
+            declared.supports_topography and has_eeg_files and panel_f.supports_topography
+        ),
+        supports_gamma=bool(
+            declared.supports_gamma and has_eeg_files and panel_f.supports_gamma
+        ),
         sensitivity_only=bool(declared.sensitivity_only),
         has_artifact_controls=bool(declared.has_artifact_controls and has_hr_files),
     )
@@ -252,22 +404,31 @@ def resolve_effective_capabilities(
         else INSUFFICIENT_DURATION,
         "C0/C1c/Figure3C",
     )
+    if effective.supports_topography or not declared.supports_topography:
+        topo_reason = ""
+    elif not has_eeg_files:
+        topo_reason = TOPOGRAPHY_NOT_SUPPORTED
+    else:
+        topo_reason = panel_f.topography_reason_code or TOPOGRAPHY_NOT_SUPPORTED
     add(
         "supports_topography",
         declared.supports_topography,
-        f"has_eeg={_bool_str(effective.has_eeg)}",
+        f"has_eeg={_bool_str(has_eeg_files)}; {panel_f.evidence_str()}",
         effective.supports_topography,
-        ""
-        if effective.supports_topography or not declared.supports_topography
-        else TOPOGRAPHY_NOT_SUPPORTED,
+        topo_reason,
         "PanelF",
+    )
+    gamma_reason = (
+        ""
+        if effective.supports_gamma or not declared.supports_gamma
+        else (panel_f.gamma_reason_code or MISSING_REQUIRED_BAND)
     )
     add(
         "supports_gamma",
         declared.supports_gamma,
-        f"has_eeg={_bool_str(effective.has_eeg)}",
+        f"has_eeg={_bool_str(has_eeg_files)}; {panel_f.evidence_str()}",
         effective.supports_gamma,
-        "" if effective.supports_gamma or not declared.supports_gamma else "missing_required_band",
+        gamma_reason,
         "PanelF",
     )
 

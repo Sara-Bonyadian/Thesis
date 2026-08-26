@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ..datasets import CanonicalObservation
-from ..temporal_coupling.data_audit import read_signal_file_info
+from .capability_resolution import inspect_panel_f_channel_evidence
 from .config import ConfirmatoryDatasetConfig
 from .reason_codes import (
     CONFIGURATION_VALIDATION_FAILED,
@@ -15,6 +15,7 @@ from .reason_codes import (
     MISSING_CONDITION_MAPPING,
     MISSING_DATASET_ROOT,
     MISSING_EVENT_SERIES,
+    MISSING_REQUIRED_BAND,
     MISSING_REQUIRED_MODALITY,
     TOPOGRAPHY_NOT_SUPPORTED,
 )
@@ -139,21 +140,27 @@ def validate_dataset_configuration(
             )
         )
 
-    # Practical channel presence check from first readable EEG file.
-    eeg_channels: set[str] = set()
-    for row in obs:
-        if not row.eeg_path.is_file():
-            continue
-        info = read_signal_file_info(row.eeg_path, data_format=row.eeg_format)
-        if info is None:
-            continue
-        eeg_channels = {name.casefold() for name in info.ch_names}
-        break
-    if dataset.capabilities.supports_topography and not eeg_channels:
+    evidence = inspect_panel_f_channel_evidence(obs)
+    if dataset.capabilities.supports_topography and not evidence.supports_topography:
         issues.append(
             ValidationIssue(
-                code=CONFIGURATION_VALIDATION_FAILED,
-                message=f"{dataset.dataset_id}: unable to read EEG channels for montage validation.",
+                code=evidence.topography_reason_code or TOPOGRAPHY_NOT_SUPPORTED,
+                message=(
+                    f"{dataset.dataset_id}: topography requires scalp channels on "
+                    f"standard_1020, not EEG file presence alone ({evidence.evidence_str()})."
+                ),
+                severity="warning",
+            )
+        )
+    if dataset.capabilities.supports_gamma and not evidence.supports_gamma:
+        issues.append(
+            ValidationIssue(
+                code=evidence.gamma_reason_code or MISSING_REQUIRED_BAND,
+                message=(
+                    f"{dataset.dataset_id}: gamma requires EEG channels with Nyquist "
+                    f"covering locked low_gamma 30-45 Hz ({evidence.evidence_str()})."
+                ),
+                severity="warning",
             )
         )
     return issues
