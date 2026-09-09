@@ -43,10 +43,17 @@ This module performs **subject-level** fits only; group hierarchical inference i
 
 Exclusion reasons (``exclusion_reason``)
 ----------------------------------------
+- ``option_c_peak_requires_d180_d240``: duration is not standard ZLPI (D60/D120);
+  Option C is not computed; A/μ/FWHM are not exported under this estimand
+- ``insufficient_option_c_flank_support``: D180/D240 curve lacks ≥2 finite
+  weighted lags in ``20 ≤ |τ| ≤ 60`` (no median-z or reduced-flank fallback)
 - ``gaussian_fit_not_attempted``: too few finite weighted lag points to call the optimizer
 - ``fit_failed``: optimizer was invoked but did not converge
 - ``no_identifiable_positive_peak``: fit converged, but amplitude criteria failed
 - empty string: identifiable positive peak (timing shift may be reported)
+
+Option C is **only** the locked D180/D240 estimand. D60/D120 rows are written
+as ``not_computable`` with ``OPTION_C_PEAK_NOT_APPLICABLE``.
 
 ``endpoint_name`` is the canonical duration-contract ID (e.g. ``zlpi``);
 ``endpoint_alias`` is the short display acronym (``ZLPI`` / ``MWPI`` / ``SWPI``).
@@ -66,6 +73,10 @@ from scipy.optimize import curve_fit
 from .correlation import CURVES_TEMPLATE, IDENTITY_FIELDS, identity_from_row
 from .duration_contracts import EXPECTED_DURATIONS_S, contract_for_duration
 from .endpoints import fisher_z
+from .reason_codes import (
+    attach_structured_reason,
+    map_exclusion_to_reason_code,
+)
 
 PARAMS_FILENAME = "peak_fit_params.csv"
 QC_FILENAME = "peak_fit_qc.csv"
@@ -87,6 +98,9 @@ FLANK_OUTER_S = 60.0
 EXCLUSION_FIT_NOT_ATTEMPTED = "gaussian_fit_not_attempted"
 EXCLUSION_FIT_FAILED = "fit_failed"
 EXCLUSION_NO_IDENTIFIABLE_PEAK = "no_identifiable_positive_peak"
+EXCLUSION_OPTION_C_NOT_APPLICABLE = "option_c_peak_requires_d180_d240"
+EXCLUSION_INSUFFICIENT_FLANKS = "insufficient_option_c_flank_support"
+MIN_FLANK_POINTS = 2
 
 PARAMS_FIELDS = IDENTITY_FIELDS + (
     "duration_s",
@@ -121,6 +135,11 @@ PARAMS_FIELDS = IDENTITY_FIELDS + (
     "mu_at_bound",
     "sigma_at_bound",
     "exclusion_reason",
+    "status",
+    "reason_code",
+    "reason",
+    "required_evidence",
+    "observed_evidence",
 )
 
 QC_FIELDS = IDENTITY_FIELDS + (
@@ -146,6 +165,11 @@ QC_FIELDS = IDENTITY_FIELDS + (
     "init_sigma_s",
     "boundary_hit",
     "exclusion_reason",
+    "status",
+    "reason_code",
+    "reason",
+    "required_evidence",
+    "observed_evidence",
 )
 
 
@@ -194,6 +218,73 @@ def fwhm_from_sigma(sigma_s: float) -> float:
     if not math.isfinite(sigma_s) or sigma_s <= 0:
         return float("nan")
     return float(FWHM_FACTOR * sigma_s)
+
+
+def _empty_fit_result(*, n_fit: int = 0, exclusion_reason: str = "") -> dict[str, object]:
+    return {
+        "converged": False,
+        "has_identifiable_peak": False,
+        "report_timing_shift": False,
+        "baseline_C": float("nan"),
+        "peak_height_A": float("nan"),
+        "peak_center_mu_s": float("nan"),
+        "sigma_s": float("nan"),
+        "fwhm_s": float("nan"),
+        "peak_lag_fitted_s": float("nan"),
+        "se_baseline_C": float("nan"),
+        "se_peak_height_A": float("nan"),
+        "se_peak_center_mu_s": float("nan"),
+        "se_sigma_s": float("nan"),
+        "rmse": float("nan"),
+        "weighted_rss": float("nan"),
+        "n_lags_fit": n_fit,
+        "A_at_lower_bound": False,
+        "mu_at_bound": False,
+        "sigma_at_bound": False,
+        "boundary_hit": False,
+        "fit_success": False,
+        "optimizer_message": "",
+        "init_baseline_C": float("nan"),
+        "init_peak_height_A": float("nan"),
+        "init_peak_center_mu_s": float("nan"),
+        "init_sigma_s": float("nan"),
+        "exclusion_reason": exclusion_reason,
+    }
+
+
+def _with_peak_reason(
+    row: Mapping[str, object],
+    *,
+    exclusion_reason: str,
+    required_evidence: str = "",
+    observed_evidence: str = "",
+) -> dict[str, object]:
+    """Attach C3 peak-model NC envelope."""
+    if not exclusion_reason:
+        status = "computed"
+        eligible = True
+    elif exclusion_reason in {
+        EXCLUSION_OPTION_C_NOT_APPLICABLE,
+        EXCLUSION_INSUFFICIENT_FLANKS,
+    }:
+        status = "not_computable"
+        eligible = False
+    else:
+        status = "excluded"
+        eligible = False
+    code = map_exclusion_to_reason_code(exclusion_reason)
+    reason_text = exclusion_reason.replace("_", " ") if exclusion_reason else ""
+    return attach_structured_reason(
+        {**dict(row), "exclusion_reason": exclusion_reason, "reason_code": code},
+        stage="C3",
+        status=status,
+        eligible=eligible,
+        reason_code=code,
+        reason=reason_text,
+        required_evidence=required_evidence,
+        observed_evidence=observed_evidence,
+        specification_id="option_c_near_zero_peak",
+    )
 
 
 def _identity_from_row(row: Mapping[str, object]) -> dict[str, str]:
@@ -304,35 +395,7 @@ def fit_gaussian_peak(
     w_f = w[mask]
     n_fit = int(lags_f.size)
 
-    empty = {
-        "converged": False,
-        "has_identifiable_peak": False,
-        "report_timing_shift": False,
-        "baseline_C": float("nan"),
-        "peak_height_A": float("nan"),
-        "peak_center_mu_s": float("nan"),
-        "sigma_s": float("nan"),
-        "fwhm_s": float("nan"),
-        "peak_lag_fitted_s": float("nan"),
-        "se_baseline_C": float("nan"),
-        "se_peak_height_A": float("nan"),
-        "se_peak_center_mu_s": float("nan"),
-        "se_sigma_s": float("nan"),
-        "rmse": float("nan"),
-        "weighted_rss": float("nan"),
-        "n_lags_fit": n_fit,
-        "A_at_lower_bound": False,
-        "mu_at_bound": False,
-        "sigma_at_bound": False,
-        "boundary_hit": False,
-        "fit_success": False,
-        "optimizer_message": "",
-        "init_baseline_C": float("nan"),
-        "init_peak_height_A": float("nan"),
-        "init_peak_center_mu_s": float("nan"),
-        "init_sigma_s": float("nan"),
-        "exclusion_reason": "",
-    }
+    empty = _empty_fit_result(n_fit=n_fit)
 
     if n_fit < MIN_FINITE_POINTS:
         empty["exclusion_reason"] = EXCLUSION_FIT_NOT_ATTEMPTED
@@ -341,21 +404,27 @@ def fit_gaussian_peak(
         )
         return empty
 
-    # Baseline from distant flanks: 20 <= |tau| <= 60.
+    # Baseline from distant flanks: 20 <= |tau| <= 60. No reduced-flank or
+    # median-z fallback — Option C is undefined without this support.
     flank_mask = (
         np.abs(lags_f) >= FLANK_INNER_S
     ) & (
         np.abs(lags_f) <= FLANK_OUTER_S
     )
-    if int(np.sum(flank_mask)) >= 2:
-        b0, b1 = _fit_weighted_linear_baseline(
-            lags_f[flank_mask],
-            z_f[flank_mask],
-            w_f[flank_mask],
+    n_flank = int(np.sum(flank_mask))
+    if n_flank < MIN_FLANK_POINTS:
+        empty["exclusion_reason"] = EXCLUSION_INSUFFICIENT_FLANKS
+        empty["optimizer_message"] = (
+            "Option C not attempted: need at least "
+            f"{MIN_FLANK_POINTS} finite weighted flank lags with "
+            f"{FLANK_INNER_S:.0f}<=|tau|<={FLANK_OUTER_S:.0f}."
         )
-    else:
-        # Fallback for degenerate short windows lacking flank support.
-        b0, b1 = float(np.median(z_f)), 0.0
+        return empty
+    b0, b1 = _fit_weighted_linear_baseline(
+        lags_f[flank_mask],
+        z_f[flank_mask],
+        w_f[flank_mask],
+    )
 
     # Central window fit domain: |tau| <= 20.
     central_mask = np.abs(lags_f) <= CENTRAL_LAG_MAX_S
@@ -452,11 +521,11 @@ def fit_gaussian_peak(
         "has_identifiable_peak": has_peak,
         "report_timing_shift": report_timing,
         "baseline_C": b0,
-        "peak_height_A": peak_height_A,
+        "peak_height_A": peak_height_A if has_peak else float("nan"),
         # Timing-report μ remains NaN when the peak is not identifiable.
         "peak_center_mu_s": reported_mu,
-        "sigma_s": sigma_s,
-        "fwhm_s": fwhm_from_sigma(sigma_s),
+        "sigma_s": sigma_s if has_peak else float("nan"),
+        "fwhm_s": fwhm_from_sigma(sigma_s) if has_peak else float("nan"),
         # Always retain the optimizer μ for comparison with the observed peak.
         "peak_lag_fitted_s": peak_center_mu_s,
         # Baseline slope/intercept uncertainty is not currently exported.
@@ -488,7 +557,12 @@ def evaluate_peak_curve(
     *,
     duration_s: int,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    """Fit a peak model for one observation × band × representation curve."""
+    """Fit a peak model for one observation × band × representation curve.
+
+    Option C (20≤|τ|≤60 baseline + |τ|≤20 Gaussian) is computed only for
+    standard ZLPI durations (D180/D240). Other durations are exported as
+    ``not_computable`` without A/μ/FWHM.
+    """
     if duration_s not in EXPECTED_DURATIONS_S:
         raise ValueError(f"Unsupported duration_s={duration_s}.")
     contract = contract_for_duration(duration_s)
@@ -528,88 +602,128 @@ def evaluate_peak_curve(
         "boundary_hit",
         "exclusion_reason",
     )
-    if not curve_rows:
+
+    if curve_rows:
+        first = curve_rows[0]
+        identity = _identity_from_row(first)
+        duration_role = str(first.get("duration_role", "")).strip()
+        band = str(first.get("band", "")).strip().casefold()
+        representation = str(first.get("power_representation", "")).strip()
+        pair = str(first.get("pair", "")).strip()
+        is_primary = bool(first.get("is_primary_representation", False))
+        ordered = sorted(curve_rows, key=lambda row: float(row["lag_s"]))
+        lags = np.asarray([float(row["lag_s"]) for row in ordered], dtype=float)
+        r_values = np.asarray([float(row["r"]) for row in ordered], dtype=float)
+        overlaps = np.asarray(
+            [float(row.get("n_overlap", 0)) for row in ordered], dtype=float
+        )
+        peak_r, peak_lag_observed_s = _observed_peak_from_r(lags, r_values)
+        finite_overlap = overlaps[np.isfinite(overlaps) & (overlaps > 0)]
+        overlap_is_constant = (
+            bool(finite_overlap.size)
+            and float(np.max(finite_overlap) - np.min(finite_overlap)) <= 1e-12
+        )
+        n_common_support = (
+            int(round(float(np.min(finite_overlap)))) if finite_overlap.size else 0
+        )
+        n_lags_input = int(lags.size)
+    else:
         identity = {field: "" for field in IDENTITY_FIELDS}
-        fit = fit_gaussian_peak([], [])
-        params = {
-            **identity,
-            "duration_s": duration_s,
-            "duration_role": "",
-            "endpoint_name": contract.endpoint_name,
-            "endpoint_alias": contract.endpoint_alias,
-            "is_standard_zlpi": contract.is_standard_zlpi,
-            "band": "",
-            "power_representation": "",
-            "is_primary_representation": False,
-            "pair": "",
-            "peak_r": float("nan"),
-            "peak_lag_observed_s": float("nan"),
-            "n_common_support": 0,
-            **{key: fit[key] for key in fit_param_keys},
-        }
-        qc = {
-            **identity,
-            "duration_s": duration_s,
-            "duration_role": "",
-            "endpoint_name": contract.endpoint_name,
-            "endpoint_alias": contract.endpoint_alias,
-            "band": "",
-            "power_representation": "",
-            "pair": "",
-            "n_lags_input": 0,
-            "n_common_support": 0,
-            "overlap_is_constant": False,
-            **{key: fit[key] for key in qc_fit_keys},
-        }
-        return params, qc
+        duration_role = ""
+        band = ""
+        representation = ""
+        pair = ""
+        is_primary = False
+        lags = np.asarray([], dtype=float)
+        r_values = np.asarray([], dtype=float)
+        overlaps = np.asarray([], dtype=float)
+        peak_r, peak_lag_observed_s = float("nan"), float("nan")
+        overlap_is_constant = False
+        n_common_support = 0
+        n_lags_input = 0
 
-    first = curve_rows[0]
-    identity = _identity_from_row(first)
-    ordered = sorted(curve_rows, key=lambda row: float(row["lag_s"]))
-    lags = np.asarray([float(row["lag_s"]) for row in ordered], dtype=float)
-    r_values = np.asarray([float(row["r"]) for row in ordered], dtype=float)
-    overlaps = np.asarray([float(row.get("n_overlap", 0)) for row in ordered], dtype=float)
-    z_values = np.asarray([fisher_z(float(r)) for r in r_values], dtype=float)
-    peak_r, peak_lag_observed_s = _observed_peak_from_r(lags, r_values)
+    if not contract.is_standard_zlpi:
+        fit = _empty_fit_result(exclusion_reason=EXCLUSION_OPTION_C_NOT_APPLICABLE)
+        fit["optimizer_message"] = (
+            "Option C peak fit is defined only for standard ZLPI durations "
+            "(D180/D240) with 20<=|tau|<=60 flank baseline; "
+            f"D{duration_s} {contract.endpoint_alias} is not this estimand."
+        )
+        required = (
+            "duration_s in {180, 240}; Option C flanks 20<=|tau|<=60; "
+            "A, mu, FWHM under this estimand"
+        )
+        observed = (
+            f"duration_s={duration_s}; endpoint_name={contract.endpoint_name}; "
+            f"lag_max_s={contract.lag_max_s}"
+        )
+    else:
+        z_values = np.asarray([fisher_z(float(r)) for r in r_values], dtype=float)
+        fit = fit_gaussian_peak(lags, z_values, weights=overlaps if lags.size else None)
+        exclusion = str(fit.get("exclusion_reason") or "")
+        if exclusion == EXCLUSION_INSUFFICIENT_FLANKS:
+            required = f"at least {MIN_FLANK_POINTS} finite weighted lags with 20<=|tau|<=60"
+            observed = f"duration_s={duration_s}; n_lags_input={n_lags_input}"
+        elif exclusion:
+            required = "identifiable Option C peak on D180/D240 Fisher-z curve"
+            observed = (
+                f"duration_s={duration_s}; exclusion={exclusion}; "
+                f"n_lags_fit={fit.get('n_lags_fit', 0)}"
+            )
+        else:
+            required = ""
+            observed = ""
 
-    finite_overlap = overlaps[np.isfinite(overlaps) & (overlaps > 0)]
-    overlap_is_constant = (
-        bool(finite_overlap.size)
-        and float(np.max(finite_overlap) - np.min(finite_overlap)) <= 1e-12
-    )
-    n_common_support = int(round(float(np.min(finite_overlap)))) if finite_overlap.size else 0
-
-    fit = fit_gaussian_peak(lags, z_values, weights=overlaps)
     params = {
         **identity,
         "duration_s": int(duration_s),
-        "duration_role": str(first.get("duration_role", "")).strip(),
+        "duration_role": duration_role,
         "endpoint_name": contract.endpoint_name,
         "endpoint_alias": contract.endpoint_alias,
         "is_standard_zlpi": bool(contract.is_standard_zlpi),
-        "band": str(first.get("band", "")).strip().casefold(),
-        "power_representation": str(first.get("power_representation", "")).strip(),
-        "is_primary_representation": bool(first.get("is_primary_representation", False)),
-        "pair": str(first.get("pair", "")).strip(),
+        "band": band,
+        "power_representation": representation,
+        "is_primary_representation": is_primary,
+        "pair": pair,
         "peak_r": peak_r,
         "peak_lag_observed_s": peak_lag_observed_s,
         "n_common_support": n_common_support,
         **{key: fit[key] for key in fit_param_keys},
     }
+    # Keep optimizer diagnostics in QC; manuscript-facing params stay blank when
+    # the peak is not identifiable.
+    if not bool(fit.get("has_identifiable_peak")):
+        params["peak_lag_fitted_s"] = float("nan")
+        params["se_peak_height_A"] = float("nan")
+        params["se_peak_center_mu_s"] = float("nan")
+        params["se_sigma_s"] = float("nan")
     qc = {
         **identity,
         "duration_s": int(duration_s),
-        "duration_role": str(first.get("duration_role", "")).strip(),
+        "duration_role": duration_role,
         "endpoint_name": contract.endpoint_name,
         "endpoint_alias": contract.endpoint_alias,
-        "band": str(first.get("band", "")).strip().casefold(),
-        "power_representation": str(first.get("power_representation", "")).strip(),
-        "pair": str(first.get("pair", "")).strip(),
-        "n_lags_input": int(lags.size),
+        "band": band,
+        "power_representation": representation,
+        "pair": pair,
+        "n_lags_input": n_lags_input,
         "n_common_support": n_common_support,
         "overlap_is_constant": overlap_is_constant,
         **{key: fit[key] for key in qc_fit_keys},
     }
+    exclusion_reason = str(fit.get("exclusion_reason") or "")
+    params = _with_peak_reason(
+        params,
+        exclusion_reason=exclusion_reason,
+        required_evidence=required,
+        observed_evidence=observed,
+    )
+    qc = _with_peak_reason(
+        qc,
+        exclusion_reason=exclusion_reason,
+        required_evidence=required,
+        observed_evidence=observed,
+    )
     return params, qc
 
 
@@ -645,6 +759,13 @@ def compute_peak_fits_from_csv(
     )
 
 
+def _csv_cell(value: object) -> object:
+    """Blank non-finite floats so unsupported A/μ/FWHM are not exported as ``nan``."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return ""
+    return value if value is not None else ""
+
+
 def _write_csv(
     path: Path,
     rows: Sequence[Mapping[str, object]],
@@ -654,7 +775,9 @@ def _write_csv(
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
         writer.writeheader()
         for row in rows:
-            writer.writerow({field: row.get(field, "") for field in fieldnames})
+            writer.writerow(
+                {field: _csv_cell(row.get(field, "")) for field in fieldnames}
+            )
 
 
 def write_peak_fit_outputs(
@@ -688,7 +811,9 @@ def append_peak_fit_outputs(
             if write_header:
                 writer.writeheader()
             for row in rows:
-                writer.writerow({field: row.get(field, "") for field in fields})
+                writer.writerow(
+                    {field: _csv_cell(row.get(field, "")) for field in fields}
+                )
 
     _append(params_path, result.params_rows, PARAMS_FIELDS)
     _append(qc_path, result.qc_rows, QC_FIELDS)
@@ -735,7 +860,9 @@ __all__ = [
     "DEFAULT_SIGMA0_S",
     "EXCLUSION_FIT_FAILED",
     "EXCLUSION_FIT_NOT_ATTEMPTED",
+    "EXCLUSION_INSUFFICIENT_FLANKS",
     "EXCLUSION_NO_IDENTIFIABLE_PEAK",
+    "EXCLUSION_OPTION_C_NOT_APPLICABLE",
     "FWHM_FACTOR",
     "IDENTIFIABLE_A_OVER_RMSE",
     "MIN_IDENTIFIABLE_A",

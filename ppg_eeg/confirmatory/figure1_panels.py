@@ -13,7 +13,7 @@ from typing import Mapping, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
 
 from .duration_contracts import (
     ENDPOINT_ZLPI,
@@ -23,8 +23,10 @@ from .duration_contracts import (
 )
 from .endpoints import fisher_z
 from .dataset_roles import (
+    ROLE_PRIMARY,
+    ROLE_SENSITIVITY,
     ROLE_UNKNOWN,
-    has_prespecified_contrast,
+    is_runtime_blocked,
     resolve_dataset_role,
     role_tag,
 )
@@ -32,10 +34,9 @@ from .forest_display import (
     FOREST_EXPORT_FIELDS,
     build_alpha_forest_export,
     draw_alpha_meta_forest,
-    primary_meta_alpha_forest_rows,
-    sensitivity_forest_rows,
 )
 from .manifest import FigurePanelSource
+from .inference import low_demand_alpha_replication
 from .null_delta_inference import PRIMARY_NULL_TYPE
 
 # Imported after figures constants exist; callers invoke via deferred import.
@@ -196,6 +197,37 @@ def _dataset_role_from_config(dataset_id: str) -> str:
     """Read the configured role when source rows do not carry it."""
     role = resolve_dataset_role(dataset_id)
     return "other" if role == ROLE_UNKNOWN else role
+
+
+def _blocked_sensitivity_datasets(
+    dataset_ids: set[str],
+    protocol_rows: Sequence[Mapping[str, object]],
+) -> set[str]:
+    blocked: set[str] = set()
+    for dataset_id in dataset_ids:
+        ds = str(dataset_id).strip().casefold()
+        if not ds:
+            continue
+        role = resolve_dataset_role(ds, protocol_rows=protocol_rows)
+        if role == ROLE_SENSITIVITY and is_runtime_blocked(ds):
+            blocked.add(ds)
+    return blocked
+
+
+def _drop_blocked_sensitivity_rows(
+    rows: Sequence[Mapping[str, object]],
+    blocked_dataset_ids: set[str],
+) -> list[dict[str, object]]:
+    if not blocked_dataset_ids:
+        return [dict(row) for row in rows]
+    f = _fig()
+    out: list[dict[str, object]] = []
+    for row in rows:
+        ds = f._as_str(row.get("dataset_id")).casefold()
+        if ds in blocked_dataset_ids:
+            continue
+        out.append(dict(row))
+    return out
 
 
 def _cardiac_modality(dataset_id: str, protocol_rows: Sequence[Mapping[str, object]]) -> str:
@@ -389,69 +421,83 @@ def surrogate_significance_marks(
 
 
 def alpha_replication_forest_rows(
-    dataset_effects: Sequence[Mapping[str, object]],
-    meta_rows: Sequence[Mapping[str, object]],
+    subject_rows: Sequence[Mapping[str, object]],
     protocol_rows: Sequence[Mapping[str, object]],
-    paired_rows: Sequence[Mapping[str, object]] | None = None,
+    low_demand_effect_rows: Sequence[Mapping[str, object]] | None = None,
+    low_demand_meta_rows: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
-    """PRIMARY_META alpha rows + display-only per-sensitivity-dataset rows + pooled.
+    """Low-demand D240 alpha ZLPI rows + pooled RE for Figure 1 Panel E."""
+    f = _fig()
+    computed_effects, computed_meta, _computed_loo = low_demand_alpha_replication(
+        subject_rows
+    )
+    effect_rows = list(low_demand_effect_rows or computed_effects)
+    if low_demand_meta_rows:
+        meta_row = dict(low_demand_meta_rows[0])
+    else:
+        meta_row = dict(computed_meta)
 
-    Sensitivity rows are built for every dataset whose centralized role is
-    ``sensitivity`` (not just HIIT). They never set ``enters_meta`` and are not
-    used for pooling.
-    """
-    studies, pooled = primary_meta_alpha_forest_rows(
-        dataset_effects,
-        meta_rows,
-        protocol_rows,
-        cardiac_modality_fn=_cardiac_modality,
-    )
-    sensitivity = sensitivity_forest_rows(
-        paired_rows or [], protocol_rows=protocol_rows
-    )
-    return studies, sensitivity, pooled
+    studies: list[dict[str, object]] = []
+    for row in effect_rows:
+        dataset_id = f._as_str(row.get("dataset_id")).casefold()
+        if not dataset_id:
+            continue
+        if _dataset_role(dataset_id, protocol_rows) != ROLE_PRIMARY:
+            continue
+        studies.append(
+            {
+                "dataset_id": dataset_id,
+                "dataset_role": "primary",
+                "analysis_family": "low_demand_alpha_replication",
+                "contrast_id": "low_demand_mean_zlpi",
+                "band": "alpha",
+                "endpoint_name": ENDPOINT_ZLPI,
+                "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "power_representation": f.PRIMARY_REPRESENTATION,
+                "effect_mean": f._as_float(row.get("effect_mean")),
+                "ci_low": f._as_float(row.get("ci_low")),
+                "ci_high": f._as_float(row.get("ci_high")),
+                "n_pairs": f._as_int(row.get("n_participants")),
+                "n_participants": f._as_int(row.get("n_participants")),
+                "enters_meta": f._as_bool(row.get("enters_meta"), True),
+                "cardiac_modality": _cardiac_modality(dataset_id, protocol_rows),
+                "prediction_low": "",
+                "prediction_high": "",
+                "n_datasets": "",
+                "row_type": "primary",
+                "display_label": "",
+            }
+        )
+    studies.sort(key=lambda r: f._as_str(r["dataset_id"]).casefold())
+    pooled: dict[str, object] | None = None
+    if (
+        f._as_str(meta_row.get("analysis_status")).casefold() == "completed"
+        and f._as_int(meta_row.get("n_datasets")) >= 2
+    ):
+        pooled = {
+            "band": "alpha",
+            "endpoint_name": ENDPOINT_ZLPI,
+            "duration_s": EXPECTED_PRIMARY_DURATION_S,
+            "power_representation": f.PRIMARY_REPRESENTATION,
+            "pooled_effect": f._as_float(meta_row.get("pooled_effect")),
+            "ci_low": f._as_float(meta_row.get("ci_low")),
+            "ci_high": f._as_float(meta_row.get("ci_high")),
+            "prediction_low": f._as_float(meta_row.get("prediction_low")),
+            "prediction_high": f._as_float(meta_row.get("prediction_high")),
+            "n_datasets": f._as_int(meta_row.get("n_datasets")),
+            "analysis_status": f._as_str(meta_row.get("analysis_status")),
+            "i2": f._as_float(meta_row.get("i2")),
+            "tau2": f._as_float(meta_row.get("tau2")),
+        }
+    return studies, [], pooled
 
 
 def _forest_unavailable_message(
-    paired_rows: Sequence[Mapping[str, object]] | None,
-    protocol_rows: Sequence[Mapping[str, object]],
+    studies: Sequence[Mapping[str, object]],
 ) -> str:
-    """Explain an empty ΔZLPI forest by estimand availability, not by role.
-
-    A sensitivity role alone never empties this panel. When a dataset declares no
-    prespecified low-demand vs high-demand contrast there is no ΔZLPI estimand to
-    plot, and that genuine gap is what gets reported.
-    """
-    f = _fig()
-    datasets = sorted(
-        {
-            f._as_str(row.get("dataset_id")).casefold()
-            for row in (paired_rows or ())
-            if f._as_str(row.get("dataset_id"))
-        }
-        or {
-            f._as_str(row.get("dataset_id")).casefold()
-            for row in protocol_rows
-            if f._as_str(row.get("dataset_id"))
-        }
-    )
-    without_contrast = [ds for ds in datasets if not has_prespecified_contrast(ds)]
-    if datasets and len(without_contrast) == len(datasets):
-        names = ", ".join(f._dataset_display(ds) for ds in without_contrast)
-        return (
-            f"Not computable — {names} declares no prespecified low-demand vs "
-            "high-demand contrast, so no Δ ZLPI estimand exists for this panel."
-        )
-    if datasets and not any(
-        resolve_dataset_role(ds, protocol_rows=protocol_rows) == "primary"
-        for ds in datasets
-    ):
-        return (
-            "No eligible paired Δ ZLPI observations in this sensitivity run; "
-            "sensitivity rows are displayed when pairs are available and are "
-            "never pooled."
-        )
-    return "No PRIMARY_META alpha study effects in this run."
+    if not studies:
+        return "No eligible low-demand D240 alpha ZLPI observations for primary datasets."
+    return "No pooled random-effects estimate available (need at least two eligible datasets)."
 
 
 def _panel_c_group_summaries(
@@ -533,10 +579,27 @@ def _figure1_footer_lines() -> tuple[str, ...]:
     f = _fig()
     return (
         f.LAG_CONVENTION_NOTE,
-        f.CI_95_METHOD_NOTE,
-        f.FIGURE1_PANEL_D_SURROGATE_RULE_NOTE,
-        f.FIGURE1_PANEL_E_NOTE,
+        "Panel B ribbons: participant-within-dataset percentile bootstrap (95%).",
+        "Alpha is confirmatory; other bands are secondary. μ ±2 s equivalence not established.",
     )
+
+
+def _fig1_band_short(band: str) -> str:
+    key = str(band).casefold()
+    return {
+        "theta": "Theta",
+        "alpha": "Alpha",
+        "beta": "Beta",
+        "low_gamma": "Low-γ",
+    }.get(key, _fig()._band_display(band))
+
+
+def _fig1_dataset_id_label(dataset_id: str) -> str:
+    """Keep accession IDs traceable (ds003690 / ds003838 / ds006848)."""
+    key = _fig()._as_str(dataset_id)
+    if key.casefold().startswith("ds"):
+        return key.casefold()
+    return _fig()._dataset_display(key)
 
 
 def _draw_schematic(ax: plt.Axes) -> None:
@@ -545,12 +608,12 @@ def _draw_schematic(ax: plt.Axes) -> None:
     ax.set_ylim(0, 1)
     ax.axis("off")
     boxes = [
-        (0.02, 0.70, 0.22, 0.24, "ECG or PPG\n(dataset choice)\n→ instant. HR"),
-        (0.28, 0.70, 0.22, 0.24, "EEG → multitaper\nθ/α/β/low-γ\n(channel median)"),
-        (0.54, 0.70, 0.22, 0.24, "Common support\nlag-resolved r\n→ Fisher-z"),
-        (0.80, 0.70, 0.18, 0.24, "Region means\nZLPI /\nprominence"),
-        (0.28, 0.28, 0.22, 0.24, "Central near-zero peak\n(flank baseline +\nGaussian A, μ, FWHM)"),
-        (0.54, 0.28, 0.44, 0.24, "Confirmatory inference\n(surrogates, pairs,\nPRIMARY_META, μ TOST)"),
+        (0.02, 0.70, 0.22, 0.24, "ECG or PPG\n→ instantaneous HR"),
+        (0.28, 0.70, 0.22, 0.24, "EEG multitaper\nθ / α / β / low-γ"),
+        (0.54, 0.70, 0.22, 0.24, "Lag-resolved r\n→ Fisher-z"),
+        (0.80, 0.70, 0.18, 0.24, "ZLPI &\npeak metrics"),
+        (0.28, 0.28, 0.22, 0.24, "Near-zero peak\n(μ, FWHM)"),
+        (0.54, 0.28, 0.44, 0.24, "Replication &\ninference"),
     ]
     for x, y, w, h, text in boxes:
         patch = FancyBboxPatch(
@@ -569,7 +632,7 @@ def _draw_schematic(ax: plt.Axes) -> None:
             text,
             ha="center",
             va="center",
-            fontsize=f.FS_TICK - 3,
+            fontsize=f.FS_TICK - 2,
             color=f.PALETTE["dark_gray"],
         )
     arrows = [
@@ -593,11 +656,11 @@ def _draw_schematic(ax: plt.Axes) -> None:
         )
     ax.text(
         0.5,
-        0.12,
-        "Matches implemented confirmatory pipeline (not ECG–vs–PPG comparison).",
+        0.10,
+        "Implemented confirmatory pipeline (not ECG–vs–PPG).",
         ha="center",
         va="center",
-        fontsize=f.FS_TICK - 4,
+        fontsize=f.FS_TICK - 3,
         color=f.PALETTE["dark_gray"],
         style="italic",
     )
@@ -624,25 +687,41 @@ def render_figure1(
     endpoints = f.read_csv_rows(inputs.get("endpoints_d240"))
     subjects = f.read_csv_rows(inputs.get("subject_level"))
     null_summary = f.read_csv_rows(inputs.get("null_summary"))
-    effects = f.read_csv_rows(inputs.get("dataset_effects"))
-    meta = f.read_csv_rows(inputs.get("meta_analysis"))
+    low_demand_alpha_effects = f.read_csv_rows(inputs.get("low_demand_alpha_effects"))
+    low_demand_alpha_meta = f.read_csv_rows(inputs.get("low_demand_alpha_meta"))
     peaks = f.read_csv_rows(inputs.get("peak_params"))
     equivalence = f.read_csv_rows(inputs.get("peak_equivalence"))
     peak_hier = f.read_csv_rows(inputs.get("peak_hierarchical"))
     protocol = f.read_csv_rows(inputs.get("protocol_audit"))
-    paired = f.read_csv_rows(inputs.get("paired_contrasts"))
+    dataset_ids_in_run = {
+        f._as_str(row.get("dataset_id")).casefold()
+        for table in (curves, endpoints, subjects, peaks, protocol)
+        for row in table
+        if f._as_str(row.get("dataset_id"))
+    }
+    blocked_sensitivity_ids = _blocked_sensitivity_datasets(dataset_ids_in_run, protocol)
+    curves = _drop_blocked_sensitivity_rows(curves, blocked_sensitivity_ids)
+    endpoints = _drop_blocked_sensitivity_rows(endpoints, blocked_sensitivity_ids)
+    subjects = _drop_blocked_sensitivity_rows(subjects, blocked_sensitivity_ids)
+    null_summary = _drop_blocked_sensitivity_rows(null_summary, blocked_sensitivity_ids)
+    low_demand_alpha_effects = _drop_blocked_sensitivity_rows(
+        low_demand_alpha_effects, blocked_sensitivity_ids
+    )
+    peaks = _drop_blocked_sensitivity_rows(peaks, blocked_sensitivity_ids)
+    equivalence = _drop_blocked_sensitivity_rows(equivalence, blocked_sensitivity_ids)
+    peak_hier = _drop_blocked_sensitivity_rows(peak_hier, blocked_sensitivity_ids)
 
-    fig = plt.figure(figsize=(17.2, 16.0))
+    fig = plt.figure(figsize=(17.0, 15.4))
     gs = GridSpec(
         3,
         2,
         figure=fig,
-        left=0.07,
-        right=0.98,
-        top=0.93,
-        bottom=0.19,
-        wspace=0.28,
-        hspace=0.40,
+        left=0.075,
+        right=0.975,
+        top=0.935,
+        bottom=0.145,
+        wspace=0.26,
+        hspace=0.36,
     )
 
     # ----- Panel A: schematic -----
@@ -666,17 +745,25 @@ def render_figure1(
     ax_b = fig.add_subplot(gs[0, 1])
     primary_contract = contract_for_duration(EXPECTED_PRIMARY_DURATION_S)
     series_all: list[dict[str, object]] = []
-    legend_handles: list[object] = []
-    legend_labels: list[str] = []
+    plotted: dict[str, tuple[object, str]] = {}
     any_series = False
     n_participants_note = 0
+    series_by_band: dict[str, list[dict[str, object]]] = {}
     for band in f.BAND_ORDER:
         series = bootstrap_mean_ci_by_lag(curves, band=band, condition_role="low_demand")
         series_all.extend(series)
+        if series:
+            series_by_band[band] = series
+            any_series = True
+            n_participants_note = int(series[0]["n"])
+    # Draw non-alpha first; alpha last so confirmatory band sits on top.
+    band_draw_order = [b for b in f.BAND_ORDER if b != "alpha"] + (
+        ["alpha"] if "alpha" in series_by_band else []
+    )
+    for band in band_draw_order:
+        series = series_by_band.get(band)
         if not series:
             continue
-        any_series = True
-        n_participants_note = int(series[0]["n"])
         lags = np.asarray([r["lag_s"] for r in series], dtype=float)
         mean = np.asarray([r["mean_z"] for r in series], dtype=float)
         lo = np.asarray([r["ci_low"] for r in series], dtype=float)
@@ -694,54 +781,72 @@ def render_figure1(
             hi, sigma_s=f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S
         )
         color = f._band_color(band)
+        is_alpha = band == "alpha"
         ax_b.fill_between(
             lags[mask],
             lo_d[mask],
             hi_d[mask],
             color=color,
-            alpha=f.FIGURE1_PANEL_B_CI_ALPHA,
+            alpha=f.FIGURE1_PANEL_B_CI_ALPHA if is_alpha else max(
+                0.06, f.FIGURE1_PANEL_B_CI_ALPHA - 0.04
+            ),
             linewidth=0,
-            zorder=2,
+            zorder=3 if is_alpha else 2,
         )
         (line,) = ax_b.plot(
             lags[mask],
             mean_d[mask],
             color=color,
-            lw=f.LINE_WIDTH,
+            lw=f.LINE_WIDTH + (0.7 if is_alpha else 0.0),
             ls=f._band_linestyle(band),
-            label=f._band_display(band),
-            zorder=3,
+            label=_fig1_band_short(band),
+            zorder=5 if is_alpha else 4,
         )
-        legend_handles.append(line)
-        legend_labels.append(f._band_display(band))
+        plotted[band] = (line, _fig1_band_short(band))
     if any_series:
+        legend_handles = [plotted[b][0] for b in f.BAND_ORDER if b in plotted]
+        legend_labels = [plotted[b][1] for b in f.BAND_ORDER if b in plotted]
         f._shade_flanks(ax_b, EXPECTED_PRIMARY_DURATION_S)
         f._set_lag_axes(ax_b, EXPECTED_PRIMARY_DURATION_S)
+        ax_b.set_ylabel("Fisher-z lag correlation", fontsize=f.FS_AXIS)
+        # Stronger zero-lag reference (display only).
+        ax_b.axvline(0.0, color=f.PALETTE["dark_gray"], lw=1.6, ls="-", zorder=1, alpha=0.9)
         f._annotate_lag_regions(ax_b, EXPECTED_PRIMARY_DURATION_S, enabled=True)
         ax_b.legend(
             legend_handles,
             legend_labels,
-            loc="upper right",
-            fontsize=f.FS_LEGEND - 2,
+            loc="upper left",
+            fontsize=f.FS_LEGEND - 1,
             frameon=False,
+            ncol=1,
+            borderaxespad=0.2,
         )
-        f._set_panel_title(
-            ax_b,
-            f"Low-demand Fisher-z lag curves (n = {n_participants_note} participants)",
+        ax_b.text(
+            0.98,
+            0.02,
+            f"N = {n_participants_note}",
+            transform=ax_b.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=f.FS_TICK - 1,
+            color=f.PALETTE["dark_gray"],
         )
+        # Sparse x ticks for manuscript scale.
+        ax_b.set_xticks([-60, -40, -20, 0, 20, 40, 60])
+        f._set_panel_title(ax_b, "Low-demand lag curves")
     else:
         f._mark_empty_panel(
             ax_b,
             f.MSG_NOT_INCLUDED,
             xlabel=f.LAG_XLABEL,
-            ylabel=f.Z_YLABEL,
+            ylabel="Fisher-z lag correlation",
             xlim=(
                 float(primary_contract.lag_min_s),
                 float(primary_contract.lag_max_s),
             ),
             ylim=(-0.2, 0.2),
         )
-        f._set_panel_title(ax_b, "Low-demand Fisher-z lag curves")
+        f._set_panel_title(ax_b, "Low-demand lag curves")
     f._add_panel_label(ax_b, "B")
     panel_b_csv = source_dir / "figure1_panel_b_lag_curves_bootstrap_ci.csv"
     f.write_source_csv(
@@ -767,7 +872,7 @@ def render_figure1(
         FigurePanelSource(
             figure_id="figure1",
             panel_id="lag_curves_bootstrap",
-            title="Low-demand Fisher-z lag curves",
+            title="Low-demand lag curves",
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
             input_tables=[str(inputs.get("curves_d240") or "")],
@@ -816,8 +921,8 @@ def render_figure1(
                     np.full(len(vals), x_base[cat_idx] + offset) + jitter,
                     vals,
                     color=color,
-                    s=14,
-                    alpha=0.22,
+                    s=12,
+                    alpha=0.16,
                     edgecolors="none",
                     zorder=2,
                 )
@@ -852,23 +957,28 @@ def render_figure1(
                 markersize=f.MARKER_SIZE - 1,
                 capsize=3,
                 elinewidth=1.2,
-                label=f._band_display(band),
+                label=_fig1_band_short(band),
                 zorder=4,
             )
         ax_c.set_xticks(x_base)
-        ax_c.set_xticklabels(category_labels)
-        ax_c.set_ylabel(f.Z_YLABEL, fontsize=f.FS_AXIS)
-        ax_c.legend(fontsize=f.FS_LEGEND - 2, frameon=False, loc="best")
+        ax_c.set_xticklabels(category_labels, fontsize=f.FS_TICK)
+        ax_c.set_ylabel("Fisher-z lag correlation", fontsize=f.FS_AXIS)
+        ax_c.legend(
+            fontsize=f.FS_LEGEND - 1,
+            frameon=False,
+            loc="upper right",
+            ncol=1,
+        )
         f._style_axes(ax_c)
-        f._set_panel_title(ax_c, "Participant lag-category Fisher-z (means ± SEM)")
+        f._set_panel_title(ax_c, "Lag-category structure")
     else:
         f._mark_empty_panel(
             ax_c,
             f.MSG_NOT_INCLUDED,
             xlabel="Lag category",
-            ylabel=f.Z_YLABEL,
+            ylabel="Fisher-z lag correlation",
         )
-        f._set_panel_title(ax_c, "Participant lag-category Fisher-z")
+        f._set_panel_title(ax_c, "Lag-category structure")
     f._add_panel_label(ax_c, "C")
     panel_c_csv = source_dir / "figure1_panel_c_lag_categories.csv"
     f.write_source_csv(
@@ -946,6 +1056,7 @@ def render_figure1(
         },
         key=str.casefold,
     )
+    has_sensitivity_cells = bool(sens_ds)
     other_ds = sorted(
         {
             f._as_str(c["dataset_id"])
@@ -966,11 +1077,6 @@ def render_figure1(
             )
             for c in cells
         }
-        label_map = {
-            f._as_str(c["dataset_id"]): f._as_str(c.get("display_label"))
-            or f._dataset_display(f._as_str(c["dataset_id"]))
-            for c in cells
-        }
         matrix = np.full((len(row_datasets), len(f.BAND_ORDER)), np.nan)
         for i, ds in enumerate(row_datasets):
             if ds == "—":
@@ -988,24 +1094,52 @@ def render_figure1(
             vmax=vmax,
             interpolation="nearest",
         )
+        any_surrogate_mark = False
         for i, ds in enumerate(row_datasets):
             if ds == "—":
                 ax_d.axhline(i, color="white", lw=3)
                 continue
             for j, band in enumerate(f.BAND_ORDER):
-                if sig_map.get((ds, band)):
-                    ax_d.text(
-                        j,
-                        i,
-                        "*",
-                        ha="center",
-                        va="center",
-                        fontsize=f.FS_PANEL_TITLE,
-                        color="black",
-                        fontweight="bold",
+                val = matrix[i, j]
+                if not np.isfinite(val):
+                    continue
+                # Emphasize confirmatory alpha column with a light edge.
+                if band == "alpha":
+                    ax_d.add_patch(
+                        Rectangle(
+                            (j - 0.5, i - 0.5),
+                            1.0,
+                            1.0,
+                            fill=False,
+                            edgecolor=f.PALETTE["dark_gray"],
+                            linewidth=1.4,
+                            zorder=3,
+                        )
                     )
+                text_color = "white" if abs(val) > 0.55 * vmax else f.PALETTE["dark_gray"]
+                cell_text = f"{val:+.3f}"
+                if sig_map.get((ds, band)):
+                    any_surrogate_mark = True
+                    cell_text = f"{cell_text}*"
+                ax_d.text(
+                    j,
+                    i,
+                    cell_text,
+                    ha="center",
+                    va="center",
+                    fontsize=f.FS_TICK - 1,
+                    color=text_color,
+                    fontweight="bold" if band == "alpha" else "normal",
+                    zorder=4,
+                )
         ax_d.set_xticks(range(len(f.BAND_ORDER)))
-        ax_d.set_xticklabels([f._band_display(b) for b in f.BAND_ORDER])
+        xticks = []
+        for band in f.BAND_ORDER:
+            label = _fig1_band_short(band)
+            if band == "alpha":
+                label = f"{label}†"
+            xticks.append(label)
+        ax_d.set_xticklabels(xticks, fontsize=f.FS_TICK)
         ylabels = []
         for ds in row_datasets:
             if ds == "—":
@@ -1013,29 +1147,33 @@ def render_figure1(
             else:
                 role = _dataset_role(ds, protocol)
                 tag = role_tag(role)
-                base = label_map.get(ds) or f._dataset_display(ds)
-                ylabels.append(f"{base} [{tag}]")
+                ylabels.append(f"{_fig1_dataset_id_label(ds)} [{tag}]")
         ax_d.set_yticks(range(len(row_datasets)))
-        ax_d.set_yticklabels(ylabels, fontsize=f.FS_TICK - 2)
+        ax_d.set_yticklabels(ylabels, fontsize=f.FS_TICK)
         cbar = fig.colorbar(im, ax=ax_d, fraction=0.046, pad=0.04)
-        cbar.set_label("Mean ZLPI (Fisher z)", fontsize=f.FS_TICK - 1)
-        f._set_panel_title(ax_d, "Dataset/session × band ZLPI (primary | sensitivity)")
+        cbar.set_label("Mean ZLPI (Fisher z)", fontsize=f.FS_TICK)
+        cbar.ax.tick_params(labelsize=f.FS_TICK - 1)
+        f._set_panel_title(ax_d, "ZLPI by dataset and band")
     else:
+        any_surrogate_mark = False
         f._mark_empty_panel(
             ax_d,
             f.MSG_NOT_INCLUDED,
             xlabel="EEG band",
             ylabel="Dataset",
         )
-        f._set_panel_title(ax_d, "Dataset/session × band ZLPI")
+        f._set_panel_title(ax_d, "ZLPI by dataset and band")
+    footnote_bits = ["† confirmatory band; others secondary"]
+    if any_surrogate_mark:
+        footnote_bits.append(f.FIGURE1_PANEL_D_ASTERISK_LABEL)
     ax_d.text(
         0.5,
-        -0.20,
-        f.FIGURE1_PANEL_D_ASTERISK_LABEL,
+        -0.18,
+        " · ".join(footnote_bits),
         transform=ax_d.transAxes,
         ha="center",
         va="top",
-        fontsize=f.FS_TICK - 3,
+        fontsize=f.FS_TICK - 2,
         color=f.PALETTE["dark_gray"],
         style="italic",
     )
@@ -1089,43 +1227,59 @@ def render_figure1(
     # ----- Panel E: alpha replication forest -----
     ax_e = fig.add_subplot(gs[2, 0])
     studies, sensitivity_studies, pooled = alpha_replication_forest_rows(
-        effects, meta, protocol, paired
+        subjects,
+        protocol,
+        low_demand_effect_rows=low_demand_alpha_effects,
+        low_demand_meta_rows=low_demand_alpha_meta,
     )
     forest_export = build_alpha_forest_export(
         primary_studies=studies,
         sensitivity_studies=sensitivity_studies,
         pooled=pooled,
     )
-    # Title states which estimate class is on the axes: primary studies + pooled
-    # diamond, or sensitivity-only display rows.
-    panel_e_title = (
-        f.sensitivity_display_title("alpha Δ ZLPI")
-        if sensitivity_studies and not studies
-        else "Alpha replication (PRIMARY_META display)"
-    )
+    # Display-only labels after source export (values unchanged).
+    for study in studies:
+        ds = f._as_str(study.get("dataset_id"))
+        n_pairs = study.get("n_pairs")
+        n_txt = (
+            f"N = {int(n_pairs)}"
+            if n_pairs not in {"", None} and str(n_pairs).strip() != ""
+            else ""
+        )
+        study["display_label"] = (
+            f"{_fig1_dataset_id_label(ds)} ({n_txt})" if n_txt else _fig1_dataset_id_label(ds)
+        )
+    panel_e_title = "Alpha ZLPI replication"
     drawn = draw_alpha_meta_forest(
         ax_e,
         primary_studies=studies,
         sensitivity_studies=sensitivity_studies,
         pooled=pooled,
-        dataset_display_fn=f._dataset_display,
+        dataset_display_fn=lambda dataset_id, n_pairs=None: _fig1_dataset_id_label(
+            dataset_id
+        ),
         band_color_fn=f._band_color,
         ref_vline_fn=f._ref_vline,
         style_axes_fn=f._style_axes,
         set_panel_title_fn=f._set_panel_title,
         panel_title=panel_e_title,
-        xlabel=f"Δ {_endpoint_label()} ({f.ZLPI_METRIC}; {f.CI_95_LABEL})",
+        xlabel=f"ZLPI (Fisher z; {f.CI_95_LABEL})",
         marker_size=f.MARKER_SIZE,
         line_width=f.LINE_WIDTH,
         tick_fontsize=f.FS_TICK,
         axis_fontsize=f.FS_AXIS,
         palette=f.PALETTE,
+        pooled_section_label="",
+        prediction_interval_lw=8.0,
+        pooled_marker_size_delta=1.5,
+        ytick_fontsize_delta=-1.0,
+        header_fontsize_delta=-2.0,
     )
     if not drawn:
         f._mark_empty_panel(
             ax_e,
-            _forest_unavailable_message(paired, protocol),
-            xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
+            _forest_unavailable_message(studies),
+            xlabel=f"ZLPI (Fisher z; {f.CI_95_LABEL})",
             ylabel="Dataset",
         )
         f._set_panel_title(ax_e, panel_e_title)
@@ -1141,21 +1295,21 @@ def render_figure1(
         FigurePanelSource(
             figure_id="figure1",
             panel_id="alpha_replication_forest",
-            title="Alpha PRIMARY_META replication display",
+            title="Low-demand alpha ZLPI replication forest",
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=EXPECTED_PRIMARY_DURATION_S,
             input_tables=[
-                str(inputs.get("dataset_effects") or ""),
-                str(inputs.get("meta_analysis") or ""),
+                str(inputs.get("low_demand_alpha_effects") or ""),
+                str(inputs.get("low_demand_alpha_meta") or ""),
                 str(inputs.get("protocol_audit") or ""),
-                str(inputs.get("paired_contrasts") or ""),
+                str(inputs.get("subject_level") or ""),
             ],
             source_data_csv=str(panel_e_csv),
             analysis_keys=[
                 "band=alpha",
-                "enters_meta=true",
-                "display_only_band_filter=true",
-                "hiit_sensitivity_display=combined_ph_ps_within_participant_mean",
+                "estimand=low_demand_mean_zlpi",
+                "meta=random_effects_paule_mandel",
+                "primary_datasets_only=true",
             ],
             notes=f.FIGURE1_PANEL_E_NOTE,
         )
@@ -1167,6 +1321,33 @@ def render_figure1(
     ax_f_fwhm = fig.add_subplot(gs_f[0, 1])
     peak_export: list[dict[str, object]] = []
     participant_peak_rows: list[dict[str, object]] = []
+    eligible_units_by_cell: dict[tuple[str, str], set[str]] = {}
+    for row in subjects:
+        if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
+            continue
+        if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
+            continue
+        if (
+            f._as_str(row.get("power_representation"), f.PRIMARY_REPRESENTATION).casefold()
+            != f.PRIMARY_REPRESENTATION
+        ):
+            continue
+        if "endpoint_eligible" in row and not f._as_bool(row.get("endpoint_eligible"), True):
+            continue
+        if not f._is_low_demand_condition(row):
+            continue
+        dataset_id = f._as_str(row.get("dataset_id")).casefold()
+        band = f._as_str(row.get("band")).casefold()
+        if band not in f.BAND_ORDER:
+            continue
+        participant = f._as_str(row.get("participant_id") or row.get("subject_id"))
+        session = f._as_str(row.get("session_id"), "single").casefold() or "single"
+        unit = (
+            f"{participant}::{session}"
+            if participant
+            else f._as_str(row.get("observation_id"), "unknown")
+        )
+        eligible_units_by_cell.setdefault((dataset_id, band), set()).add(unit)
     for row in peaks:
         if f._as_int(row.get("duration_s"), 240) != EXPECTED_PRIMARY_DURATION_S:
             continue
@@ -1197,6 +1378,9 @@ def render_figure1(
                     row.get("subject_id") or row.get("participant_id")
                 ),
                 "band": band,
+                "endpoint_name": ENDPOINT_ZLPI,
+                "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "power_representation": f.PRIMARY_REPRESENTATION,
                 "peak_center_mu_s": mu,
                 "fwhm_s": fwhm,
                 "has_identifiable_peak": True,
@@ -1205,6 +1389,16 @@ def render_figure1(
         peak_export.append(participant_peak_rows[-1])
 
     # μ TOST / hierarchical group rows.
+    identifiable_units_by_cell: dict[tuple[str, str], set[str]] = {}
+    for row in participant_peak_rows:
+        key = (
+            f._as_str(row.get("dataset_id")).casefold(),
+            f._as_str(row.get("band")).casefold(),
+        )
+        identifiable_units_by_cell.setdefault(key, set()).add(
+            f._as_str(row.get("subject_id"))
+        )
+
     eq_export: list[dict[str, object]] = []
     for row in equivalence:
         if f._as_str(row.get("endpoint_name"), ENDPOINT_ZLPI) != ENDPOINT_ZLPI:
@@ -1218,15 +1412,59 @@ def render_figure1(
             != f.PRIMARY_REPRESENTATION
         ):
             continue
+        dataset_id = f._as_str(row.get("dataset_id")).casefold()
+        band = f._as_str(row.get("band")).casefold()
+        n_identifiable = len(identifiable_units_by_cell.get((dataset_id, band), set()))
+        n_eligible = len(eligible_units_by_cell.get((dataset_id, band), set()))
+        identifiability_rate = (
+            float(n_identifiable / n_eligible) if n_eligible > 0 else float("nan")
+        )
+        status = "computed"
+        reason = ""
+        if (
+            math.isfinite(identifiability_rate)
+            and identifiability_rate < f.FIGURE1_PANEL_F_IDENTIFIABILITY_MIN
+        ):
+            status = "suppressed_low_identifiability"
+            reason = (
+                f"identifiability_rate={identifiability_rate:.3f}<"
+                f"{f.FIGURE1_PANEL_F_IDENTIFIABILITY_MIN:.2f}"
+            )
         eq_export.append(
             {
-                "dataset_id": f._as_str(row.get("dataset_id")),
-                "band": f._as_str(row.get("band")).casefold(),
-                "mean_mu": f._as_float(row.get("mean_mu")),
-                "ci_low": f._as_float(row.get("ci_low")),
-                "ci_high": f._as_float(row.get("ci_high")),
-                "equivalent": f._as_str(row.get("equivalent")),
-                "tost_p": f._as_float(row.get("tost_p")),
+                "dataset_id": dataset_id,
+                "band": band,
+                "endpoint_name": ENDPOINT_ZLPI,
+                "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "power_representation": f.PRIMARY_REPRESENTATION,
+                "mean_mu": (
+                    f._as_float(row.get("mean_mu"))
+                    if status == "computed"
+                    else float("nan")
+                ),
+                "ci_low": (
+                    f._as_float(row.get("ci_low"))
+                    if status == "computed"
+                    else float("nan")
+                ),
+                "ci_high": (
+                    f._as_float(row.get("ci_high"))
+                    if status == "computed"
+                    else float("nan")
+                ),
+                "equivalent": (
+                    f._as_str(row.get("equivalent")) if status == "computed" else ""
+                ),
+                "tost_p": (
+                    f._as_float(row.get("tost_p"))
+                    if status == "computed"
+                    else float("nan")
+                ),
+                "n_identifiable": n_identifiable,
+                "n_eligible": n_eligible,
+                "identifiability_rate": identifiability_rate,
+                "status": status,
+                "reason": reason,
             }
         )
 
@@ -1256,10 +1494,23 @@ def render_figure1(
             -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
             EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
             facecolor=f.PALETTE["orange"],
-            alpha=0.25,
+            alpha=0.22,
             zorder=0,
             label=f.MU_EQUIVALENCE_LABEL,
         )
+        # Explicit ±2 s bound markers.
+        for bound in (
+            -EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
+            EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
+        ):
+            ax_f_mu.axvline(
+                bound,
+                color=f.PALETTE["orange"],
+                lw=1.4,
+                ls="--",
+                zorder=1,
+                alpha=0.95,
+            )
         for bi, band in enumerate(f.BAND_ORDER):
             mus = [
                 float(r["peak_center_mu_s"])
@@ -1273,23 +1524,24 @@ def render_figure1(
                     mus,
                     np.full(len(mus), bi) + jitter,
                     color=f._band_color(band),
-                    s=28,
-                    alpha=0.55,
+                    s=22,
+                    alpha=0.45,
                     marker=f._band_marker(band),
                     edgecolors=f.PALETTE["dark_gray"],
-                    linewidths=0.4,
+                    linewidths=0.35,
                     zorder=2,
                 )
-            for erow in eq_export:
-                if f._as_str(erow["band"]) != band:
-                    continue
+            for idx, erow in enumerate(
+                [e for e in eq_export if f._as_str(e["band"]) == band and f._as_str(e.get("status")) == "computed"]
+            ):
                 mean_mu = float(erow["mean_mu"])
                 if not math.isfinite(mean_mu):
                     continue
+                y_offset = bi + (idx - 0.5) * 0.18
                 # Hierarchical MixedLM mean (diamond) + CI.
                 ax_f_mu.scatter(
                     [mean_mu],
-                    [bi],
+                    [y_offset],
                     color=f._band_color(band),
                     s=90,
                     marker="D",
@@ -1304,7 +1556,7 @@ def render_figure1(
                     xerr = [[mean_mu - lo], [hi - mean_mu]]
                 ax_f_mu.errorbar(
                     mean_mu,
-                    bi,
+                    y_offset,
                     xerr=xerr,
                     fmt="none",
                     ecolor="black",
@@ -1313,12 +1565,22 @@ def render_figure1(
                     zorder=4,
                 )
         ax_f_mu.set_yticks(range(len(f.BAND_ORDER)))
-        ax_f_mu.set_yticklabels([f._band_display(b) for b in f.BAND_ORDER])
-        ax_f_mu.set_xlabel(f"Peak μ (s; {f.CI_95_LABEL})", fontsize=f.FS_AXIS - 2)
+        ax_f_mu.set_yticklabels([_fig1_band_short(b) for b in f.BAND_ORDER], fontsize=f.FS_TICK)
+        ax_f_mu.set_xlabel("Peak center μ (s)", fontsize=f.FS_AXIS - 1)
         mu_lo, mu_hi = _mu_axis_limits(participant_peak_rows)
         ax_f_mu.set_xlim(mu_lo, mu_hi)
         f._style_axes(ax_f_mu)
         f._ref_vline(ax_f_mu, 0.0)
+        ax_f_mu.text(
+            0.98,
+            0.02,
+            "±2 s bounds",
+            transform=ax_f_mu.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=f.FS_TICK - 2,
+            color=f.PALETTE["orange"],
+        )
         for artist in ax_f_mu.get_children():
             if hasattr(artist, "set_clip_on"):
                 artist.set_clip_on(True)
@@ -1336,11 +1598,11 @@ def render_figure1(
                 fwhms,
                 np.full(len(fwhms), bi) + jitter,
                 color=f._band_color(band),
-                s=28,
-                alpha=0.55,
+                s=22,
+                alpha=0.45,
                 marker=f._band_marker(band),
                 edgecolors=f.PALETTE["dark_gray"],
-                linewidths=0.4,
+                linewidths=0.35,
                 zorder=2,
             )
             hier = fwhm_hier.get(band)
@@ -1381,16 +1643,35 @@ def render_figure1(
                     zorder=3,
                 )
         ax_f_fwhm.set_yticks(range(len(f.BAND_ORDER)))
-        ax_f_fwhm.set_yticklabels([f._band_display(b) for b in f.BAND_ORDER])
-        ax_f_fwhm.set_xlabel("FWHM (s)", fontsize=f.FS_AXIS - 2)
+        ax_f_fwhm.set_yticklabels([_fig1_band_short(b) for b in f.BAND_ORDER], fontsize=f.FS_TICK)
+        ax_f_fwhm.set_xlabel("FWHM (s)", fontsize=f.FS_AXIS - 1)
         fwhm_lo, fwhm_hi = _fwhm_axis_limits(participant_peak_rows)
         ax_f_fwhm.set_xlim(fwhm_lo, fwhm_hi)
         f._style_axes(ax_f_fwhm)
+        # Identifiable vs eligible N for alpha (confirmatory) — below axis.
+        alpha_rows = [
+            e
+            for e in eq_export
+            if f._as_str(e.get("band")) == "alpha" and f._as_str(e.get("status")) == "computed"
+        ]
+        if alpha_rows:
+            n_id = sum(int(e.get("n_identifiable") or 0) for e in alpha_rows)
+            n_el = sum(int(e.get("n_eligible") or 0) for e in alpha_rows)
+            ax_f_fwhm.text(
+                0.5,
+                -0.22,
+                f"Alpha identifiable / eligible N = {n_id}/{n_el}",
+                transform=ax_f_fwhm.transAxes,
+                ha="center",
+                va="top",
+                fontsize=f.FS_TICK - 2,
+                color=f.PALETTE["dark_gray"],
+            )
     else:
         f._mark_empty_panel(
             ax_f_mu,
             f.MSG_NOT_INCLUDED,
-            xlabel="Peak μ (s)",
+            xlabel="Peak center μ (s)",
             ylabel=f.EEG_BAND_YLABEL,
         )
         f._mark_empty_panel(
@@ -1400,7 +1681,7 @@ def render_figure1(
             ylabel=f.EEG_BAND_YLABEL,
         )
     f._set_panel_title(ax_f_mu, "Peak center μ")
-    f._set_panel_title(ax_f_fwhm, "FWHM (descriptive)")
+    f._set_panel_title(ax_f_fwhm, "FWHM")
     f._add_panel_label(ax_f_mu, "F")
     panel_f_peaks_csv = source_dir / "figure1_panel_f_participant_peaks.csv"
     f.write_source_csv(
@@ -1410,12 +1691,43 @@ def render_figure1(
             "dataset_id",
             "subject_id",
             "band",
+            "endpoint_name",
+            "duration_s",
+            "power_representation",
             "peak_center_mu_s",
             "fwhm_s",
             "has_identifiable_peak",
         ),
     )
     source_paths.append(panel_f_peaks_csv)
+    computed_eq = [e for e in eq_export if f._as_str(e.get("status")) == "computed"]
+    any_equivalent = any(f._as_bool(e.get("equivalent"), False) for e in computed_eq)
+    suppressed_eq_rows = [r for r in eq_export if f._as_str(r.get("status")) != "computed"]
+    f_notes: list[str] = []
+    if computed_eq and not any_equivalent:
+        f_notes.append("μ equivalence (±2 s) not established")
+    if suppressed_eq_rows:
+        summary = ", ".join(
+            f"{_fig1_dataset_id_label(f._as_str(r.get('dataset_id')))} "
+            f"{_fig1_band_short(f._as_str(r.get('band')))}"
+            for r in suppressed_eq_rows
+        )
+        f_notes.append(
+            f"suppressed (identifiability < {f.FIGURE1_PANEL_F_IDENTIFIABILITY_MIN:.2f}): {summary}"
+        )
+    if f_notes:
+        ax_f_mu.text(
+            0.02,
+            -0.22,
+            "; ".join(f_notes),
+            transform=ax_f_mu.transAxes,
+            ha="left",
+            va="top",
+            fontsize=f.FS_TICK - 2,
+            color=f.PALETTE["dark_gray"],
+            style="italic",
+        )
+
     panel_f_eq_csv = source_dir / "figure1_panel_f_mu_tost.csv"
     f.write_source_csv(
         panel_f_eq_csv,
@@ -1423,11 +1735,19 @@ def render_figure1(
         (
             "dataset_id",
             "band",
+            "endpoint_name",
+            "duration_s",
+            "power_representation",
             "mean_mu",
             "ci_low",
             "ci_high",
             "equivalent",
             "tost_p",
+            "n_identifiable",
+            "n_eligible",
+            "identifiability_rate",
+            "status",
+            "reason",
         ),
     )
     source_paths.append(panel_f_eq_csv)
@@ -1452,39 +1772,54 @@ def render_figure1(
         )
     )
 
-    fig.suptitle(f.FIGURE1_TITLE, fontsize=f.FS_SUPTITLE, fontweight="bold", y=0.985)
+    fig.suptitle(f.FIGURE1_TITLE, fontsize=f.FS_SUPTITLE, fontweight="bold", y=0.982)
     footer_lines = _figure1_footer_lines()
     footer_text = "\n".join(footer_lines)
     fig.text(
         0.5,
-        0.035,
+        0.028,
         footer_text,
         ha="center",
         va="bottom",
-        fontsize=f.FS_TICK - 5,
+        fontsize=f.FS_TICK - 3,
         color=f.PALETTE["dark_gray"],
-        linespacing=1.3,
+        linespacing=1.35,
         wrap=True,
     )
 
     caption_path = output_dir / "figure1_caption.txt"
+    panel_d_role_clause = (
+        "Primary vs sensitivity cohorts are visually separated. "
+        if has_sensitivity_cells
+        else "Primary cohorts only (ds003690, ds003838, ds006848). "
+    )
+    blocked_clause = (
+        ""
+        if not blocked_sensitivity_ids
+        else (
+            "Blocked sensitivity datasets were suppressed from manuscript-facing "
+            "display rows in this render. "
+        )
+    )
     caption_path.write_text(
         (
             f"{f.FIGURE1_TITLE}\n\n"
-            "A: Implemented analysis schematic.\n"
-            f"B: Low-demand D240 Fisher-z lag curves by band (single overlay; "
-            f"lighter bootstrap ribbons for full-dataset readability); "
-            f"{f.CI_95_METHOD_NOTE}. {f.FIGURE1_DISPLAY_GRID_DISCLOSURE}\n"
-            f"{f.LAG_CURVE_DISPLAY_SMOOTH_NOTE}\n"
-            "C: Participant-level lag-category Fisher-z (lag 0 vs max shoulder vs "
-            "combined distant flank); group means ± participant SEM with faint dots.\n"
-            f"D: Dataset/session × band subject-level mean ZLPI; {f.FIGURE1_PANEL_D_ASTERISK_LABEL}. "
-            "Primary vs sensitivity cohorts are visually separated. "
-            f"{f.FIGURE1_PANEL_D_NOTE}\n"
-            f"E: {f.FIGURE1_PANEL_E_NOTE} Includes study CIs, pooled RE CI, and "
-            "prediction interval when present; cardiac modality is metadata only.\n"
-            f"F: {f.FIGURE1_PANEL_F_NOTE} μ axis focuses on identifiable participant "
-            "peaks and ±2 s equivalence (wide group TOST CIs may clip).\n"
+            "A: Analysis schematic of the implemented confirmatory pipeline.\n"
+            "B: Low-demand lag curves by band (Fisher-z lag correlation vs lag τ); "
+            f"ribbons are participant-within-dataset percentile bootstrap 95% CIs. "
+            f"{f.FIGURE1_DISPLAY_GRID_DISCLOSURE} {f.LAG_CURVE_DISPLAY_SMOOTH_NOTE}\n"
+            "C: Lag-category structure (lag 0, shoulders, distant flanks); "
+            "group means ± SEM with faint participant points.\n"
+            "D: Dataset × band mean ZLPI (Fisher z); α is confirmatory (†). "
+            f"{panel_d_role_clause}{blocked_clause}"
+            "Cell values are subject-level means; surrogate marks appear only when "
+            "the circular-shift rule is met.\n"
+            "E: Alpha ZLPI replication forest across primary datasets with one pooled "
+            "random-effects estimate and prediction interval. Low-demand alpha point "
+            "estimates are positive; the pooled CI includes zero.\n"
+            "F: Peak center μ (with ±2 s equivalence bounds) and descriptive FWHM; "
+            "diamonds are hierarchical group means with 95% CIs. μ equivalence is "
+            "not established. Identifiable peaks only; N shown as identifiable/eligible.\n"
         ),
         encoding="utf-8",
     )
@@ -1492,28 +1827,30 @@ def render_figure1(
     changelog_path.write_text(
         (
             "# Figure 1 changelog\n\n"
-            "- Six-panel manuscript layout (A–F).\n"
+            "- Six-panel manuscript layout (A–F) with display-only visual polish.\n"
             "- Panel B CIs: participant-within-dataset percentile bootstrap "
             "(not parametric SE); four-band overlay retained with lighter ribbons "
-            f"(α={f.FIGURE1_PANEL_B_CI_ALPHA}) instead of small multiples.\n"
+            f"(α={f.FIGURE1_PANEL_B_CI_ALPHA}); confirmatory alpha emphasized.\n"
             f"- Panel B display-only Gaussian smooth "
             f"(σ = {f.LAG_CURVE_DISPLAY_SMOOTH_SIGMA_S:g} s); source data unsmoothed.\n"
             "- Panel C: group means ± participant SEM; faint dots (no spaghetti lines).\n"
-            "- Panel D values: subject-level mean ZLPI; sensitivity datasets may "
-            "show one combined row (within session-condition mean of available "
-            "pre-/post-intervention low-demand ZLPI); surrogate mark uses "
-            f"`median_empirical_p < {f.FIGURE1_PANEL_D_SURROGATE_ALPHA}` for "
-            f"`{PRIMARY_NULL_TYPE}` (circular-shift significance only; sensitivity "
-            "marks from combined low-demand condition p-values).\n"
-            "- Panel E: alpha band display of equal four-band PRIMARY_META "
-            "(not an alpha-only hierarchy); one combined display-only "
-            "sensitivity row (within session-condition mean of available contrasts) "
-            "never enters RE pooling.\n"
+            "- Panel D values: subject-level mean ZLPI; "
+            + (
+                "sensitivity display rows are shown only when present and not runtime-blocked; "
+                if has_sensitivity_cells
+                else "no sensitivity display rows are present in this render; "
+            )
+            + "surrogate mark uses "
+            + f"`median_empirical_p < {f.FIGURE1_PANEL_D_SURROGATE_ALPHA}` for "
+            + f"`{PRIMARY_NULL_TYPE}` (circular-shift significance only).\n"
+            "- Panel E: low-demand alpha ZLPI replication (D240 standard ZLPI, "
+            "absolute log10) with one independent study per primary dataset and "
+            "one pooled random-effects row (with prediction interval).\n"
             "- Panel F: Option C near-zero central peak (flank baseline + "
             "baseline-adjusted Gaussian on |τ|≤20); participant-nested MixedLM "
             "μ/FWHM (protocol session conditions as units) + hierarchical μ TOST; "
             "data-driven axis limits; FWHM hierarchical CI (log-scale fit).\n"
-            "- Footer: multi-line below panels E/F to avoid overlap.\n"
+            "- Footer: compact lag convention and interpretation caveats.\n"
             "- No ECG–vs–PPG comparison; no max-|r| / argmax metrics.\n"
         ),
         encoding="utf-8",

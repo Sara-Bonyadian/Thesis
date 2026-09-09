@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,11 +11,24 @@ from ppg_eeg.confirmatory.run import (
     STAGE_REQUIRES,
     StageContext,
     StageError,
+    _assert_no_stale_short_duration_peak_inference,
     expand_stages,
     main,
     resolve_master_and_dataset,
 )
 from ppg_eeg.confirmatory.production import master_config_path
+
+
+def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 class TestConfirmatoryStageCLI(unittest.TestCase):
@@ -70,6 +84,62 @@ class TestConfirmatoryStageCLI(unittest.TestCase):
 
                 with self.assertRaises(StageError):
                     _require_stages(ctx, "C2")
+
+    def test_integrity_check_rejects_short_duration_peak_parameters(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_csv(
+                root / "peak_fit_params.csv",
+                [
+                    {
+                        "duration_s": 60,
+                        "endpoint_name": "short_window_proximal_index",
+                        "peak_height_A": "0.4",
+                        "peak_center_mu_s": "",
+                        "sigma_s": "",
+                        "fwhm_s": "",
+                    }
+                ],
+            )
+            with self.assertRaises(StageError):
+                _assert_no_stale_short_duration_peak_inference(
+                    root=root, stage_name="C7/publish"
+                )
+
+    def test_integrity_check_rejects_short_duration_equivalence_rows(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_csv(
+                root / "peak_center_equivalence.csv",
+                [
+                    {
+                        "duration_s": 120,
+                        "endpoint_name": "mid_window_proximal_index",
+                    }
+                ],
+            )
+            with self.assertRaises(StageError):
+                _assert_no_stale_short_duration_peak_inference(
+                    root=root, stage_name="C6"
+                )
+
+    def test_integrity_check_accepts_duration_endpoint_contracts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_csv(
+                root / "duration_sensitivity.csv",
+                [
+                    {"duration_s": 60, "endpoint_name": "short_window_proximal_index"},
+                    {"duration_s": 120, "endpoint_name": "mid_window_proximal_index"},
+                    {"duration_s": 180, "endpoint_name": "zlpi"},
+                    {"duration_s": 240, "endpoint_name": "zlpi"},
+                ],
+            )
+            _write_csv(
+                root / "peak_center_equivalence.csv",
+                [{"duration_s": 180, "endpoint_name": "zlpi"}],
+            )
+            _assert_no_stale_short_duration_peak_inference(root=root, stage_name="C6")
 
 
 if __name__ == "__main__":

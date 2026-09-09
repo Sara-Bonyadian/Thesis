@@ -3,8 +3,8 @@
 Primary analyses include: (1) absolute pooled MixedLM of ZLPI ~ state×band
 (not a paired Δ model); (2) paired task−rest dataset effects and random-effects
 meta-analysis (one prespecified contrast per primary dataset; leave-one-dataset-
-out); (3) hierarchical MixedLM of identifiable low-demand peak centers μ
-(participant random intercept; TOST vs ±2 s — not paired Δ); (4) BH-FDR within
+out); (3) session-subject-nested summaries of identifiable low-demand peak
+centers μ with one-sample TOST vs ±2 s (not paired Δ); (4) BH-FDR within
 prespecified families. ZLPI, MWPI, and SWPI stay separate; D120/D60/MWPI/SWPI
 never promote or rescue primary ZLPI decisions.
 
@@ -39,14 +39,13 @@ import statsmodels.formula.api as smf
 from scipy import stats
 from statsmodels.stats.meta_analysis import combine_effects
 from statsmodels.stats.multitest import multipletests
-from statsmodels.stats.weightstats import DescrStatsW
-
 from .duration_contracts import (
     ENDPOINT_MID_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX,
     ENDPOINT_ZLPI,
     EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
     EXPECTED_PRIMARY_DURATION_S,
+    STANDARD_ZLPI_DURATIONS_S,
 )
 from .group_tables import (
     PAIRED_CONTRASTS_FILENAME,
@@ -62,6 +61,9 @@ PEAK_CENTER_EQUIVALENCE_FILENAME = "peak_center_equivalence.csv"
 PEAK_HIERARCHICAL_FILENAME = "peak_hierarchical_summaries.csv"
 MULTIPLICITY_RESULTS_FILENAME = "multiplicity_results.csv"
 INFERENCE_QC_FILENAME = "inference_qc.csv"
+LOW_DEMAND_ALPHA_EFFECTS_FILENAME = "low_demand_alpha_replication_effects.csv"
+LOW_DEMAND_ALPHA_META_FILENAME = "low_demand_alpha_replication_meta.csv"
+LOW_DEMAND_ALPHA_LOO_FILENAME = "low_demand_alpha_replication_loo.csv"
 
 PRIMARY_POWER_REPRESENTATION = "absolute_log10"
 FDR_ALPHA = 0.05
@@ -257,6 +259,50 @@ LOO_FIELDS = (
     "i2",
     "p_value",
     "delta_vs_full",
+    "notes",
+)
+
+LOW_DEMAND_ALPHA_EFFECT_FIELDS = (
+    "dataset_id",
+    "dataset_role",
+    "band",
+    "endpoint_name",
+    "duration_s",
+    "power_representation",
+    "condition_role",
+    "n_participants",
+    "effect_mean",
+    "effect_sd",
+    "effect_se",
+    "effect_var",
+    "t_stat",
+    "p_value",
+    "ci_low",
+    "ci_high",
+    "weight_re",
+    "weight_pct_re",
+    "enters_meta",
+)
+
+LOW_DEMAND_ALPHA_META_FIELDS = (
+    "band",
+    "endpoint_name",
+    "duration_s",
+    "power_representation",
+    "condition_role",
+    "analysis_status",
+    "estimator",
+    "n_datasets",
+    "pooled_effect",
+    "ci_low",
+    "ci_high",
+    "prediction_low",
+    "prediction_high",
+    "q",
+    "tau2",
+    "i2",
+    "p_value",
+    "dataset_ids",
     "notes",
 )
 
@@ -577,12 +623,67 @@ def _enters_primary_meta(
     )
 
 
+def _resolve_primary_meta_state_conditions(
+    paired_rows: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, set[str]], dict[str, tuple[str, str]]]:
+    """Return PRIMARY_META participants and their low/high condition labels.
+
+    Eligibility is locked to D240 ZLPI absolute_log10 paired rows that are
+    contrast-eligible with both state endpoints eligible.
+    """
+    participants_by_dataset: dict[str, set[str]] = {}
+    state_conditions_by_dataset: dict[str, tuple[str, str]] = {}
+    for raw in paired_rows:
+        dataset_id = _as_str(raw.get("dataset_id")).casefold()
+        contrast_id = _as_str(raw.get("contrast_id")).casefold()
+        if (dataset_id, contrast_id) not in PRIMARY_META_CONTRASTS:
+            continue
+        if _as_str(raw.get("endpoint_name")).casefold() != ENDPOINT_ZLPI:
+            continue
+        if _as_int(raw.get("duration_s")) != int(EXPECTED_PRIMARY_DURATION_S):
+            continue
+        if (
+            _as_str(raw.get("power_representation")).casefold()
+            != PRIMARY_POWER_REPRESENTATION
+        ):
+            continue
+        if "contrast_eligible" in raw and not _as_bool(raw.get("contrast_eligible")):
+            continue
+        if "low_endpoint_eligible" in raw and not _as_bool(raw.get("low_endpoint_eligible")):
+            continue
+        if "effort_endpoint_eligible" in raw and not _as_bool(
+            raw.get("effort_endpoint_eligible")
+        ):
+            continue
+        participant_id = _as_str(raw.get("participant_id"))
+        if not participant_id:
+            continue
+        low_condition = _as_str(raw.get("low_demand_condition")).casefold()
+        high_condition = _as_str(raw.get("cognitive_effort_condition")).casefold()
+        if not low_condition or not high_condition:
+            # Fallback for legacy rows that only carry contrast_id.
+            left, sep, right = contrast_id.partition("__")
+            if sep and left and right:
+                low_condition = low_condition or left
+                high_condition = high_condition or right
+        if not low_condition or not high_condition:
+            continue
+        prior = state_conditions_by_dataset.get(dataset_id)
+        if prior is None:
+            state_conditions_by_dataset[dataset_id] = (low_condition, high_condition)
+        participants_by_dataset.setdefault(dataset_id, set()).add(participant_id)
+    return participants_by_dataset, state_conditions_by_dataset
+
+
 def _prepare_subject_frame(
     subject_rows: Sequence[Mapping[str, object]],
     *,
     endpoint_name: str,
     duration_s: int | None = None,
     power_representation: str | None = None,
+    allowed_participants_by_dataset: Mapping[str, set[str]] | None = None,
+    allowed_state_conditions_by_dataset: Mapping[str, tuple[str, str]] | None = None,
+    require_both_states_per_participant: bool = False,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for raw in subject_rows:
@@ -601,7 +702,18 @@ def _prepare_subject_frame(
         if not _as_bool(raw.get("endpoint_eligible", True)):
             continue
         dataset_id = _as_str(raw.get("dataset_id")).casefold()
+        participant_id = _as_str(raw.get("participant_id")) or _as_str(raw.get("subject_id"))
+        if allowed_participants_by_dataset is not None:
+            allowed_participants = allowed_participants_by_dataset.get(dataset_id, set())
+            if not participant_id or participant_id not in allowed_participants:
+                continue
         condition = _as_str(raw.get("condition")).casefold()
+        if allowed_state_conditions_by_dataset is not None:
+            allowed_conditions = allowed_state_conditions_by_dataset.get(dataset_id)
+            if allowed_conditions is None:
+                continue
+            if condition not in set(allowed_conditions):
+                continue
         role = _as_str(raw.get("state") or raw.get("condition_role"))
         if not role:
             role = _condition_role(dataset_id, condition)
@@ -653,6 +765,10 @@ def _prepare_subject_frame(
     frame = pd.DataFrame(rows)
     if not frame.empty:
         frame = frame[np.isfinite(frame["endpoint_index"].to_numpy(dtype=float))].copy()
+    if require_both_states_per_participant and not frame.empty:
+        state_counts = frame.groupby("participant_uid")["state"].nunique()
+        keep = state_counts[state_counts >= 2].index
+        frame = frame[frame["participant_uid"].isin(keep)].copy()
     return frame
 
 
@@ -965,6 +1081,8 @@ def fit_mixed_model(
     endpoint_name: str = ENDPOINT_ZLPI,
     duration_s: int = EXPECTED_PRIMARY_DURATION_S,
     power_representation: str = PRIMARY_POWER_REPRESENTATION,
+    primary_meta_participants_by_dataset: Mapping[str, set[str]] | None = None,
+    primary_meta_state_conditions_by_dataset: Mapping[str, tuple[str, str]] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Fit absolute pooled state MixedLM for one endpoint family.
 
@@ -984,7 +1102,32 @@ def fit_mixed_model(
         endpoint_name=endpoint_name,
         duration_s=duration_s,
         power_representation=power_representation,
+        allowed_participants_by_dataset=primary_meta_participants_by_dataset,
+        allowed_state_conditions_by_dataset=primary_meta_state_conditions_by_dataset,
+        require_both_states_per_participant=(
+            primary_meta_participants_by_dataset is not None
+        ),
     )
+    pair_filter_note = ""
+    if primary_meta_participants_by_dataset is not None:
+        expected_participants = sum(
+            len(participants)
+            for participants in primary_meta_participants_by_dataset.values()
+        )
+        observed_participants = int(frame["participant_uid"].nunique()) if not frame.empty else 0
+        observed_by_dataset = {
+            dataset_id: int(
+                frame.loc[frame["dataset_id"] == dataset_id, "participant_uid"].nunique()
+            )
+            for dataset_id in sorted(primary_meta_participants_by_dataset)
+        }
+        pair_filter_note = (
+            "panel_d_pair_filter=PRIMARY_META_D240_ZLPI;"
+            f"expected_participants={expected_participants};"
+            f"observed_participants={observed_participants};"
+            "observed_by_dataset="
+            + ",".join(f"{k}:{v}" for k, v in observed_by_dataset.items())
+        )
     qc: dict[str, object] = {
         "component": "mixed_model",
         "endpoint_name": endpoint_name,
@@ -1085,7 +1228,10 @@ def fit_mixed_model(
     qc["model_backend"] = backend
     qc["converged"] = bool(getattr(fitted, "converged", True))
     qc["n_groups"] = int(frame["participant_uid"].nunique())
-    qc["notes"] = ";".join(notes)
+    note_items = list(notes)
+    if pair_filter_note:
+        note_items.append(pair_filter_note)
+    qc["notes"] = ";".join(note_items)
     if backend.startswith("ols"):
         qc["status"] = "fallback_ols"
     elif not qc["converged"]:
@@ -1154,6 +1300,9 @@ def estimate_dataset_effects(
     buckets: dict[tuple[str, ...], list[float]] = {}
     meta_flags: dict[tuple[str, ...], dict[str, object]] = {}
     for raw in paired_rows:
+        if "contrast_eligible" in raw and not _as_bool(raw.get("contrast_eligible")):
+            # Contract guardrail: only eligible paired rows contribute to C6 effects/meta.
+            continue
         dataset_id = _as_str(raw.get("dataset_id")).casefold()
         contrast_id = _as_str(raw.get("contrast_id")).casefold()
         duration_s = _as_int(raw.get("duration_s"))
@@ -1428,6 +1577,168 @@ def leave_one_dataset_out(
     return loo_rows
 
 
+def low_demand_alpha_replication(
+    subject_rows: Sequence[Mapping[str, object]],
+    *,
+    primary_dataset_ids: Sequence[str] = PRIMARY_PAIRED_DATASETS,
+) -> tuple[list[dict[str, object]], dict[str, object], list[dict[str, object]]]:
+    """Primary-dataset low-demand alpha D240 ZLPI effects + RE meta + 3x LOO."""
+    allowed = {str(ds).casefold() for ds in primary_dataset_ids}
+    buckets: dict[str, list[float]] = {}
+    for raw in subject_rows:
+        if not _is_primary_analysis(
+            endpoint_name=_as_str(raw.get("endpoint_name")).casefold(),
+            duration_s=_as_int(raw.get("duration_s")),
+            power_representation=_as_str(raw.get("power_representation")).casefold(),
+        ):
+            continue
+        dataset_id = _as_str(raw.get("dataset_id")).casefold()
+        if dataset_id not in allowed:
+            continue
+        if _as_str(raw.get("band")).casefold() != "alpha":
+            continue
+        role = _as_str(raw.get("state") or raw.get("condition_role")).casefold()
+        if not role:
+            role = _condition_role(dataset_id, _as_str(raw.get("condition")).casefold())
+        if role != "low_demand":
+            continue
+        if not _as_bool(raw.get("endpoint_eligible", True)):
+            continue
+        value = _as_float(raw.get("endpoint_index"))
+        if not math.isfinite(value):
+            continue
+        buckets.setdefault(dataset_id, []).append(float(value))
+
+    effects: list[dict[str, object]] = []
+    for dataset_id in sorted(allowed):
+        values = np.asarray(buckets.get(dataset_id, []), dtype=float)
+        n = int(values.size)
+        if n == 0:
+            continue
+        mean = float(np.mean(values)) if n else float("nan")
+        if n >= 2:
+            sd = float(np.std(values, ddof=1))
+            se = float(sd / math.sqrt(n))
+            t_stat, p_value = stats.ttest_1samp(values, popmean=0.0)
+            t_crit = float(stats.t.ppf(0.975, df=n - 1))
+            ci_low = float(mean - t_crit * se)
+            ci_high = float(mean + t_crit * se)
+        else:
+            sd = float("nan")
+            se = float("nan")
+            t_stat = float("nan")
+            p_value = float("nan")
+            ci_low = float("nan")
+            ci_high = float("nan")
+        effects.append(
+            {
+                "dataset_id": dataset_id,
+                "dataset_role": "primary",
+                "band": "alpha",
+                "endpoint_name": ENDPOINT_ZLPI,
+                "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "power_representation": PRIMARY_POWER_REPRESENTATION,
+                "condition_role": "low_demand",
+                "n_participants": n,
+                "effect_mean": mean,
+                "effect_sd": sd,
+                "effect_se": se,
+                "effect_var": float(se * se) if math.isfinite(se) else float("nan"),
+                "t_stat": float(t_stat),
+                "p_value": float(p_value),
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "weight_re": float("nan"),
+                "weight_pct_re": float("nan"),
+                "enters_meta": bool(n >= 2 and math.isfinite(se) and se > 0.0),
+            }
+        )
+
+    included = [row for row in effects if _as_bool(row.get("enters_meta"))]
+    meta = random_effects_meta(
+        [_as_float(row.get("effect_mean")) for row in included],
+        [_as_float(row.get("effect_var")) for row in included],
+        labels=[_as_str(row.get("dataset_id")) for row in included],
+    )
+    meta_row = {
+        "band": "alpha",
+        "endpoint_name": ENDPOINT_ZLPI,
+        "duration_s": EXPECTED_PRIMARY_DURATION_S,
+        "power_representation": PRIMARY_POWER_REPRESENTATION,
+        "condition_role": "low_demand",
+        "analysis_status": _as_str(meta.get("analysis_status")),
+        "estimator": _as_str(meta.get("estimator")),
+        "n_datasets": _as_int(meta.get("n_datasets")),
+        "pooled_effect": _as_float(meta.get("pooled_effect")),
+        "ci_low": _as_float(meta.get("ci_low")),
+        "ci_high": _as_float(meta.get("ci_high")),
+        "prediction_low": _as_float(meta.get("prediction_low")),
+        "prediction_high": _as_float(meta.get("prediction_high")),
+        "q": _as_float(meta.get("q")),
+        "tau2": _as_float(meta.get("tau2")),
+        "i2": _as_float(meta.get("i2")),
+        "p_value": _as_float(meta.get("p_value")),
+        "dataset_ids": _as_str(meta.get("dataset_ids")),
+        "notes": _as_str(meta.get("notes")),
+    }
+
+    if _as_str(meta_row["analysis_status"]) == ANALYSIS_STATUS_COMPLETED:
+        tau2 = float(meta_row["tau2"])
+        ws: list[float] = []
+        for row in effects:
+            v = _as_float(row.get("effect_var"))
+            ws.append(1.0 / (v + tau2) if math.isfinite(v) and v > 0.0 else 0.0)
+        total_w = float(sum(ws))
+        for row, weight in zip(effects, ws, strict=True):
+            row["weight_re"] = float(weight) if weight > 0 else float("nan")
+            row["weight_pct_re"] = (
+                float(100.0 * weight / total_w) if total_w > 0 and weight > 0 else float("nan")
+            )
+
+    loo_rows: list[dict[str, object]] = []
+    included_by_dataset = {
+        _as_str(row.get("dataset_id")): row
+        for row in included
+    }
+    full_effect = _as_float(meta_row.get("pooled_effect"))
+    for omitted in sorted(included_by_dataset):
+        remaining = [ds for ds in sorted(included_by_dataset) if ds != omitted]
+        sub_meta = random_effects_meta(
+            [_as_float(included_by_dataset[ds].get("effect_mean")) for ds in remaining],
+            [_as_float(included_by_dataset[ds].get("effect_var")) for ds in remaining],
+            labels=remaining,
+        )
+        pooled = _as_float(sub_meta.get("pooled_effect"))
+        loo_rows.append(
+            {
+                "endpoint_name": ENDPOINT_ZLPI,
+                "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "band": "alpha",
+                "power_representation": PRIMARY_POWER_REPRESENTATION,
+                "analysis_status": _as_str(sub_meta.get("analysis_status")),
+                "omitted_dataset_id": omitted,
+                "estimator": _as_str(sub_meta.get("estimator")),
+                "n_datasets": _as_int(sub_meta.get("n_datasets")),
+                "pooled_effect": pooled,
+                "ci_low": _as_float(sub_meta.get("ci_low")),
+                "ci_high": _as_float(sub_meta.get("ci_high")),
+                "prediction_low": _as_float(sub_meta.get("prediction_low")),
+                "prediction_high": _as_float(sub_meta.get("prediction_high")),
+                "q": _as_float(sub_meta.get("q")),
+                "tau2": _as_float(sub_meta.get("tau2")),
+                "i2": _as_float(sub_meta.get("i2")),
+                "p_value": _as_float(sub_meta.get("p_value")),
+                "delta_vs_full": (
+                    float(pooled - full_effect)
+                    if math.isfinite(pooled) and math.isfinite(full_effect)
+                    else float("nan")
+                ),
+                "notes": _as_str(sub_meta.get("notes")),
+            }
+        )
+    return effects, meta_row, loo_rows
+
+
 def _tost_from_normal_mean(
     mean: float,
     se: float,
@@ -1607,6 +1918,11 @@ def _collect_low_demand_peak_rows(
             role = _condition_role(dataset_id, condition)
         if role != "low_demand":
             continue
+        duration_s = _as_int(raw.get("duration_s"))
+        if duration_s not in STANDARD_ZLPI_DURATIONS_S:
+            continue
+        if _as_str(raw.get("endpoint_name")).casefold() != ENDPOINT_ZLPI:
+            continue
         if not _as_bool(raw.get("has_identifiable_peak")):
             continue
         unit_id = _panel_b_aligned_unit_id(raw, dataset_id)
@@ -1630,7 +1946,7 @@ def _collect_low_demand_peak_rows(
                 "participant_uid": unit_id,
                 "session_id": _as_str(raw.get("session_id"), "single"),
                 "endpoint_name": _as_str(raw.get("endpoint_name")).casefold(),
-                "duration_s": _as_int(raw.get("duration_s")),
+                "duration_s": duration_s,
                 "band": _as_str(raw.get("band")).casefold(),
                 "power_representation": _as_str(
                     raw.get("power_representation")
@@ -1756,11 +2072,12 @@ def tost_peak_center_equivalence(
     *,
     bound: float = EXPECTED_PEAK_CENTER_EQUIVALENCE_S,
 ) -> list[dict[str, object]]:
-    """Hierarchical TOST equivalence of low-demand peak centers μ to 0 within ±bound.
+    """Session-subject-nested TOST equivalence of low-demand peak centers μ.
 
-    Subject-level μ come from the Option C central-peak fit. Group inference uses
-    an intercept-only MixedLM with participant random intercepts, then TOST on
-    that mean and SE (±bound). Not a paired task−rest analysis.
+    Subject-level μ come from the Option C central-peak fit. For each
+    dataset×duration×band×representation, inference uses the equal-weight mean
+    of per-session-subject means with one-sample t uncertainty, then applies
+    TOST against ±bound. Not a paired task−rest analysis.
     """
     summaries = hierarchical_peak_parameter_summaries(subject_rows)
     low, upp = -float(bound), float(bound)
@@ -1776,34 +2093,7 @@ def tost_peak_center_equivalence(
         )
         notes = str(summary.get("notes") or "")
         if not math.isfinite(tost_p):
-            collected = [
-                r
-                for r in _collect_low_demand_peak_rows(subject_rows)
-                if r["dataset_id"] == summary["dataset_id"]
-                and r["endpoint_name"] == summary["endpoint_name"]
-                and int(r["duration_s"]) == int(summary["duration_s"])
-                and r["band"] == summary["band"]
-                and r["power_representation"] == summary["power_representation"]
-                and math.isfinite(float(r["peak_center_mu_s"]))
-            ]
-            values = np.asarray(
-                [float(r["peak_center_mu_s"]) for r in collected], dtype=float
-            )
-            if values.size >= 2:
-                dstats = DescrStatsW(values)
-                tost_p, lower_res, upper_res = dstats.ttost_mean(low, upp)
-                p_lower = float(lower_res[1])
-                p_upper = float(upper_res[1])
-                ci = dstats.tconfint_mean()
-                ci_low, ci_high = float(ci[0]), float(ci[1])
-                mean_mu = float(np.mean(values))
-                se = float(np.std(values, ddof=1) / math.sqrt(values.size))
-                equivalent = bool(
-                    math.isfinite(float(tost_p)) and float(tost_p) < FDR_ALPHA
-                )
-                notes = (notes + ";classical_tost_fallback").strip(";")
-            else:
-                notes = (notes + ";insufficient_for_tost").strip(";")
+            notes = (notes + ";insufficient_for_session_subject_tost").strip(";")
         rows.append(
             {
                 "dataset_id": summary["dataset_id"],
@@ -2080,14 +2370,31 @@ def run_confirmatory_inference(
         ENDPOINT_MID_WINDOW_PROXIMAL_INDEX: 120,
         ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX: 60,
     }
+    (
+        primary_meta_participants_by_dataset,
+        primary_meta_state_conditions_by_dataset,
+    ) = _resolve_primary_meta_state_conditions(paired_rows)
     for endpoint_name in fit_endpoints:
         duration_s = endpoint_duration.get(endpoint_name, EXPECTED_PRIMARY_DURATION_S)
         # ZLPI may also be requested for D180 sensitivity — primary path is D240.
+        use_panel_d_primary_filter = _is_primary_analysis(
+            endpoint_name=endpoint_name,
+            duration_s=duration_s,
+            power_representation=PRIMARY_POWER_REPRESENTATION,
+        )
         coef_rows, qc = fit_mixed_model(
             subject_rows,
             endpoint_name=endpoint_name,
             duration_s=duration_s,
             power_representation=PRIMARY_POWER_REPRESENTATION,
+            primary_meta_participants_by_dataset=(
+                primary_meta_participants_by_dataset if use_panel_d_primary_filter else None
+            ),
+            primary_meta_state_conditions_by_dataset=(
+                primary_meta_state_conditions_by_dataset
+                if use_panel_d_primary_filter
+                else None
+            ),
         )
         mixed_rows.extend(coef_rows)
         mixed_marginal_rows.extend(list(qc.get("panel_d_marginal_rows") or []))
@@ -2307,6 +2614,11 @@ __all__ = [
     "FDR_ALPHA",
     "INFERENCE_QC_FILENAME",
     "LEAVE_ONE_DATASET_OUT_FILENAME",
+    "LOW_DEMAND_ALPHA_EFFECTS_FILENAME",
+    "LOW_DEMAND_ALPHA_EFFECT_FIELDS",
+    "LOW_DEMAND_ALPHA_LOO_FILENAME",
+    "LOW_DEMAND_ALPHA_META_FIELDS",
+    "LOW_DEMAND_ALPHA_META_FILENAME",
     "META_ANALYSIS_RESULTS_FILENAME",
     "META_EXCLUDED_DATASETS",
     "MIXED_MODEL_CONTRASTS_FILENAME",
@@ -2330,6 +2642,7 @@ __all__ = [
     "fit_mixed_model",
     "hierarchical_peak_parameter_summaries",
     "leave_one_dataset_out",
+    "low_demand_alpha_replication",
     "prediction_interval",
     "random_effects_meta",
     "run_confirmatory_inference",

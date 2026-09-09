@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import unittest
 from pathlib import Path
@@ -37,6 +38,7 @@ from ppg_eeg.confirmatory.nulls import (
     deterministic_seed,
     empirical_p_value,
     lag1_autocorrelation,
+    null_standardize_effect,
     phase_randomize_series,
     run_null_battery,
     seeded_derangement,
@@ -165,6 +167,41 @@ class TestDerangements(unittest.TestCase):
         self.assertEqual(len(qc_ok), 4)
         for row in result.subject_rows:
             self.assertEqual(row["n_surrogates_finite"], 10)
+        for row in result.surrogate_rows:
+            self.assertEqual(row["null_type"], NULL_TYPE_CROSS_SUBJECT_MISMATCH)
+            self.assertNotEqual(
+                str(row.get("biological_participant_id")),
+                str(row.get("partner_participant_id")),
+            )
+
+    def test_cross_subject_deranges_biological_participants_not_runs(self) -> None:
+        rng = np.random.default_rng(212)
+        units: list[SeriesUnit] = []
+        for participant in ("01", "02", "03"):
+            for run in ("run1", "run2"):
+                base = _zscore(rng.normal(size=240))
+                units.append(
+                    _make_unit(
+                        dataset_id="ds003690",
+                        observation_id=f"{participant}_{run}",
+                        subject_id=f"{participant}_{run}",
+                        condition="rest",
+                        modality="ecg",
+                        hr_z=base,
+                        eeg_z=_zscore(np.roll(base, 3)),
+                    )
+                )
+        result = run_null_battery(
+            units,
+            n_surrogates=8,
+            null_types=(NULL_TYPE_CROSS_SUBJECT_MISMATCH,),
+        )
+        self.assertTrue(result.surrogate_rows)
+        for row in result.surrogate_rows:
+            self.assertNotEqual(
+                str(row.get("biological_participant_id")),
+                str(row.get("partner_participant_id")),
+            )
 
 
 class TestBlockPreservation(unittest.TestCase):
@@ -207,6 +244,48 @@ class TestAR1Innovations(unittest.TestCase):
         innov_ac = lag1_autocorrelation(innovations)
         self.assertGreater(original_ac, 0.5)
         self.assertLess(abs(innov_ac), 0.15)
+
+    def test_ar1_null_uses_trimmed_innovation_estimand_for_observed(self) -> None:
+        rng = np.random.default_rng(78)
+        hr = _zscore(rng.normal(size=240))
+        eeg = _zscore(np.roll(hr, 2) + 0.05 * rng.normal(size=240))
+        unit = _make_unit(
+            observation_id="ar1-obs",
+            subject_id="sub-01",
+            hr_z=hr,
+            eeg_z=eeg,
+        )
+        result = run_null_battery(
+            [unit],
+            n_surrogates=40,
+            null_types=(NULL_TYPE_AR1_INNOVATIONS,),
+        )
+        row = result.subject_rows[0]
+        hr_inn = ar1_innovations(hr)[1:]
+        eeg_inn = ar1_innovations(eeg)[1:]
+        expected = compute_endpoint_index_from_series(
+            hr_inn,
+            eeg_inn,
+            duration_s=240,
+            identity={
+                "dataset_id": "ds_test",
+                "subject_id": "sub-01",
+                "task": "rest",
+                "condition": "rest",
+                "observation_id": "ar1-obs",
+            },
+            band="theta",
+            power_representation="absolute_log10",
+            duration_role="primary",
+            is_primary_representation=True,
+            pair="hr_x_theta_absolute_log10",
+        )
+        self.assertAlmostEqual(
+            float(row["observed_endpoint_index"]),
+            float(expected["endpoint_index"]),
+            places=12,
+        )
+        self.assertEqual(int(row["n_surrogates_finite"]), 40)
 
 
 class TestEndpointSeparation(unittest.TestCase):
@@ -312,6 +391,18 @@ class TestEmpiricalPValue(unittest.TestCase):
         self.assertAlmostEqual(
             surrogate_effect_size(observed, nulls), expected_effect, places=12
         )
+
+    def test_degenerate_null_distribution_returns_not_computable(self) -> None:
+        observed = 10.0
+        tiny = [10.0 + 1e-20 * i for i in range(20)]
+        z_val, null_mean, null_sd, floor, reason = null_standardize_effect(
+            observed, tiny, required_draws=20
+        )
+        self.assertTrue(math.isfinite(null_mean))
+        self.assertTrue(math.isfinite(null_sd))
+        self.assertTrue(math.isfinite(floor))
+        self.assertTrue(math.isnan(z_val))
+        self.assertEqual(reason, "degenerate_null_distribution")
 
 
 class TestWriteOutputs(unittest.TestCase):
@@ -493,6 +584,59 @@ class TestParallelIdentityAndResume(unittest.TestCase):
             self.assertTrue(
                 all(int(r["n_surrogates_requested"]) == 7 for r in recomputed.subject_rows)
             )
+
+    def test_checkpoint_with_missing_cross_fields_is_recomputed(self) -> None:
+        units = self._units(3)
+        null_types = (
+            NULL_TYPE_CROSS_SUBJECT_MISMATCH,
+            NULL_TYPE_AR1_INNOVATIONS,
+        )
+        with TemporaryDirectory() as tmp:
+            ckpt = Path(tmp) / "ckpts"
+            baseline = run_null_battery(
+                units,
+                n_surrogates=7,
+                null_types=null_types,
+                n_jobs=1,
+                checkpoint_dir=ckpt,
+                progress=False,
+            )
+            self.assertEqual(
+                len([r for r in baseline.subject_rows if r["null_type"] == NULL_TYPE_CROSS_SUBJECT_MISMATCH]),
+                len(units),
+            )
+
+            victim = sorted(ckpt.glob("unit_*.json"))[0]
+            payload = json.loads(victim.read_text(encoding="utf-8"))
+            for row in payload.get("subject_rows", []):
+                if row.get("null_type") == NULL_TYPE_CROSS_SUBJECT_MISMATCH:
+                    row["status"] = "computed"
+                    row["cross_observed_endpoint_index"] = None
+                    row["cross_subject_null_normalized_effect"] = None
+                    break
+            victim.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            resumed = run_null_battery(
+                units,
+                n_surrogates=7,
+                null_types=null_types,
+                n_jobs=1,
+                checkpoint_dir=ckpt,
+                progress=False,
+            )
+            cross_rows = [
+                row
+                for row in resumed.subject_rows
+                if row["null_type"] == NULL_TYPE_CROSS_SUBJECT_MISMATCH
+            ]
+            self.assertEqual(len(cross_rows), len(units))
+            for row in cross_rows:
+                if row.get("status") != "computed":
+                    continue
+                self.assertTrue(math.isfinite(float(row["cross_observed_endpoint_index"])))
+                self.assertTrue(
+                    math.isfinite(float(row["cross_subject_null_normalized_effect"]))
+                )
 
     def test_corrupt_final_csvs_without_marker_are_ignored(self) -> None:
         from ppg_eeg.confirmatory.nulls import (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import math
 import unittest
 from pathlib import Path
@@ -10,10 +11,11 @@ import numpy as np
 from ppg_eeg.confirmatory.endpoints import fisher_z
 from ppg_eeg.confirmatory.peak_model import (
     EXCLUSION_FIT_NOT_ATTEMPTED,
+    EXCLUSION_INSUFFICIENT_FLANKS,
     EXCLUSION_NO_IDENTIFIABLE_PEAK,
+    EXCLUSION_OPTION_C_NOT_APPLICABLE,
     FWHM_FACTOR,
     IDENTIFIABLE_A_OVER_RMSE,
-    MIN_IDENTIFIABLE_A,
     MU_BOUND_S,
     PARAMS_FILENAME,
     QC_FILENAME,
@@ -124,12 +126,28 @@ class TestPeakModelFits(unittest.TestCase):
         z = np.full(lags.shape, 0.12)
         fit = fit_gaussian_peak(lags, z, weights=np.full(lags.shape, 60.0))
         self.assertTrue(fit["converged"])
-        self.assertLess(float(fit["peak_height_A"]), MIN_IDENTIFIABLE_A)
+        self.assertTrue(math.isnan(float(fit["peak_height_A"])))
         self.assertFalse(fit["has_identifiable_peak"])
         self.assertFalse(fit["report_timing_shift"])
         self.assertTrue(math.isnan(float(fit["peak_center_mu_s"])))
         self.assertEqual(fit["exclusion_reason"], EXCLUSION_NO_IDENTIFIABLE_PEAK)
         self.assertTrue(math.isfinite(float(fit["peak_lag_fitted_s"])))
+
+    def test_nonidentifiable_rows_blank_params_but_keep_qc_diagnostics(self) -> None:
+        lags = _lags(180)
+        r = np.tanh(np.full(lags.shape, 0.12))
+        rows = _curve_rows(lags, r, duration_s=180, n_overlap=60)
+        result = compute_peak_fits_from_curves(rows, duration_s=180)
+        params = result.params_rows[0]
+        qc = result.qc_rows[0]
+        self.assertFalse(params["has_identifiable_peak"])
+        self.assertTrue(math.isnan(float(params["peak_height_A"])))
+        self.assertTrue(math.isnan(float(params["peak_center_mu_s"])))
+        self.assertTrue(math.isnan(float(params["sigma_s"])))
+        self.assertTrue(math.isnan(float(params["fwhm_s"])))
+        self.assertTrue(math.isnan(float(params["peak_lag_fitted_s"])))
+        self.assertFalse(qc["has_identifiable_peak"])
+        self.assertTrue(math.isfinite(float(qc["init_peak_center_mu_s"])))
 
     def test_noisy_curve_still_recovers_approximate_center(self) -> None:
         rng = np.random.default_rng(123)
@@ -172,7 +190,7 @@ class TestPeakModelFits(unittest.TestCase):
         z = -gaussian_peak(lags, 0.0, 0.6, 0.0, 6.0)
         fit = fit_gaussian_peak(lags, z, weights=np.full(lags.shape, 120.0))
         self.assertTrue(fit["converged"])
-        self.assertGreaterEqual(float(fit["peak_height_A"]), -1e-10)
+        self.assertTrue(math.isnan(float(fit["peak_height_A"])))
         self.assertFalse(fit["report_timing_shift"])
 
     def test_curve_rows_pipeline_and_outputs(self) -> None:
@@ -233,6 +251,47 @@ class TestPeakModelFits(unittest.TestCase):
         # Rounding through tanh/atanh clip should still recover near-zero center.
         fit = fit_gaussian_peak(lags, z_from_r, weights=np.full(lags.shape, 120.0))
         self.assertAlmostEqual(float(fit["peak_center_mu_s"]), 0.0, places=1)
+
+    def test_d60_and_d120_are_not_computable_option_c(self) -> None:
+        for duration_s in (60, 120):
+            lags = _lags(duration_s)
+            r = _r_from_z_peak(lags, baseline_C=0.0, peak_height_A=0.3, mu=0.0, sigma=8.0)
+            rows = _curve_rows(lags, r, duration_s=duration_s, n_overlap=20)
+            params = compute_peak_fits_from_curves(rows, duration_s=duration_s).params_rows[0]
+            self.assertEqual(params["exclusion_reason"], EXCLUSION_OPTION_C_NOT_APPLICABLE)
+            self.assertEqual(params["status"], "not_computable")
+            self.assertFalse(params["converged"])
+            self.assertFalse(params["has_identifiable_peak"])
+            self.assertTrue(math.isnan(float(params["peak_height_A"])))
+            self.assertTrue(math.isnan(float(params["peak_center_mu_s"])))
+            self.assertTrue(math.isnan(float(params["fwhm_s"])))
+            self.assertTrue(math.isnan(float(params["sigma_s"])))
+            self.assertTrue(math.isnan(float(params["baseline_C"])))
+
+        lags = _lags(60)
+        r = _r_from_z_peak(lags, baseline_C=0.0, peak_height_A=0.3, mu=0.0, sigma=8.0)
+        result = compute_peak_fits_from_curves(
+            _curve_rows(lags, r, duration_s=60, n_overlap=20),
+            duration_s=60,
+        )
+        with TemporaryDirectory() as tmp:
+            paths = write_peak_fit_outputs(result, tmp)
+            with paths["params"].open(encoding="utf-8", newline="") as handle:
+                written = next(csv.DictReader(handle))
+            self.assertEqual(written["status"], "not_computable")
+            self.assertEqual(written["peak_height_A"], "")
+            self.assertEqual(written["peak_center_mu_s"], "")
+            self.assertEqual(written["fwhm_s"], "")
+
+    def test_insufficient_flanks_does_not_median_fallback(self) -> None:
+        lags = np.arange(-10.0, 11.0, 1.0)
+        z = gaussian_peak(lags, 0.0, 0.4, 0.0, 6.0)
+        fit = fit_gaussian_peak(lags, z, weights=np.full(lags.shape, 120.0))
+        self.assertFalse(fit["converged"])
+        self.assertEqual(fit["exclusion_reason"], EXCLUSION_INSUFFICIENT_FLANKS)
+        self.assertTrue(math.isnan(float(fit["peak_height_A"])))
+        self.assertTrue(math.isnan(float(fit["peak_center_mu_s"])))
+        self.assertTrue(math.isnan(float(fit["fwhm_s"])))
 
 
 if __name__ == "__main__":

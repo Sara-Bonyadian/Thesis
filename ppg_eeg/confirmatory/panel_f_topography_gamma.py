@@ -34,6 +34,7 @@ from .protocol_audit import condition_semantics_for
 from .reason_codes import (
     ARTIFACT_CONTROL_NOT_AVAILABLE,
     INSUFFICIENT_COMMON_MONTAGE,
+    MISSING_REQUIRED_BAND,
     MISSING_SENSOR_LOCATIONS,
     NO_CHANNEL_LEVEL_ENDPOINT_VALUES,
     STRUCTURED_NC_FIELDS,
@@ -71,10 +72,10 @@ MAP_ORDER = (
 )
 MAP_TITLES = {
     # Map ids retain rest/task tokens for export compatibility; titles are general.
-    MAP_REST_ALPHA: "F1. Low-demand alpha",
-    MAP_TASK_ATTENUATION: "F2. High − low demand alpha",
-    MAP_GAMMA_BEFORE: "F3. Gamma before exclusion",
-    MAP_GAMMA_AFTER: "F4. Gamma after ECG-prone exclusion",
+    MAP_REST_ALPHA: "Low-demand α",
+    MAP_TASK_ATTENUATION: "α high−low",
+    MAP_GAMMA_BEFORE: "Low-γ full montage",
+    MAP_GAMMA_AFTER: "Low-γ after ECG-prone exclusion",
 }
 
 PANEL_F_INTERPRETATION_LINE = (
@@ -91,7 +92,7 @@ TOPOMAP_CMAP = "RdBu_r"
 TOPOMAP_CONTOURS = 6
 TOPOMAP_EXTRAPOLATE = "head"
 TOPOMAP_INTERP = "cubic"
-FIGURE_SIZE = (16.0, 6.4)
+FIGURE_SIZE = (16.4, 7.2)
 
 CONTROL_SPEC_BEFORE = "baseline_channel_zlpi_no_additional_controls"
 CONTROL_SPEC_AFTER = "ecg_prone_default_v1_restricted_montage_sensitivity"
@@ -181,7 +182,13 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _write_csv(path: Path, rows: Sequence[Mapping[str, object]], fieldnames: Sequence[str]) -> None:
+def _write_csv(
+    path: Path,
+    rows: Sequence[Mapping[str, object]],
+    fieldnames: Sequence[str],
+    *,
+    stage: str = "C7",
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = list(dict.fromkeys([*fieldnames, *STRUCTURED_NC_FIELDS]))
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -211,7 +218,7 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, object]], fieldnames: Seq
                     "reason_code": code,
                     "reason": _as_str(row.get("reason") or row.get("not_computable_reason")),
                 },
-                stage="C7",
+                stage=stage,
                 specification_id=str(row.get("specification_id") or path.stem),
             )
             writer.writerow({k: enriched.get(k, "") for k in fields})
@@ -530,6 +537,32 @@ def _is_high_demand_state(state: str) -> bool:
         "state_high",
         "cognitive_effort",
     }
+
+
+def _capability_value(
+    capabilities: Mapping[str, object] | None,
+    key: str,
+    *,
+    default: bool = True,
+) -> bool:
+    if capabilities is None:
+        return default
+    return _as_bool(capabilities.get(key))
+
+
+def _capability_evidence(capabilities: Mapping[str, object] | None, key: str) -> str:
+    if capabilities is None:
+        return ""
+    text = _as_str(capabilities.get(f"{key}_evidence"))
+    if text:
+        return text
+    return _as_str(capabilities.get("evidence"))
+
+
+def _capability_reason_code(capabilities: Mapping[str, object] | None, key: str) -> str:
+    if capabilities is None:
+        return ""
+    return _as_str(capabilities.get(f"{key}_reason_code"))
 
 
 def _select_paired_alpha_rows(paired_rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
@@ -947,6 +980,8 @@ def compute_panel_f_topography(
     confirmatory_root: Path,
     paired_rows: Sequence[Mapping[str, object]],
     force_recompute_channel_zlpi: bool = False,
+    capabilities: Mapping[str, object] | None = None,
+    channel_cache_path: Path | None = None,
 ) -> PanelFResult:
     """Compute Panel F maps and ECG-prone restricted-montage sensitivity."""
     set_id, ecg_prone = load_ecg_prone_channels()
@@ -954,6 +989,7 @@ def compute_panel_f_topography(
     before_raw = build_or_load_channel_zlpi_table(
         confirmatory_root=confirmatory_root,
         paired_rows=paired_rows,
+        cache_path=channel_cache_path,
         force_recompute=force_recompute_channel_zlpi,
     )
     before_raw = _attach_coordinates(before_raw)
@@ -968,6 +1004,9 @@ def compute_panel_f_topography(
         ecg_prone=ecg_prone,
     )
     atten_rows = _attach_coordinates(_paired_task_minus_rest_alpha(before_rows, paired_rows))
+
+    supports_topography = _capability_value(capabilities, "supports_topography", default=True)
+    supports_gamma = _capability_value(capabilities, "supports_gamma", default=True)
 
     rest_alpha_obs = [
         r for r in before_rows
@@ -993,6 +1032,14 @@ def compute_panel_f_topography(
         and _as_bool(r.get("computable"))
         and math.isfinite(_as_float(r.get("channel_x")))
     ]
+    if not supports_topography:
+        rest_alpha_obs = []
+        atten_obs = []
+        gamma_full_obs = []
+        gamma_restricted_obs = []
+    elif not supports_gamma:
+        gamma_full_obs = []
+        gamma_restricted_obs = []
 
     def _chs(rows: Sequence[Mapping[str, object]]) -> set[str]:
         return {_normalize_channel(r.get("channel", "")) for r in rows}
@@ -1335,10 +1382,70 @@ def compute_panel_f_topography(
             for name, chs in (
                 ("gamma_full_usable_pre_exclusion", gamma_full_channels),
                 ("ecg_prone_excluded", excluded_ecg_channels),
-                ("retained_common_53_intersection", retained_channels),
+                ("retained_common_intersection", retained_channels),
             )
         ],
     ]
+
+    capability_nc_rows: list[dict[str, object]] = []
+    if not supports_topography:
+        topography_reason = (
+            _capability_reason_code(capabilities, "supports_topography")
+            or TOPOGRAPHY_NOT_SUPPORTED
+        )
+        topography_observed = _capability_evidence(capabilities, "supports_topography")
+        for map_id in MAP_ORDER:
+            capability_nc_rows.append(
+                {
+                    "panel_map": map_id,
+                    "dataset_id": _as_str((paired_rows[0] if paired_rows else {}).get("dataset_id")),
+                    "observation_id": "",
+                    "participant_id": "",
+                    "session_id": "",
+                    "channel": "",
+                    "band": PANEL_F_ALPHA_BAND if map_id in {MAP_REST_ALPHA, MAP_TASK_ATTENUATION} else PANEL_F_GAMMA_BAND,
+                    "computable": False,
+                    "zpli_value": float("nan"),
+                    "not_computable_reason": topography_reason,
+                    "reason_code": topography_reason,
+                    "required_evidence": "supports_topography=true",
+                    "observed_evidence": topography_observed,
+                }
+            )
+    elif not supports_gamma:
+        gamma_reason = (
+            _capability_reason_code(capabilities, "supports_gamma")
+            or MISSING_REQUIRED_BAND
+        )
+        gamma_observed = _capability_evidence(capabilities, "supports_gamma")
+        for map_id in (MAP_GAMMA_BEFORE, MAP_GAMMA_AFTER):
+            capability_nc_rows.append(
+                {
+                    "panel_map": map_id,
+                    "dataset_id": _as_str((paired_rows[0] if paired_rows else {}).get("dataset_id")),
+                    "observation_id": "",
+                    "participant_id": "",
+                    "session_id": "",
+                    "channel": "",
+                    "band": PANEL_F_GAMMA_BAND,
+                    "computable": False,
+                    "zpli_value": float("nan"),
+                    "not_computable_reason": gamma_reason,
+                    "reason_code": gamma_reason,
+                    "required_evidence": "supports_gamma=true",
+                    "observed_evidence": gamma_observed,
+                }
+            )
+    if capability_nc_rows:
+        diagnostic_rows.extend(
+            [
+                {
+                    "diagnostic_type": "capability_gate",
+                    **row,
+                }
+                for row in capability_nc_rows
+            ]
+        )
 
     metadata = {
         "schema_version": "figure3_panel_f_topography_gamma_v2_montage_sensitivity",
@@ -1375,6 +1482,12 @@ def compute_panel_f_topography(
         "aggregation_method": (
             "channel×observation ZLPI → participant mean → equal-weight participant mean"
         ),
+        "capability_gates": {
+            "supports_topography_required": True,
+            "supports_topography_observed": supports_topography,
+            "supports_gamma_required_for_gamma_maps": True,
+            "supports_gamma_observed": supports_gamma,
+        },
         "color_scales": {
             "alpha_shared": {"min": -alpha_L, "max": alpha_L, "maps": [MAP_REST_ALPHA, MAP_TASK_ATTENUATION]},
             "gamma_shared": {"min": -gamma_L, "max": gamma_L, "maps": [MAP_GAMMA_BEFORE, MAP_GAMMA_AFTER]},
@@ -1406,7 +1519,7 @@ def compute_panel_f_topography(
     }
 
     return PanelFResult(
-        observation_rows=tuple(observation_export),
+        observation_rows=tuple([*observation_export, *capability_nc_rows]),
         summary_rows=tuple(summary_rows),
         montage_rows=tuple(montage_rows),
         gamma_comparison_rows=tuple(gamma_comparison_rows),
@@ -1416,21 +1529,73 @@ def compute_panel_f_topography(
 
 
 
-def write_panel_f_exports(result: PanelFResult, source_dir: Path) -> dict[str, Path]:
+def write_panel_f_exports(
+    result: PanelFResult,
+    source_dir: Path,
+    *,
+    stage: str = "C7",
+) -> dict[str, Path]:
     source_dir = Path(source_dir)
     source_dir.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
+    locked = (
+        result.metadata.get("locked_estimand", {})
+        if isinstance(result.metadata.get("locked_estimand"), dict)
+        else {}
+    )
+    duration_s = int(_as_float(result.metadata.get("duration_s"))) if math.isfinite(_as_float(result.metadata.get("duration_s"))) else PANEL_F_DURATION_S
+    endpoint_name = _as_str(locked.get("endpoint_name"), PANEL_F_ENDPOINT)
+    power_representation = _as_str(
+        locked.get("power_representation"),
+        PANEL_F_REPRESENTATION,
+    )
+
+    def _infer_dataset_id() -> str:
+        for group in (
+            result.observation_rows,
+            result.summary_rows,
+            result.montage_rows,
+            result.gamma_comparison_rows,
+            result.diagnostic_rows,
+        ):
+            found = {
+                _as_str(row.get("dataset_id")).casefold()
+                for row in group
+                if _as_str(row.get("dataset_id"))
+            }
+            if len(found) == 1:
+                return next(iter(found))
+        return _as_str(result.metadata.get("dataset_id")).casefold()
+
+    inferred_dataset_id = _infer_dataset_id()
+
+    def _enrich_rows(
+        name: str,
+        rows: Sequence[Mapping[str, object]],
+    ) -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            if inferred_dataset_id and not _as_str(item.get("dataset_id")):
+                item["dataset_id"] = inferred_dataset_id
+            if name == "summary":
+                item.setdefault("duration_s", duration_s)
+                item.setdefault("endpoint_name", endpoint_name)
+                item.setdefault("power_representation", power_representation)
+            out.append(item)
+        return out
 
     def _dump(name: str, rows: Sequence[Mapping[str, object]]) -> Path:
         path = source_dir / f"{PANEL_F_STEM}_{name}.csv"
+        prepared_rows = _enrich_rows(name, rows)
         fields: list[str] = []
         seen: set[str] = set()
-        for row in rows:
+        for row in prepared_rows:
             for key in row:
                 if key not in seen:
                     seen.add(key)
                     fields.append(key)
-        _write_csv(path, rows, fields or ["empty"])
+        _write_csv(path, prepared_rows, fields or ["empty"], stage=stage)
         return path
 
     paths["observations"] = _dump("observation_level", result.observation_rows)
@@ -1469,8 +1634,11 @@ def write_panel_f_exports(result: PanelFResult, source_dir: Path) -> dict[str, P
         ],
     )
     meta_path = source_dir / f"{PANEL_F_STEM}_metadata.json"
+    meta_payload = dict(result.metadata)
+    if inferred_dataset_id and not _as_str(meta_payload.get("dataset_id")):
+        meta_payload["dataset_id"] = inferred_dataset_id
     meta_path.write_text(
-        json.dumps(result.metadata, indent=2, sort_keys=True, default=str) + "\n",
+        json.dumps(meta_payload, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
     )
     paths["metadata"] = meta_path
@@ -1502,6 +1670,8 @@ def panel_f_caption(result: PanelFResult) -> str:
         "unavailable, the low-gamma finding remains artifact-indeterminate. "
         "On F4, topographic color is interpolated from retained sensors only; excluded "
         "channels are absent from the montage and are not assigned zero. "
+        "Channel-wise N may be below total participant N when a participant is missing a "
+        "specific channel; this reflects channel availability, not participant attrition. "
         f"Alpha common montage n={meta.get('n_alpha_common_channels', meta.get('n_retained_channels'))}; "
         f"gamma full montage n={meta.get('n_gamma_full_channels')}; "
         f"retained n={meta.get('n_retained_channels')}; "
@@ -1768,7 +1938,7 @@ def _plot_topomap(
         vals.append(float(v))
     if not keep:
         ax.set_axis_off()
-        ax.set_title(title + "\n(no channels)", fontsize=11, fontweight="bold", pad=10)
+        ax.set_title(title + "\n(no channels)", fontsize=12, fontweight="bold", pad=10)
         return None, None, [], []
 
     import mne
@@ -1791,7 +1961,7 @@ def _plot_topomap(
         border="mean",
         res=64,
     )
-    ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
     return im, info, keep, vals
 
 
@@ -1814,11 +1984,13 @@ def render_panel_f_figure(
     output_dir: Path,
     *,
     include_internal_qc: bool = True,
+    component_mode: bool = False,
 ) -> dict[str, Path]:
     """Render standalone Panel F topography sheet (display-only)."""
     import mne
 
     from .figures import (
+        FS_AXIS,
         FS_TICK,
         FIGURE_DPI,
         _configure_publication_style,
@@ -1903,8 +2075,25 @@ def render_panel_f_figure(
     if set(ch_f4) & set(ecg_prone):
         raise ValueError("F4 assigned values on ECG-prone channels")
 
-    alpha_vmax = _symmetric_vmax(list(v_f1) + list(v_f2))
-    gamma_vmax = _symmetric_vmax(list(v_f3) + list(v_f4))
+    color_scales = (
+        result.metadata.get("color_scales", {})
+        if isinstance(result.metadata.get("color_scales"), dict)
+        else {}
+    )
+    alpha_scale = color_scales.get("alpha_shared", {}) if isinstance(color_scales, dict) else {}
+    gamma_scale = color_scales.get("gamma_shared", {}) if isinstance(color_scales, dict) else {}
+    alpha_vmax = max(
+        abs(_as_float((alpha_scale if isinstance(alpha_scale, dict) else {}).get("min"))),
+        abs(_as_float((alpha_scale if isinstance(alpha_scale, dict) else {}).get("max"))),
+    )
+    gamma_vmax = max(
+        abs(_as_float((gamma_scale if isinstance(gamma_scale, dict) else {}).get("min"))),
+        abs(_as_float((gamma_scale if isinstance(gamma_scale, dict) else {}).get("max"))),
+    )
+    if not math.isfinite(alpha_vmax) or alpha_vmax <= 0:
+        alpha_vmax = _symmetric_vmax(list(v_f1) + list(v_f2))
+    if not math.isfinite(gamma_vmax) or gamma_vmax <= 0:
+        gamma_vmax = _symmetric_vmax(list(v_f3) + list(v_f4))
 
     montage = _standard_1020_montage()
     _configure_publication_style()
@@ -1915,11 +2104,11 @@ def render_panel_f_figure(
         constrained_layout=False,
     )
     fig.subplots_adjust(
-        left=0.02,
+        left=0.025,
         right=0.98,
-        top=0.76,
-        bottom=0.30,
-        wspace=0.20,
+        top=0.79 if not component_mode else 0.89,
+        bottom=0.29 if not component_mode else 0.20,
+        wspace=0.18,
     )
 
     plot_specs = (
@@ -1963,13 +2152,14 @@ def render_panel_f_figure(
         )
 
     # Color bars spanning F1–F2 and F3–F4.
-    alpha_cbar_ax = fig.add_axes([0.07, 0.14, 0.40, 0.025])
-    gamma_cbar_ax = fig.add_axes([0.53, 0.14, 0.40, 0.025])
+    alpha_cbar_ax = fig.add_axes([0.07, 0.14 if not component_mode else 0.09, 0.40, 0.030])
+    gamma_cbar_ax = fig.add_axes([0.53, 0.14 if not component_mode else 0.09, 0.40, 0.030])
     alpha_im = images[0]
     gamma_im = images[2]
     if alpha_im is not None:
         alpha_cbar = fig.colorbar(alpha_im, cax=alpha_cbar_ax, orientation="horizontal")
-        alpha_cbar.set_label(PANEL_F_CBAR_ALPHA, fontsize=FS_TICK - 1)
+        alpha_cbar.set_label(PANEL_F_CBAR_ALPHA, fontsize=FS_TICK)
+        alpha_cbar.ax.tick_params(labelsize=FS_TICK - 1)
         _format_cbar_ticks(alpha_cbar, alpha_vmax)
     else:
         alpha_cbar_ax.set_axis_off()
@@ -1979,7 +2169,8 @@ def render_panel_f_figure(
         )
     if gamma_im is not None:
         gamma_cbar = fig.colorbar(gamma_im, cax=gamma_cbar_ax, orientation="horizontal")
-        gamma_cbar.set_label(PANEL_F_CBAR_GAMMA, fontsize=FS_TICK - 1)
+        gamma_cbar.set_label(PANEL_F_CBAR_GAMMA, fontsize=FS_TICK)
+        gamma_cbar.ax.tick_params(labelsize=FS_TICK - 1)
         _format_cbar_ticks(gamma_cbar, gamma_vmax)
         gamma_ticks = list(gamma_cbar.get_ticks())
         if len(gamma_ticks) != 3 or not np.isclose(
@@ -2007,64 +2198,65 @@ def render_panel_f_figure(
             label="ECG-prone channel in F3",
         )
     ]
-    legend_ax = fig.add_axes([0.53, 0.195, 0.40, 0.035])
+    legend_ax = fig.add_axes([0.53, 0.195 if not component_mode else 0.135, 0.40, 0.040])
     legend_ax.set_axis_off()
     legend_ax.legend(
         handles=legend_handles,
         loc="center",
-        fontsize=FS_TICK - 2,
+        fontsize=FS_TICK - 1,
         frameon=False,
         handlelength=1.2,
     )
 
-    fig.text(
-        0.5,
-        0.975,
-        PANEL_F_FIGURE_TITLE,
-        ha="center",
-        va="top",
-        fontsize=15,
-        fontweight="bold",
-    )
-    fig.text(
-        0.5,
-        0.925,
-        PANEL_F_SUBTITLE,
-        ha="center",
-        va="top",
-        fontsize=FS_TICK,
-        color="#555555",
-    )
-    fig.text(
-        0.5,
-        0.885,
-        PANEL_F_SECOND_LINE_TEMPLATE.format(
-            n_alpha=result.metadata.get("n_alpha_common_channels", len(retained)),
-            n_gamma=result.metadata.get("n_gamma_paired_observations"),
-        ),
-        ha="center",
-        va="top",
-        fontsize=FS_TICK - 1,
-        color="#333333",
-    )
-    fig.text(
-        0.5,
-        0.845,
-        PANEL_F_INTERPRETATION_LINE,
-        ha="center",
-        va="top",
-        fontsize=FS_TICK - 1,
-        color="#333333",
-    )
-    fig.text(
-        0.5,
-        0.045,
-        PANEL_F_FOOTNOTE,
-        ha="center",
-        va="center",
-        fontsize=FS_TICK - 3,
-        color="#555555",
-    )
+    if not component_mode:
+        fig.text(
+            0.5,
+            0.975,
+            PANEL_F_FIGURE_TITLE,
+            ha="center",
+            va="top",
+            fontsize=FS_AXIS + 4,
+            fontweight="bold",
+        )
+        fig.text(
+            0.5,
+            0.925,
+            PANEL_F_SUBTITLE,
+            ha="center",
+            va="top",
+            fontsize=FS_TICK + 1,
+            color="#555555",
+        )
+        fig.text(
+            0.5,
+            0.885,
+            PANEL_F_SECOND_LINE_TEMPLATE.format(
+                n_alpha=result.metadata.get("n_alpha_common_channels", len(retained)),
+                n_gamma=result.metadata.get("n_gamma_paired_observations"),
+            ),
+            ha="center",
+            va="top",
+            fontsize=FS_TICK,
+            color="#333333",
+        )
+        fig.text(
+            0.5,
+            0.845,
+            PANEL_F_INTERPRETATION_LINE,
+            ha="center",
+            va="top",
+            fontsize=FS_TICK,
+            color="#333333",
+        )
+        fig.text(
+            0.5,
+            0.045,
+            PANEL_F_FOOTNOTE,
+            ha="center",
+            va="center",
+            fontsize=FS_TICK - 1,
+            color="#555555",
+        )
 
     estimates_after = [
         (_as_str(r.get("panel_map")), _as_str(r.get("channel")), _as_float(r.get("estimate")))
@@ -2095,6 +2287,8 @@ def render_panel_f_figure(
         "figure_size": list(FIGURE_SIZE),
         "alpha_vmax": alpha_vmax,
         "gamma_vmax": gamma_vmax,
+        "alpha_vmax_source": "locked_upstream_color_scales",
+        "gamma_vmax_source": "locked_upstream_color_scales",
         "n_channels": {
             "F1": len(ch_f1),
             "F2": len(ch_f2),

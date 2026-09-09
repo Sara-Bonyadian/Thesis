@@ -25,6 +25,18 @@ from .correlation import (
 )
 from .duration_contracts import ENDPOINT_ZLPI, EXPECTED_PRIMARY_DURATION_S, contract_for_duration
 from .endpoints import compute_endpoints_from_curves, min_common_support_required
+from .panel_f_topography_gamma import (
+    compute_observation_channel_zlpi,
+    load_ecg_prone_channels,
+)
+from .reason_codes import (
+    ARTIFACT_CONTROL_NOT_AVAILABLE,
+    INSUFFICIENT_COMMON_MONTAGE,
+    INSUFFICIENT_COMMON_SUPPORT,
+    MISSING_EVENT_SERIES,
+    MISSING_REQUIRED_MODALITY,
+    UNSUPPORTED_CONTROL_FOR_MODALITY,
+)
 
 OBSERVATION_CONTROLS_FILENAME = "cardiac_controls_observation_level.csv"
 DATASET_QC_FILENAME = "cardiac_controls_dataset_qc.csv"
@@ -44,6 +56,8 @@ MASK_WINDOWS_S = {
     "ppg": (0.15, 0.15),
 }
 PPG_TEMPLATE_HALF_WINDOW_S = 1.0
+ECG_TEMPLATE_HALF_WINDOW_S = 1.0
+MIN_RETAINED_COMMON_MONTAGE_CHANNELS = 8
 
 OBS_COLUMNS: tuple[str, ...] = (
     "dataset_id",
@@ -71,9 +85,15 @@ OBS_COLUMNS: tuple[str, ...] = (
     "delta_vs_baseline",
     "n_valid_samples_baseline",
     "n_valid_samples_control",
+    "n_channels_original",
+    "n_channels_removed",
+    "n_channels_retained",
+    "removed_channels",
     "minimum_lag_overlap",
     "computable",
+    "reason_code",
     "not_computable_reason",
+    "not_computable_explanation",
     "pipeline_stage",
     "code_version",
 )
@@ -179,6 +199,33 @@ def _declared_modalities(protocol_rows: Sequence[Mapping[str, object]]) -> dict[
             continue
         out[dataset] = _as_str(row.get("cardiac_modality"), "unknown")
     return out
+
+
+def _parse_modality_tokens(value: str) -> set[str]:
+    text = _as_str(value).casefold()
+    if not text:
+        return set()
+    tokens = {
+        piece.strip()
+        for raw in text.replace("/", ";").replace(",", ";").split(";")
+        for piece in raw.split()
+        if piece.strip()
+    }
+    out: set[str] = set()
+    for token in tokens:
+        if token in {"ecg", "ppg", "both"}:
+            if token == "both":
+                out.update({"ecg", "ppg"})
+            else:
+                out.add(token)
+    return out
+
+
+def _allowed_modalities_for_dataset(declared_modality: str) -> set[str]:
+    allowed = _parse_modality_tokens(declared_modality)
+    if allowed:
+        return allowed
+    return {"ecg", "ppg"}
 
 
 def _group_aligned_d240(aligned_rows: Sequence[Mapping[str, object]]) -> dict[str, list[dict[str, object]]]:
@@ -344,11 +391,11 @@ def _strict_common_support_anchor_count(
     return anchors
 
 
-def _apply_ppg_pulse_template_subtraction(
+def _apply_event_locked_template_subtraction(
     rows: Sequence[Mapping[str, object]],
     event_times: np.ndarray,
     *,
-    half_window_s: float = PPG_TEMPLATE_HALF_WINDOW_S,
+    half_window_s: float,
 ) -> tuple[list[dict[str, object]], int, int]:
     """Subtract a simple pulse-locked template on aligned band-power series."""
     if not rows or event_times.size == 0:
@@ -484,10 +531,11 @@ def _beat_count_adjust(
             for row in members:
                 item = dict(row)
                 item["control_type"] = CONTROL_BEAT_ADJUST
-                item["controlled_zlpi"] = ""
-                item["delta_vs_baseline"] = ""
-                item["computable"] = False
-                item["not_computable_reason"] = "insufficient_rows_for_beat_count_adjustment"
+                _mark_not_computable(
+                    item,
+                    reason_code=ARTIFACT_CONTROL_NOT_AVAILABLE,
+                    explanation="insufficient rows for beat-count adjustment",
+                )
                 out.append(item)
             continue
         yv = y[finite]
@@ -507,19 +555,129 @@ def _beat_count_adjust(
                 item["controlled_zlpi"] = val
                 item["delta_vs_baseline"] = val - _as_float(row.get("baseline_zlpi"))
                 item["computable"] = True
+                item["reason_code"] = ""
                 item["not_computable_reason"] = ""
+                item["not_computable_explanation"] = ""
             else:
-                item["controlled_zlpi"] = ""
-                item["delta_vs_baseline"] = ""
-                item["computable"] = False
-                item["not_computable_reason"] = "missing_covariates_for_beat_count_adjustment"
+                _mark_not_computable(
+                    item,
+                    reason_code=ARTIFACT_CONTROL_NOT_AVAILABLE,
+                    explanation="missing covariates for beat-count adjustment",
+                )
             out.append(item)
+    return out
+
+
+def _mark_not_computable(
+    row: dict[str, object],
+    *,
+    reason_code: str,
+    explanation: str,
+) -> dict[str, object]:
+    row.update(
+        {
+            "controlled_zlpi": "",
+            "delta_vs_baseline": "",
+            "n_valid_samples_control": "",
+            "computable": False,
+            "reason_code": reason_code,
+            "not_computable_reason": explanation,
+            "not_computable_explanation": explanation,
+        }
+    )
+    return row
+
+
+def _compute_ecg_channel_removal_control(
+    *,
+    observation_id: str,
+    identity: Mapping[str, object],
+    c1a_dir: Path,
+    c1b_dir: Path,
+    ecg_prone_channels: Sequence[str],
+) -> dict[str, dict[str, object]]:
+    out: dict[str, dict[str, object]] = {}
+    channel_rows = compute_observation_channel_zlpi(
+        observation_id=observation_id,
+        c1a_dir=c1a_dir,
+        c1b_dir=c1b_dir,
+        identity=identity,
+        bands=BAND_ORDER,
+    )
+    by_band: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for row in channel_rows:
+        band = _as_str(row.get("band")).casefold()
+        if band:
+            by_band[band].append(row)
+    prone_set = {_as_str(ch) for ch in ecg_prone_channels if _as_str(ch)}
+    for band in BAND_ORDER:
+        members = by_band.get(band, [])
+        if not members:
+            out[band] = {
+                "computable": False,
+                "reason_code": ARTIFACT_CONTROL_NOT_AVAILABLE,
+                "reason": "channel-level ZLPI rows are unavailable for this observation",
+            }
+            continue
+        finite = [
+            m
+            for m in members
+            if _as_bool(m.get("computable")) and math.isfinite(_as_float(m.get("zpli_value")))
+        ]
+        if not finite:
+            out[band] = {
+                "computable": False,
+                "reason_code": ARTIFACT_CONTROL_NOT_AVAILABLE,
+                "reason": "no finite channel-level ZLPI values after spectral/HR QC",
+            }
+            continue
+        original_channels = sorted({_as_str(m.get("channel")) for m in finite if _as_str(m.get("channel"))})
+        retained = [m for m in finite if _as_str(m.get("channel")) not in prone_set]
+        retained_channels = sorted({_as_str(m.get("channel")) for m in retained if _as_str(m.get("channel"))})
+        removed_channels = sorted(ch for ch in original_channels if ch not in retained_channels)
+        if len(retained_channels) < MIN_RETAINED_COMMON_MONTAGE_CHANNELS:
+            out[band] = {
+                "computable": False,
+                "reason_code": INSUFFICIENT_COMMON_MONTAGE,
+                "reason": (
+                    "retained channel montage below minimum "
+                    f"({len(retained_channels)} < {MIN_RETAINED_COMMON_MONTAGE_CHANNELS})"
+                ),
+                "n_channels_original": len(original_channels),
+                "n_channels_removed": len(removed_channels),
+                "n_channels_retained": len(retained_channels),
+                "removed_channels": ";".join(removed_channels),
+            }
+            continue
+        values = np.asarray([_as_float(m.get("zpli_value")) for m in retained], dtype=float)
+        if values.size == 0 or not np.any(np.isfinite(values)):
+            out[band] = {
+                "computable": False,
+                "reason_code": ARTIFACT_CONTROL_NOT_AVAILABLE,
+                "reason": "retained channels have no finite ZLPI values",
+                "n_channels_original": len(original_channels),
+                "n_channels_removed": len(removed_channels),
+                "n_channels_retained": len(retained_channels),
+                "removed_channels": ";".join(removed_channels),
+            }
+            continue
+        out[band] = {
+            "computable": True,
+            "controlled_zlpi": float(np.mean(values[np.isfinite(values)])),
+            "n_channels_original": len(original_channels),
+            "n_channels_removed": len(removed_channels),
+            "n_channels_retained": len(retained_channels),
+            "removed_channels": ";".join(removed_channels),
+            "reason_code": "",
+            "reason": "",
+        }
     return out
 
 
 def run_confirmatory_cardiac_controls_upstream(
     *,
     c0_dir: Path,
+    c1a_dir: Path | None = None,
     c1b_dir: Path,
     c1c_dir: Path,
     c3_dir: Path,
@@ -533,6 +691,10 @@ def run_confirmatory_cardiac_controls_upstream(
     endpoint_rows = _read_csv(c3_dir / "confirmatory_endpoint_metrics_D240.csv")
     baseline_lookup = _baseline_endpoint_lookup(endpoint_rows)
     c1b_qc_rows = _read_csv(c1b_dir / "cardiac_peak_qc.csv")
+    try:
+        ecg_prone_set_id, ecg_prone_channels = load_ecg_prone_channels()
+    except Exception:
+        ecg_prone_set_id, ecg_prone_channels = "ecg_prone_unavailable", ()
 
     observation_rows: list[dict[str, object]] = []
     mask_diagnostic_rows: list[dict[str, object]] = []
@@ -552,6 +714,9 @@ def run_confirmatory_cardiac_controls_upstream(
             },
             sort_keys=True,
         )
+        dataset_hint = _as_str(obs_rows[0].get("dataset_id")).casefold()
+        declared_modality = _as_str(declared.get(dataset_hint)).casefold()
+        allowed_modalities = _allowed_modalities_for_dataset(declared_modality)
 
         peaks_rows = _peaks_for_observation(c1b_dir, observation_id)
         event_times = _accepted_event_times(peaks_rows)
@@ -569,8 +734,14 @@ def run_confirmatory_cardiac_controls_upstream(
         endpoints_by_control: dict[str, tuple[dict[str, dict[str, object]], dict[str, dict[str, object]], int]] = {}
         template_event_stats: tuple[int, int] | None = None
         mask_valid_by_band: dict[str, np.ndarray] = {}
+        channel_control_by_band: dict[str, dict[str, object]] = {}
 
-        if signal_type in {"ecg", "ppg"} and in_bounds_events.size and align_status != "fail":
+        if (
+            signal_type in {"ecg", "ppg"}
+            and signal_type in allowed_modalities
+            and in_bounds_events.size
+            and align_status != "fail"
+        ):
             pre_s, post_s = MASK_WINDOWS_S[signal_type]
             masked_rows, n_masked = _apply_event_mask(
                 obs_rows,
@@ -591,9 +762,10 @@ def run_confirmatory_cardiac_controls_upstream(
                     dtype=bool,
                 )
             if signal_type == "ppg":
-                cleaned_rows, n_used_template, n_rejected_template = _apply_ppg_pulse_template_subtraction(
+                cleaned_rows, n_used_template, n_rejected_template = _apply_event_locked_template_subtraction(
                     obs_rows,
                     in_bounds_events,
+                    half_window_s=PPG_TEMPLATE_HALF_WINDOW_S,
                 )
                 if cleaned_rows:
                     try:
@@ -602,6 +774,34 @@ def run_confirmatory_cardiac_controls_upstream(
                         template_event_stats = (n_used_template, n_rejected_template)
                     except Exception:
                         template_event_stats = None
+            if signal_type == "ecg":
+                cleaned_rows, n_used_template, n_rejected_template = _apply_event_locked_template_subtraction(
+                    obs_rows,
+                    in_bounds_events,
+                    half_window_s=ECG_TEMPLATE_HALF_WINDOW_S,
+                )
+                if cleaned_rows:
+                    try:
+                        endpoint_map, qc_map = _control_curves_from_rows(cleaned_rows)
+                        endpoints_by_control[CONTROL_ECG_TEMPLATE] = (endpoint_map, qc_map, 0)
+                        template_event_stats = (n_used_template, n_rejected_template)
+                    except Exception:
+                        template_event_stats = None
+        if c1a_dir is not None and signal_type == "ecg" and "ecg" in allowed_modalities:
+            identity = {
+                "dataset_id": _as_str(obs_rows[0].get("dataset_id")).casefold(),
+                "participant_id": _as_str(obs_rows[0].get("subject_id")).casefold(),
+                "subject_id": _as_str(obs_rows[0].get("subject_id")).casefold(),
+                "session_id": "single",
+                "condition": _as_str(obs_rows[0].get("condition")).casefold(),
+            }
+            channel_control_by_band = _compute_ecg_channel_removal_control(
+                observation_id=observation_id,
+                identity=identity,
+                c1a_dir=c1a_dir,
+                c1b_dir=c1b_dir,
+                ecg_prone_channels=ecg_prone_channels,
+            )
 
         # Emit per-band control rows.
         for band in BAND_ORDER:
@@ -637,7 +837,13 @@ def run_confirmatory_cardiac_controls_upstream(
                 "alignment_status": align_status,
                 "baseline_zlpi": baseline_z,
                 "n_valid_samples_baseline": n_common,
+                "n_channels_original": "",
+                "n_channels_removed": "",
+                "n_channels_retained": "",
+                "removed_channels": "",
                 "minimum_lag_overlap": min_overlap,
+                "reason_code": "",
+                "not_computable_explanation": "",
                 "pipeline_stage": "C6",
                 "code_version": code_version,
             }
@@ -649,64 +855,55 @@ def run_confirmatory_cardiac_controls_upstream(
                     "controlled_zlpi": baseline_z,
                     "delta_vs_baseline": 0.0,
                     "n_valid_samples_control": n_common,
+                    "reason_code": "",
+                    "not_computable_explanation": "",
                     "computable": bool(base_eligible and math.isfinite(baseline_z)),
-                    "not_computable_reason": "" if (base_eligible and math.isfinite(baseline_z)) else "baseline_not_eligible",
+                    "not_computable_reason": "" if (base_eligible and math.isfinite(baseline_z)) else "baseline endpoint not eligible",
                 }
             )
             observation_rows.append(baseline_row)
 
-            # Event mask control (ECG or PPG).
-            ctrl_name = CONTROL_ECG_MASK if signal_type == "ecg" else CONTROL_PPG_MASK
+            # Event mask control, with modality policy deciding which family applies.
+            if allowed_modalities == {"ecg"}:
+                ctrl_name = CONTROL_ECG_MASK
+            elif allowed_modalities == {"ppg"}:
+                ctrl_name = CONTROL_PPG_MASK
+            else:
+                ctrl_name = CONTROL_ECG_MASK if signal_type == "ecg" else CONTROL_PPG_MASK
             ctrl_row = dict(common)
             ctrl_row["control_type"] = ctrl_name
-            declared_modality = _as_str(declared.get(dataset_id)).casefold()
-            ecg_required_but_missing = (
-                ("ecg" in declared_modality)
-                and ("ppg" not in declared_modality)
-                and signal_type != "ecg"
-            )
             if not base_eligible or not math.isfinite(baseline_z):
-                ctrl_row.update(
-                    {
-                        "controlled_zlpi": "",
-                        "delta_vs_baseline": "",
-                        "n_valid_samples_control": "",
-                        "computable": False,
-                        "not_computable_reason": "baseline_not_eligible",
-                    }
+                _mark_not_computable(
+                    ctrl_row,
+                    reason_code=INSUFFICIENT_COMMON_SUPPORT,
+                    explanation="baseline endpoint not eligible for paired comparison",
                 )
-            elif ecg_required_but_missing:
-                ctrl_row.update(
-                    {
-                        "controlled_zlpi": "",
-                        "delta_vs_baseline": "",
-                        "n_valid_samples_control": "",
-                        "computable": False,
-                        "not_computable_reason": (
-                            "ecg_required_but_no_usable_ecg_channel_selected; "
-                            "PPG events are not valid substitutes for ECG R-peaks"
-                        ),
-                    }
+            elif signal_type not in {"ecg", "ppg"}:
+                _mark_not_computable(
+                    ctrl_row,
+                    reason_code=MISSING_REQUIRED_MODALITY,
+                    explanation="no ECG/PPG detector row selected for this observation",
+                )
+            elif signal_type not in allowed_modalities:
+                _mark_not_computable(
+                    ctrl_row,
+                    reason_code=UNSUPPORTED_CONTROL_FOR_MODALITY,
+                    explanation=(
+                        f"declared dataset modality {declared_modality!r} forbids {signal_type.upper()} "
+                        "fallback for event-mask control"
+                    ),
                 )
             elif align_status == "fail":
-                ctrl_row.update(
-                    {
-                        "controlled_zlpi": "",
-                        "delta_vs_baseline": "",
-                        "n_valid_samples_control": "",
-                        "computable": False,
-                        "not_computable_reason": f"alignment_fail:{align_reason}",
-                    }
+                _mark_not_computable(
+                    ctrl_row,
+                    reason_code=MISSING_EVENT_SERIES,
+                    explanation=f"event alignment failed: {align_reason}",
                 )
             elif ctrl_name not in endpoints_by_control:
-                ctrl_row.update(
-                    {
-                        "controlled_zlpi": "",
-                        "delta_vs_baseline": "",
-                        "n_valid_samples_control": "",
-                        "computable": False,
-                        "not_computable_reason": "mask_control_not_computed",
-                    }
+                _mark_not_computable(
+                    ctrl_row,
+                    reason_code=ARTIFACT_CONTROL_NOT_AVAILABLE,
+                    explanation="event-mask control could not be computed from available aligned/event series",
                 )
             else:
                 endpoint_map, _qc_map, _n_masked = endpoints_by_control[ctrl_name]
@@ -714,11 +911,9 @@ def run_confirmatory_cardiac_controls_upstream(
                 controlled = _as_float((endpoint_row or {}).get("endpoint_index"))
                 n_valid_control = _as_float((endpoint_row or {}).get("n_common_support"))
                 eligible = _as_bool((endpoint_row or {}).get("eligible"))
-                reason = _as_str((endpoint_row or {}).get("exclusion_reason"), "insufficient_overlap_after_masking")
-                # Sub-second event masks on the locked 1 Hz ZLPI grid punch periodic holes.
-                # Strict common-support anchors (need 121 consecutive valid seconds for ±60 s)
-                # are then structurally zero even when lag-wise pairwise overlaps remain large.
-                # Do not treat that as a near-miss "insufficient support" threshold failure.
+                reason_code = ""
+                reason_text = ""
+                # Keep the structural PPG-mask NC explicit on 1 Hz locked support.
                 if (not eligible) and band in mask_valid_by_band:
                     hr = np.asarray([_as_float(r.get("hr_z")) for r in obs_rows], dtype=float)
                     eeg_valid = mask_valid_by_band[band]
@@ -744,77 +939,161 @@ def run_confirmatory_cardiac_controls_upstream(
                         and lag_counts
                         and min(lag_counts.values()) >= int(min_overlap)
                     ):
-                        reason = (
-                            "1hz_envelope_cannot_support_event_centered_masking_"
-                            "for_strict_common_support_zlpi"
+                        reason_code = INSUFFICIENT_COMMON_SUPPORT
+                        reason_text = (
+                            "1Hz grid + sub-second event-mask windows destroy strict common-support "
+                            "anchors required by locked D240 ZLPI"
                         )
-                    elif (
-                        reason == "insufficient_common_support"
-                        and lag_counts
-                        and min(lag_counts.values()) >= int(min_overlap)
-                    ):
-                        # Legacy alias retained for non-1 Hz grids with the same pattern.
-                        reason = "strict_global_common_support_after_masking_at_1hz"
-                ctrl_row.update(
-                    {
-                        "controlled_zlpi": controlled,
-                        "delta_vs_baseline": (controlled - baseline_z) if math.isfinite(controlled) else float("nan"),
-                        "n_valid_samples_control": n_valid_control,
-                        "computable": bool(eligible and math.isfinite(controlled)),
-                        "not_computable_reason": "" if (eligible and math.isfinite(controlled)) else reason,
-                    }
-                )
+                if not reason_code and (not eligible or not math.isfinite(controlled)):
+                    reason_code = INSUFFICIENT_COMMON_SUPPORT
+                    reason_text = _as_str((endpoint_row or {}).get("exclusion_reason"), "insufficient overlap after masking")
+                if eligible and math.isfinite(controlled):
+                    ctrl_row.update(
+                        {
+                            "controlled_zlpi": controlled,
+                            "delta_vs_baseline": controlled - baseline_z,
+                            "n_valid_samples_control": n_valid_control,
+                            "computable": True,
+                            "reason_code": "",
+                            "not_computable_reason": "",
+                            "not_computable_explanation": "",
+                        }
+                    )
+                else:
+                    _mark_not_computable(
+                        ctrl_row,
+                        reason_code=reason_code or INSUFFICIENT_COMMON_SUPPORT,
+                        explanation=reason_text or "insufficient support after event masking",
+                    )
             observation_rows.append(ctrl_row)
 
-            # ECG template subtraction placeholder.
+            # Event-locked template subtraction (PPG or ECG per modality policy).
+            if allowed_modalities == {"ecg"}:
+                template_control = CONTROL_ECG_TEMPLATE
+            elif allowed_modalities == {"ppg"}:
+                template_control = CONTROL_PPG_TEMPLATE
+            else:
+                template_control = CONTROL_ECG_TEMPLATE if signal_type == "ecg" else CONTROL_PPG_TEMPLATE
             tmpl_row = dict(common)
-            if signal_type == "ppg" and CONTROL_PPG_TEMPLATE in endpoints_by_control:
-                endpoint_map, _qc_map, _ = endpoints_by_control[CONTROL_PPG_TEMPLATE]
+            tmpl_row["control_type"] = template_control
+            if not base_eligible or not math.isfinite(baseline_z):
+                _mark_not_computable(
+                    tmpl_row,
+                    reason_code=INSUFFICIENT_COMMON_SUPPORT,
+                    explanation="baseline endpoint not eligible for paired comparison",
+                )
+            elif signal_type not in {"ecg", "ppg"}:
+                _mark_not_computable(
+                    tmpl_row,
+                    reason_code=MISSING_REQUIRED_MODALITY,
+                    explanation="no ECG/PPG detector row selected for this observation",
+                )
+            elif signal_type not in allowed_modalities:
+                _mark_not_computable(
+                    tmpl_row,
+                    reason_code=UNSUPPORTED_CONTROL_FOR_MODALITY,
+                    explanation=(
+                        f"declared dataset modality {declared_modality!r} forbids {signal_type.upper()} "
+                        "fallback for template subtraction control"
+                    ),
+                )
+            elif template_control not in endpoints_by_control:
+                _mark_not_computable(
+                    tmpl_row,
+                    reason_code=ARTIFACT_CONTROL_NOT_AVAILABLE,
+                    explanation="event-locked template subtraction unavailable from current aligned/event inputs",
+                )
+            else:
+                endpoint_map, _qc_map, _ = endpoints_by_control[template_control]
                 endpoint_row = endpoint_map.get(band)
                 controlled = _as_float((endpoint_row or {}).get("endpoint_index"))
                 n_valid_control = _as_float((endpoint_row or {}).get("n_common_support"))
                 eligible = _as_bool((endpoint_row or {}).get("eligible"))
-                tmpl_row.update(
-                    {
-                        "control_type": CONTROL_PPG_TEMPLATE,
-                        "n_events_accepted": float(template_event_stats[0]) if template_event_stats else float(n_accepted),
-                        "n_events_rejected": float(template_event_stats[1]) if template_event_stats else float(n_rejected),
-                        "controlled_zlpi": controlled,
-                        "delta_vs_baseline": (controlled - baseline_z) if math.isfinite(controlled) else float("nan"),
-                        "n_valid_samples_control": n_valid_control,
-                        "computable": bool(eligible and math.isfinite(controlled)),
-                        "not_computable_reason": "" if (eligible and math.isfinite(controlled)) else _as_str((endpoint_row or {}).get("exclusion_reason"), "insufficient_template_support"),
-                    }
-                )
-            else:
-                tmpl_row.update(
-                    {
-                        "control_type": CONTROL_ECG_TEMPLATE,
-                        "controlled_zlpi": "",
-                        "delta_vs_baseline": "",
-                        "n_valid_samples_control": "",
-                        "computable": False,
-                        "not_computable_reason": (
-                            "ppg_only_no_ecg_template_control"
-                            if signal_type == "ppg"
-                            else "ecg_template_requires_multichannel_event_locked_eeg_not_available_in_aligned_tables"
-                        ),
-                    }
-                )
+                if eligible and math.isfinite(controlled):
+                    tmpl_row.update(
+                        {
+                            "n_events_accepted": float(template_event_stats[0]) if template_event_stats else float(n_accepted),
+                            "n_events_rejected": float(template_event_stats[1]) if template_event_stats else float(n_rejected),
+                            "controlled_zlpi": controlled,
+                            "delta_vs_baseline": controlled - baseline_z,
+                            "n_valid_samples_control": n_valid_control,
+                            "computable": True,
+                            "reason_code": "",
+                            "not_computable_reason": "",
+                            "not_computable_explanation": "",
+                        }
+                    )
+                else:
+                    _mark_not_computable(
+                        tmpl_row,
+                        reason_code=INSUFFICIENT_COMMON_SUPPORT,
+                        explanation=_as_str((endpoint_row or {}).get("exclusion_reason"), "insufficient template support"),
+                    )
             observation_rows.append(tmpl_row)
 
-            # ECG-prone channel removal placeholder.
+            # ECG-prone channel removal control from channel-level D240 ZLPI re-aggregation.
             ch_row = dict(common)
-            ch_row.update(
-                {
-                    "control_type": CONTROL_ECG_CHANNELS,
-                    "controlled_zlpi": "",
-                    "delta_vs_baseline": "",
-                    "n_valid_samples_control": "",
-                    "computable": False,
-                    "not_computable_reason": "channel_level_reaggregation_not_computed_in_current_pipeline",
-                }
-            )
+            ch_row["control_type"] = CONTROL_ECG_CHANNELS
+            if not base_eligible or not math.isfinite(baseline_z):
+                _mark_not_computable(
+                    ch_row,
+                    reason_code=INSUFFICIENT_COMMON_SUPPORT,
+                    explanation="baseline endpoint not eligible for paired comparison",
+                )
+            elif "ecg" not in allowed_modalities:
+                _mark_not_computable(
+                    ch_row,
+                    reason_code=UNSUPPORTED_CONTROL_FOR_MODALITY,
+                    explanation=f"declared dataset modality {declared_modality!r} does not define ECG-prone channel control",
+                )
+            elif signal_type != "ecg":
+                _mark_not_computable(
+                    ch_row,
+                    reason_code=MISSING_REQUIRED_MODALITY,
+                    explanation="ECG-prone channel control requires ECG-selected observation events",
+                )
+            elif c1a_dir is None:
+                _mark_not_computable(
+                    ch_row,
+                    reason_code=ARTIFACT_CONTROL_NOT_AVAILABLE,
+                    explanation="C1a channel-level features directory not provided",
+                )
+            else:
+                channel_payload = channel_control_by_band.get(band, {})
+                if _as_bool(channel_payload.get("computable")):
+                    controlled = _as_float(channel_payload.get("controlled_zlpi"))
+                    ch_row.update(
+                        {
+                            "controlled_zlpi": controlled,
+                            "delta_vs_baseline": controlled - baseline_z,
+                            "n_valid_samples_control": n_common,
+                            "n_channels_original": int(channel_payload.get("n_channels_original", 0)),
+                            "n_channels_removed": int(channel_payload.get("n_channels_removed", 0)),
+                            "n_channels_retained": int(channel_payload.get("n_channels_retained", 0)),
+                            "removed_channels": _as_str(channel_payload.get("removed_channels")),
+                            "computable": True,
+                            "reason_code": "",
+                            "not_computable_reason": "",
+                            "not_computable_explanation": "",
+                        }
+                    )
+                else:
+                    ch_row.update(
+                        {
+                            "n_channels_original": int(channel_payload.get("n_channels_original", 0) or 0),
+                            "n_channels_removed": int(channel_payload.get("n_channels_removed", 0) or 0),
+                            "n_channels_retained": int(channel_payload.get("n_channels_retained", 0) or 0),
+                            "removed_channels": _as_str(channel_payload.get("removed_channels")),
+                        }
+                    )
+                    _mark_not_computable(
+                        ch_row,
+                        reason_code=_as_str(channel_payload.get("reason_code"), ARTIFACT_CONTROL_NOT_AVAILABLE),
+                        explanation=_as_str(
+                            channel_payload.get("reason"),
+                            "channel-level re-aggregation unavailable for ECG-prone channel exclusion control",
+                        ),
+                    )
             observation_rows.append(ch_row)
 
             # Diagnostic row for this observation-band masked control path.
@@ -905,11 +1184,18 @@ def run_confirmatory_cardiac_controls_upstream(
             "ecg_r_peak_mask": {"pre": MASK_WINDOWS_S["ecg"][0], "post": MASK_WINDOWS_S["ecg"][1]},
             "ppg_systolic_peak_mask": {"pre": MASK_WINDOWS_S["ppg"][0], "post": MASK_WINDOWS_S["ppg"][1]},
         },
+        "ecg_prone_channel_set_id": ecg_prone_set_id,
+        "ecg_prone_channels": list(ecg_prone_channels),
+        "minimum_retained_common_montage_channels": MIN_RETAINED_COMMON_MONTAGE_CHANNELS,
         "alignment_status_levels": ["pass", "warning", "fail"],
         "event_semantics": {
             "ECG": "r_peak",
             "PPG": "ppg_systolic_peak",
         },
+        "modality_policy_note": (
+            "Dataset-declared cardiac modality gates control eligibility. ECG-declared datasets "
+            "do not silently substitute PPG-derived events for ECG controls."
+        ),
         "ppg_interpretation_note": (
             "PPG pulse-event controls assess pulse-synchronous contamination and do not "
             "directly test ECG electrical-field leakage."

@@ -76,6 +76,10 @@ from .protocol_audit import (
 )
 from .qc_report import QcReportParams, generate_qc_report, run_qc_report_from_config
 from .report import generate_confirmatory_report, run_confirmatory_reporting
+from .manuscript_meta import (
+    build_manuscript_primary_merged_figure3_tree,
+    build_manuscript_primary_merged_meta_tree,
+)
 from .run import (
     STAGE_ORDER,
     VALID_STAGES,
@@ -101,6 +105,8 @@ __all__ = [
     "extract_multitaper_from_raw",
     "generate_confirmatory_figures",
     "generate_confirmatory_report",
+    "build_manuscript_primary_merged_figure3_tree",
+    "build_manuscript_primary_merged_meta_tree",
     "generate_qc_report",
     "QcReportParams",
     "harmonize_observation",

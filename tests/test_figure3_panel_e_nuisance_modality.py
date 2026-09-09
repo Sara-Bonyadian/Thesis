@@ -25,6 +25,10 @@ from ppg_eeg.confirmatory.panel_e_nuisance_modality import (
     render_panel_e_figure,
     verify_panel_e_integrity,
 )
+from ppg_eeg.confirmatory.panel_e_nuisance_upstream import (
+    load_panel_e_result_from_upstream,
+    run_confirmatory_panel_e_upstream,
+)
 
 
 # Locked corrected-model exports (HIIT C7) — regeneration must not alter these.
@@ -198,6 +202,12 @@ class TestFigure3PanelEDeltaNuisance(unittest.TestCase):
                 row.get("zero_nuisance_interpretation"),
                 "no low-demand–high-demand nuisance change",
             )
+            if row["specification_id"] in ESTIMABLE_SPEC_ORDER:
+                self.assertEqual(
+                    int(row.get("n_specification_usable")),
+                    int(row.get("n_observations")),
+                )
+                self.assertFalse(bool(row.get("composition_differs_from_baseline")))
 
         base = next(r for r in result.common_sample_rows if r["specification_id"] == "baseline")
         y = [float(r["delta_endpoint_index"]) for r in result.observation_rows]
@@ -352,33 +362,86 @@ class TestFigure3PanelEDeltaNuisance(unittest.TestCase):
                 self.assertTrue(Path(paths[ext]).is_file())
                 self.assertGreater(Path(paths[ext]).stat().st_size, 1000)
 
-            # SVG embeds unavailable reasons (not clipped away as empty)
+    def test_c6_upstream_roundtrip_preserves_estimates(self) -> None:
+        result = self._toy_result()
+        with TemporaryDirectory() as tmp:
+            c6 = Path(tmp) / "C6"
+            from ppg_eeg.confirmatory.panel_e_nuisance_modality import (
+                write_panel_e_upstream_exports,
+            )
+
+            write_panel_e_upstream_exports(result, c6)
+            loaded = load_panel_e_result_from_upstream(c6)
+        before = {
+            r["specification_id"]: (
+                r["estimate"],
+                r["ci_lower"],
+                r["ci_upper"],
+                r.get("change_from_baseline"),
+            )
+            for r in result.specification_rows
+        }
+        after = {
+            r["specification_id"]: (
+                float(r["estimate"]),
+                float(r["ci_lower"]),
+                float(r["ci_upper"]),
+                float(r.get("change_from_baseline") or 0),
+            )
+            for r in loaded.specification_rows
+        }
+        self.assertEqual(before, after)
+
+    def test_c7_render_does_not_refit(self) -> None:
+        result = self._toy_result()
+        with TemporaryDirectory() as tmp:
+            c6 = Path(tmp) / "C6"
+            out = Path(tmp) / "figures"
+            from ppg_eeg.confirmatory.panel_e_nuisance_modality import (
+                write_panel_e_upstream_exports,
+            )
+
+            write_panel_e_upstream_exports(result, c6)
+            inputs = {
+                "panel_e_specifications": c6 / f"{PANEL_E_STEM}_specifications.csv",
+                "panel_e_metadata": c6 / f"{PANEL_E_STEM}_metadata.json",
+                "panel_e_common_sample": c6 / f"{PANEL_E_STEM}_common_sample.csv",
+                "panel_e_availability": c6 / f"{PANEL_E_STEM}_availability.csv",
+            }
+            with mock.patch(
+                "ppg_eeg.confirmatory.panel_e_nuisance_modality.compute_panel_e_nuisance_modality",
+                side_effect=AssertionError("C7 must not refit Panel E models"),
+            ):
+                from ppg_eeg.confirmatory.figures import render_figure3_panel_e
+
+                paths = render_figure3_panel_e(inputs, out, include_internal_qc=False)
+
             svg_text = Path(paths["svg"]).read_text(encoding="utf-8")
             self.assertIn("Respiration", svg_text)
             self.assertIn("Cardiac modality is constant within this dataset (PPG)", svg_text)
 
 
 @unittest.skipUnless(
-    Path(
-        "derivatives/confirmatory_temporal_coupling/sensitivity/hiit/C7/publish/"
-        "paired_contrasts.csv"
-    ).is_file(),
-    "HIIT C7 confirmatory tables not present",
+    Path("derivatives/confirmatory_temporal_coupling/sensitivity/hiit/C5/paired_contrasts.csv").is_file(),
+    "HIIT C5 confirmatory tables not present",
 )
 class TestFigure3PanelELockedHIITValues(unittest.TestCase):
     def test_locked_estimates_unchanged(self) -> None:
-        from ppg_eeg.confirmatory.figures import resolve_reporting_inputs, read_csv_rows
+        from ppg_eeg.confirmatory.figures import read_csv_rows, resolve_reporting_inputs
 
-        root = Path("derivatives/confirmatory_temporal_coupling/sensitivity/hiit/C7")
-        inputs = resolve_reporting_inputs(root)
-        result = compute_panel_e_nuisance_modality(
-            paired_rows=read_csv_rows(inputs.get("paired_contrasts")),
-            aligned_rows=read_csv_rows(inputs.get("aligned_d240")),
-            data_audit_rows=read_csv_rows(inputs.get("data_audit")),
-            peak_qc_rows=read_csv_rows(inputs.get("cardiac_peak_qc")),
-            protocol_rows=read_csv_rows(inputs.get("protocol_audit")),
-            endpoint_rows=read_csv_rows(inputs.get("endpoints_d240")),
+        root = Path("derivatives/confirmatory_temporal_coupling/sensitivity/hiit")
+        c5 = root / "C5"
+        if not (c5 / "paired_contrasts.csv").is_file():
+            self.skipTest("HIIT C5 paired contrasts not present")
+        upstream = run_confirmatory_panel_e_upstream(
+            c0_dir=root / "C0",
+            c1b_dir=root / "C1b",
+            c1c_dir=root / "C1c",
+            c3_dir=root / "C3",
+            c5_dir=c5,
+            output_dir=root / "C6",
         )
+        result = upstream.result
         by_id = {r["specification_id"]: r for r in result.specification_rows}
         for sid, locked in LOCKED_HIIT_ESTIMATES.items():
             row = by_id[sid]
@@ -395,6 +458,13 @@ class TestFigure3PanelELockedHIITValues(unittest.TestCase):
         )
         self.assertEqual(int(result.metadata["n_contrasts_common_sample"]), 77)
         self.assertEqual(int(result.metadata["n_participants_common_sample"]), 20)
+        self.assertEqual(int(result.metadata["n_baseline_eligible"]), 77)
+
+        loaded = load_panel_e_result_from_upstream(root / "C6")
+        self.assertEqual(
+            len(loaded.specification_rows),
+            len(result.specification_rows),
+        )
 
         # Regenerating visualization must not alter locked numeric exports.
         with TemporaryDirectory() as tmp:
@@ -402,10 +472,13 @@ class TestFigure3PanelELockedHIITValues(unittest.TestCase):
                 (r["specification_id"], r["estimate"], r["ci_lower"], r["ci_upper"])
                 for r in result.specification_rows
             ]
-            render_panel_e_figure(result, Path(tmp), include_internal_qc=False)
+            inputs = resolve_reporting_inputs(root / "C7")
+            from ppg_eeg.confirmatory.figures import render_figure3_panel_e
+
+            render_figure3_panel_e(inputs, Path(tmp), include_internal_qc=False)
             after = [
                 (r["specification_id"], r["estimate"], r["ci_lower"], r["ci_upper"])
-                for r in result.specification_rows
+                for r in loaded.specification_rows
             ]
             self.assertEqual(before, after)
 

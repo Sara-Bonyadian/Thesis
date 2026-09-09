@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from ppg_eeg.confirmatory.group_tables import (
     PAIRING_QC_FILENAME,
     PAIRED_CONTRASTS_FILENAME,
+    SUBJECT_LEVEL_FIELDS,
     SUBJECT_LEVEL_FILENAME,
     build_group_tables,
     build_paired_contrasts,
@@ -50,7 +51,10 @@ def _endpoint_row(
         "eligible": eligible,
         "exclusion_reason": "" if eligible else "test_reject",
         "r0": 0.2,
-        "z0": 0.203,
+        "z0": math.atanh(0.2),
+        "negative_flank_mean_z": 0.01,
+        "positive_flank_mean_z": 0.02,
+        "combined_flank_mean_z": 0.015,
         "endpoint_index": endpoint_index,
         "local_prominence": local_prominence,
         "n_common_support": 120,
@@ -179,6 +183,35 @@ class TestNormalizeKeys(unittest.TestCase):
         self.assertEqual(keys["session_id"], "single")
         self.assertEqual(keys["run_id"], "1")
 
+    def test_hiit_session_qualified_subject_stays_biological_participant(self) -> None:
+        keys = normalize_keys(
+            {
+                "dataset_id": "hiit",
+                "subject_id": "01_ph",
+                "observation_id": "hiit-01-ph-post-rest",
+                "condition": "ph_post_rest",
+                "participant_id": "",
+                "session_id": "",
+            }
+        )
+        self.assertEqual(keys["participant_id"], "01")
+        self.assertEqual(keys["session_id"], "ph")
+        self.assertEqual(keys["condition"], "ph_post_rest")
+
+    def test_mindfulness_keeps_multitoken_subject_as_participant(self) -> None:
+        keys = normalize_keys(
+            {
+                "dataset_id": "mindfulness",
+                "subject_id": "mbd-01_part1_step1",
+                "observation_id": "mindfulness-mbd-01-part1-task-step1",
+                "condition": "step1",
+                "participant_id": "",
+                "session_id": "",
+            }
+        )
+        self.assertEqual(keys["participant_id"], "mbd-01_part1_step1")
+        self.assertEqual(keys["session_id"], "step1")
+
 
 class TestExactPairing(unittest.TestCase):
     def test_exact_within_subject_pairing_and_deltas(self) -> None:
@@ -301,6 +334,60 @@ class TestDuplicateRuns(unittest.TestCase):
         paired = [q for q in qc if q["pairing_status"] == "paired" and q["contrast_id"] == "passive__gonogo"]
         self.assertEqual(len(paired), 1)
         self.assertTrue(paired[0]["duplicate_runs"])
+
+    def test_multi_run_r0_is_tanh_of_mean_z0_not_mean_r(self) -> None:
+        z_a = 0.10
+        z_b = 0.40
+        endpoints = [
+            _endpoint_row(
+                dataset_id="ds003690",
+                observation_id="ds003690-ab4-ses-single-task-passive-run-1",
+                subject_id="ab4_ses-single-run-1",
+                condition="passive",
+                endpoint_index=0.40,
+                session_id="single",
+            ),
+            _endpoint_row(
+                dataset_id="ds003690",
+                observation_id="ds003690-ab4-ses-single-task-passive-run-2",
+                subject_id="ab4_ses-single-run-2",
+                condition="passive",
+                endpoint_index=0.60,
+                session_id="single",
+            ),
+        ]
+        endpoints[0]["z0"] = z_a
+        endpoints[0]["r0"] = math.tanh(z_a)
+        endpoints[1]["z0"] = z_b
+        endpoints[1]["r0"] = math.tanh(z_b)
+        endpoints[0]["negative_flank_mean_z"] = -0.05
+        endpoints[1]["negative_flank_mean_z"] = 0.07
+        peaks = [
+            _peak_row(
+                dataset_id="ds003690",
+                observation_id=r["observation_id"],
+                subject_id=r["subject_id"],
+                condition=r["condition"],
+                peak_height_A=0.5,
+                peak_center_mu_s=0.0,
+                session_id="single",
+            )
+            for r in endpoints
+        ]
+        row = build_subject_level_metrics(endpoints, peaks)[0]
+        mean_z = 0.5 * (z_a + z_b)
+        self.assertAlmostEqual(float(row["z0"]), mean_z, places=12)
+        self.assertAlmostEqual(float(row["r0"]), math.tanh(mean_z), places=12)
+        self.assertNotAlmostEqual(
+            float(row["r0"]),
+            0.5 * (math.tanh(z_a) + math.tanh(z_b)),
+            places=8,
+        )
+        self.assertAlmostEqual(
+            float(row["negative_flank_mean_z"]), 0.5 * (-0.05 + 0.07), places=12
+        )
+        self.assertEqual(row["participant_id"], "ab4")
+        self.assertEqual(row["session_id"], "single")
 
 
 class TestSessionMismatches(unittest.TestCase):
@@ -547,7 +634,7 @@ class TestMuAndEndpointSeparation(unittest.TestCase):
         self.assertTrue(math.isnan(float(row["effort_fwhm_s"])))
         # Other contrasts still computed.
         self.assertAlmostEqual(float(row["delta_endpoint_index"]), -0.30, places=12)
-        self.assertAlmostEqual(float(row["delta_peak_height_A"]), -0.20, places=12)
+        self.assertTrue(math.isnan(float(row["delta_peak_height_A"])))
 
     def test_task_only_identifiable_keeps_task_state_fields(self) -> None:
         endpoints, peaks = _ds003838_pair(
@@ -600,8 +687,7 @@ class TestMuAndEndpointSeparation(unittest.TestCase):
         self.assertTrue(math.isnan(float(subject["peak_center_mu_s"])))
         self.assertTrue(math.isnan(float(subject["sigma_s"])))
         self.assertTrue(math.isnan(float(subject["fwhm_s"])))
-        # Optimizer diagnostics may still be present.
-        self.assertTrue(math.isfinite(float(subject["peak_height_A"])))
+        self.assertTrue(math.isnan(float(subject["peak_height_A"])))
 
     def test_contrast_exclusion_when_endpoint_ineligible(self) -> None:
         endpoints, peaks = _ds003838_pair(
@@ -686,6 +772,26 @@ class TestMuAndEndpointSeparation(unittest.TestCase):
         ]
         result = build_group_tables(endpoints, peaks)
         self.assertEqual(result.paired_contrast_rows, ())
+        d120 = [
+            r
+            for r in result.subject_level_rows
+            if int(r["duration_s"]) == 120
+        ][0]
+        self.assertTrue(math.isnan(float(d120["peak_height_A"])))
+        self.assertTrue(math.isnan(float(d120["peak_center_mu_s"])))
+        self.assertTrue(math.isnan(float(d120["fwhm_s"])))
+        self.assertFalse(d120["has_identifiable_peak"])
+        self.assertEqual(
+            d120["peak_exclusion_reason"], "option_c_peak_requires_d180_d240"
+        )
+        d240 = [
+            r
+            for r in result.subject_level_rows
+            if int(r["duration_s"]) == 240
+        ][0]
+        self.assertAlmostEqual(float(d240["peak_height_A"]), 0.3, places=12)
+        self.assertIn("negative_flank_mean_z", d240)
+        self.assertAlmostEqual(float(d240["combined_flank_mean_z"]), 0.015, places=12)
 
 
 class TestWriteOutputs(unittest.TestCase):
@@ -706,6 +812,19 @@ class TestWriteOutputs(unittest.TestCase):
                 paths["paired_contrasts"].name, PAIRED_CONTRASTS_FILENAME
             )
             self.assertEqual(paths["pairing_qc"].name, PAIRING_QC_FILENAME)
+            header = paths["subject_level_metrics"].read_text(encoding="utf-8").splitlines()[0]
+            for field in (
+                "negative_flank_mean_z",
+                "positive_flank_mean_z",
+                "combined_flank_mean_z",
+                "participant_id",
+                "session_id",
+            ):
+                self.assertIn(field, header.split(","))
+            self.assertTrue(
+                SUBJECT_LEVEL_FIELDS.index("negative_flank_mean_z")
+                > SUBJECT_LEVEL_FIELDS.index("z0")
+            )
 
 
 if __name__ == "__main__":

@@ -25,8 +25,10 @@ from .duration_contracts import (
 )
 from .endpoints import fisher_z
 from .dataset_roles import (
+    ROLE_SENSITIVITY,
     dataset_contrast_ids,
     has_prespecified_contrast,
+    is_runtime_blocked,
     is_sensitivity_dataset,
     resolve_dataset_role,
     session_unit_key,
@@ -76,6 +78,44 @@ def _fig():
     from . import figures as f
 
     return f
+
+
+def _band_short_label(band: str) -> str:
+    key = str(band).strip().casefold()
+    if key == "low_gamma" or key == "gamma":
+        return "Low-γ"
+    return _fig()._band_display(key)
+
+
+def _blocked_sensitivity_datasets(
+    dataset_ids: set[str],
+    protocol_rows: Sequence[Mapping[str, object]],
+) -> set[str]:
+    blocked: set[str] = set()
+    for dataset_id in dataset_ids:
+        ds = str(dataset_id).strip().casefold()
+        if not ds:
+            continue
+        role = resolve_dataset_role(ds, protocol_rows=protocol_rows)
+        if role == ROLE_SENSITIVITY and is_runtime_blocked(ds):
+            blocked.add(ds)
+    return blocked
+
+
+def _drop_blocked_sensitivity_rows(
+    rows: Sequence[Mapping[str, object]],
+    blocked_dataset_ids: set[str],
+) -> list[dict[str, object]]:
+    if not blocked_dataset_ids:
+        return [dict(row) for row in rows]
+    f = _fig()
+    out: list[dict[str, object]] = []
+    for row in rows:
+        ds = f._as_str(row.get("dataset_id")).casefold()
+        if ds in blocked_dataset_ids:
+            continue
+        out.append(dict(row))
+    return out
 
 
 def _split_observation_ids(raw: object) -> list[str]:
@@ -326,6 +366,7 @@ PANEL_E_STATE_LONG_FIELDS = (
     "period",
     "contrast_id",
     "state",
+    "state_demand_label",
     "band",
     "endpoint",
     "duration_s",
@@ -348,6 +389,7 @@ PANEL_E_SUMMARY_FIELDS = (
     "dataset_role",
     "band",
     "state",
+    "state_demand_label",
     "parameter",
     "estimate",
     "ci_lower_95",
@@ -355,8 +397,14 @@ PANEL_E_SUMMARY_FIELDS = (
     "candidate_n",
     "identifiable_n",
     "identifiable_percent",
+    "identifiable_proportion",
     "unique_session_n",
     "unique_participant_n",
+    "identifiability_threshold",
+    "estimate_suppressed",
+    "status",
+    "reason_code",
+    "reason",
     "bootstrap_draws",
     "bootstrap_seed",
     "bootstrap_cluster_field",
@@ -368,6 +416,17 @@ PANEL_E_SUMMARY_FIELDS = (
 PANEL_E_BOOTSTRAP_ESTIMAND = "mean_of_participant_means"
 PANEL_E_BOOTSTRAP_CLUSTER_FIELD = "participant_id"
 PANEL_E_CI_METHOD = "percentile_cluster_bootstrap"
+PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD = 0.30
+PANEL_E_LOW_IDENTIFIABILITY_REASON_CODE = "low_identifiability_suppressed"
+
+
+def _panel_e_state_to_demand_label(state: str) -> str:
+    key = str(state or "").casefold()
+    if key in {"rest", "low_demand"}:
+        return "low_demand"
+    if key in {"task", "cognitive_effort"}:
+        return "cognitive_effort"
+    return key
 
 
 def _panel_e_period_from_contrast(contrast_id: str) -> str:
@@ -488,6 +547,7 @@ def build_panel_e_peak_export(
                     "period": period,
                     "contrast_id": contrast_id,
                     "state": state,
+                    "state_demand_label": _panel_e_state_to_demand_label(state),
                     "band": band,
                     "endpoint": endpoint,
                     "duration_s": duration_s,
@@ -617,12 +677,39 @@ def build_panel_e_state_summaries(
                 n_draws=n_bootstrap,
                 seed=seed + abs(hash((dataset_id, band, state, parameter))) % 10_000,
             )
+            identifiable_proportion = (
+                float(identifiable_n) / float(candidate_n) if candidate_n else float("nan")
+            )
+            suppressed = bool(
+                candidate_n > 0
+                and math.isfinite(identifiable_proportion)
+                and identifiable_proportion < PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD
+            )
+            status = "computed"
+            reason_code = ""
+            reason = ""
+            if suppressed:
+                estimate = float("nan")
+                ci_lo = float("nan")
+                ci_hi = float("nan")
+                status = "suppressed"
+                reason_code = PANEL_E_LOW_IDENTIFIABILITY_REASON_CODE
+                reason = (
+                    "Summary suppressed because identifiable proportion is below "
+                    f"{PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}."
+                )
+                ci_note = (
+                    f"{ci_note};{reason_code}".strip(";")
+                    if ci_note
+                    else reason_code
+                )
             summaries.append(
                 {
                     "dataset_id": dataset_id,
                     "dataset_role": dataset_role,
                     "band": band,
                     "state": state,
+                    "state_demand_label": _panel_e_state_to_demand_label(state),
                     "parameter": parameter,
                     "estimate": estimate,
                     "ci_lower_95": ci_lo,
@@ -632,8 +719,14 @@ def build_panel_e_state_summaries(
                     "identifiable_percent": (
                         100.0 * identifiable_n / candidate_n if candidate_n else float("nan")
                     ),
+                    "identifiable_proportion": identifiable_proportion,
                     "unique_session_n": len(id_sessions),
                     "unique_participant_n": len(by_participant),
+                    "identifiability_threshold": PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD,
+                    "estimate_suppressed": suppressed,
+                    "status": status,
+                    "reason_code": reason_code,
+                    "reason": reason,
                     "bootstrap_draws": n_bootstrap,
                     "bootstrap_seed": seed,
                     "bootstrap_cluster_field": PANEL_E_BOOTSTRAP_CLUSTER_FIELD,
@@ -1279,9 +1372,14 @@ def _render_panel_d_estimation_plot(
         else "Band × state interaction"
     )
     legend_handles = [
-        plt.Line2D([0], [0], color=f.PALETTE["blue"], marker="o", linestyle="", label="Low demand"),
+        plt.Line2D([0], [0], color=f.PALETTE["blue"], marker="o", linestyle="", label="Low-demand"),
         plt.Line2D(
-            [0], [0], color=f.PALETTE["vermillion"], marker="o", linestyle="", label="High demand"
+            [0],
+            [0],
+            color=f.PALETTE["vermillion"],
+            marker="o",
+            linestyle="",
+            label="Cognitive-effort",
         ),
     ]
 
@@ -1348,8 +1446,8 @@ def _render_panel_d_estimation_plot(
     )
     ax_main.set_xticks(x_positions)
     ax_main.set_xticklabels(
-        [b.capitalize() if b != "gamma" else "Gamma" for b in PANEL_D_DISPLAY_BANDS],
-        fontsize=f.FS_TICK - 1,
+        ["Theta", "Alpha†", "Beta", "Low-γ"],
+        fontsize=f.FS_TICK,
     )
     # Omit bottom xlabel when the contrast strip is present — it collides with
     # the contrast subtitle; band names on the ticks are already sufficient.
@@ -1373,12 +1471,10 @@ def _render_panel_d_estimation_plot(
         for i in range(n_contrast)
     ]
     ci_highs: list[float] = []
-    p_value_labels: list[tuple[float, float, float]] = []
     for ypos, row in zip(y_positions, alpha_contrasts, strict=True):
         est = f._as_float(row.get("estimate"))
         lo = f._as_float(row.get("ci_low"))
         hi = f._as_float(row.get("ci_high"))
-        p_value = f._as_float(row.get("p_value"))
         xerr = None
         if math.isfinite(lo) and math.isfinite(hi):
             xerr = [[est - lo], [hi - est]]
@@ -1394,27 +1490,27 @@ def _render_panel_d_estimation_plot(
             elinewidth=f.LINE_WIDTH,
             zorder=3,
         )
-        if math.isfinite(p_value):
-            p_value_labels.append((ypos, hi if math.isfinite(hi) else est, p_value))
     f._ref_vline(ax_contrast, 0.0)
     ax_contrast.set_yticks(y_positions)
     ax_contrast.set_yticklabels(
         [
             f._as_str(r.get("contrast_name"))
-            .replace("alpha_minus_", "α − ")
+            .replace("alpha_minus_gamma_state_effect", "α−low-γ")
+            .replace("alpha_minus_beta_state_effect", "α−β")
+            .replace("alpha_minus_theta_state_effect", "α−θ")
+            .replace("alpha_minus_", "α−")
             .replace("_state_effect", "")
             .replace("_", " ")
             for r in alpha_contrasts
         ],
-        fontsize=f.FS_TICK - 4,
+        fontsize=f.FS_TICK - 1,
     )
-    ax_contrast.set_xlabel("Contrast (95% CI)", fontsize=f.FS_AXIS - 3, labelpad=6)
+    ax_contrast.set_xlabel("Contrast (95% CI)", fontsize=f.FS_AXIS - 2, labelpad=6)
     # Keep title pad small; main-panel "Frequency band" xlabel is omitted above
     # so this caption no longer collides with the upper axis label.
     ax_contrast.set_title(
-        "Alpha vs other-band state-effect contrasts\n"
-        "(negative = stronger alpha attenuation)",
-        fontsize=f.FS_TICK - 3,
+        "Alpha vs other bands (negative = stronger alpha attenuation)",
+        fontsize=f.FS_TICK - 1,
         loc="left",
         pad=8,
     )
@@ -1428,20 +1524,6 @@ def _render_panel_d_estimation_plot(
     data_xmax = max(ci_highs) if ci_highs else xmax
     x_span = max(xmax - xmin, 1e-6)
     ax_contrast.set_xlim(xmin, max(xmax, data_xmax + 0.32 * x_span))
-    xmin, xmax = ax_contrast.get_xlim()
-    x_span = max(xmax - xmin, 1e-6)
-    for ypos, anchor, p_value in p_value_labels:
-        text_x = anchor + 0.12 * x_span
-        ax_contrast.text(
-            text_x,
-            ypos,
-            f"p={p_value:.3g}",
-            va="center",
-            ha="left",
-            fontsize=f.FS_TICK - 5,
-            color=f.PALETTE["dark_gray"],
-            clip_on=False,
-        )
     return title, legend_handles
 
 
@@ -1477,6 +1559,22 @@ def render_figure2(
     mixed = f.read_csv_rows(inputs.get("mixed_model"))
     equivalence = f.read_csv_rows(inputs.get("peak_equivalence"))
     protocol = f.read_csv_rows(inputs.get("protocol_audit"))
+    subject_rows = f.read_csv_rows(inputs.get("subject_level"))
+    dataset_ids_in_run_raw = {
+        f._as_str(row.get("dataset_id")).casefold()
+        for table in (paired, protocol, subject_rows, effects, mixed, equivalence)
+        for row in table
+        if f._as_str(row.get("dataset_id"))
+    }
+    blocked_sensitivity_ids = _blocked_sensitivity_datasets(dataset_ids_in_run_raw, protocol)
+    curves = _drop_blocked_sensitivity_rows(curves, blocked_sensitivity_ids)
+    paired = _drop_blocked_sensitivity_rows(paired, blocked_sensitivity_ids)
+    effects = _drop_blocked_sensitivity_rows(effects, blocked_sensitivity_ids)
+    meta = _drop_blocked_sensitivity_rows(meta, blocked_sensitivity_ids)
+    mixed = _drop_blocked_sensitivity_rows(mixed, blocked_sensitivity_ids)
+    equivalence = _drop_blocked_sensitivity_rows(equivalence, blocked_sensitivity_ids)
+    subject_rows = _drop_blocked_sensitivity_rows(subject_rows, blocked_sensitivity_ids)
+    protocol = _drop_blocked_sensitivity_rows(protocol, blocked_sensitivity_ids)
 
     meta_pairs = filter_primary_meta_paired_rows(paired)
     curve_index = build_curve_lag_index(curves)
@@ -1489,7 +1587,7 @@ def render_figure2(
     # paired contrast still needs its name on the unpaired panels it does populate.
     datasets_in_run = {
         f._as_str(row.get("dataset_id")).casefold()
-        for table in (paired, protocol, f.read_csv_rows(inputs.get("subject_level")))
+        for table in (paired, protocol, subject_rows)
         for row in table
         if f._as_str(row.get("dataset_id"))
     }
@@ -1519,8 +1617,8 @@ def render_figure2(
     panel_b_gaps = panel_a_gaps
     panel_b_hiit_sensitivity = panel_a_hiit_sensitivity
 
-    fig = plt.figure(figsize=(17.0, 17.8), constrained_layout=False)
-    gs = fig.add_gridspec(3, 2, hspace=0.68, wspace=0.38)
+    fig = plt.figure(figsize=(17.0, 16.0), constrained_layout=False)
+    gs = fig.add_gridspec(3, 2, hspace=0.62, wspace=0.34)
 
     # ----- Panel A: matched low vs effort lag curves -----
     gs_a_wrap = GridSpecFromSubplotSpec(
@@ -1541,7 +1639,7 @@ def render_figure2(
             "matched low vs high-demand curves", dataset_id=sensitivity_title_dataset
         )
         if panel_a_hiit_sensitivity
-        else "Matched low vs effort curves"
+        else "Matched low vs effort lag curves"
     )
     ax_a_title.text(
         0.0,
@@ -1604,7 +1702,7 @@ def render_figure2(
                     lo_d[mask],
                     hi_d[mask],
                     color=f.PALETTE["green"],
-                    alpha=f.FIGURE1_PANEL_B_CI_ALPHA,
+                    alpha=max(0.06, f.FIGURE1_PANEL_B_CI_ALPHA - 0.04),
                     linewidth=0,
                 )
                 ax.plot(
@@ -1634,7 +1732,7 @@ def render_figure2(
                     lo_d[mask],
                     hi_d[mask],
                     color=f.PALETTE["vermillion"],
-                    alpha=f.FIGURE1_PANEL_B_CI_ALPHA,
+                    alpha=max(0.06, f.FIGURE1_PANEL_B_CI_ALPHA - 0.04),
                     linewidth=0,
                 )
                 ax.plot(
@@ -1645,27 +1743,35 @@ def render_figure2(
                     label="Effort",
                 )
             f._ref_vline(ax, 0.0)
+            ax.axvline(0.0, color=f.PALETTE["dark_gray"], lw=1.5, ls="-", alpha=0.88, zorder=1)
             ax.set_xlim(-60, 60)
-            ax.set_title(f._band_display(band), fontsize=f.FS_TICK - 1, pad=3)
+            ax.set_title(_band_short_label(band), fontsize=f.FS_TICK, pad=4)
             if bi >= 2:
-                ax.set_xlabel(f.LAG_XLABEL, fontsize=f.FS_AXIS - 4)
+                ax.set_xlabel(f.LAG_XLABEL, fontsize=f.FS_AXIS - 3)
             if bi % 2 == 0:
-                ax.set_ylabel(f.Z_YLABEL, fontsize=f.FS_AXIS - 4)
+                ax.set_ylabel("Fisher-z lag correlation", fontsize=f.FS_AXIS - 3)
             f._style_axes(ax)
-            if bi == 0:
-                ax.legend(
-                    fontsize=f.FS_LEGEND - 3,
-                    loc="upper right",
-                    frameon=True,
-                    fancybox=False,
-                    edgecolor="#CCCCCC",
-                    framealpha=0.95,
-                    borderpad=0.35,
-                    handletextpad=0.35,
-                    labelspacing=0.25,
-                )
         assert ax_a0 is not None
         f._add_panel_label(ax_a0, "A")
+        ax_a_title.legend(
+            handles=[
+                plt.Line2D([0], [0], color=f.PALETTE["green"], lw=f.LINE_WIDTH, label="Low-demand"),
+                plt.Line2D(
+                    [0],
+                    [0],
+                    color=f.PALETTE["vermillion"],
+                    lw=f.LINE_WIDTH,
+                    label="Cognitive-effort",
+                ),
+            ],
+            loc="center right",
+            ncol=2,
+            fontsize=f.FS_LEGEND - 1,
+            frameon=False,
+            borderaxespad=0.0,
+            handletextpad=0.45,
+            columnspacing=1.3,
+        )
         # Exterior title placed after subplots_adjust (see below).
         has_a = True
     else:
@@ -1680,7 +1786,7 @@ def render_figure2(
                 ),
             )
             panel_a_expected_na = True
-        f._mark_empty_panel(ax_a, msg, xlabel=f.LAG_XLABEL, ylabel=f.Z_YLABEL)
+        f._mark_empty_panel(ax_a, msg, xlabel=f.LAG_XLABEL, ylabel="Fisher-z lag correlation")
         f._set_panel_title(ax_a, panel_a_title)
         f._add_panel_label(ax_a, "A")
         has_a = False
@@ -1830,7 +1936,7 @@ def render_figure2(
     )
     ax_b_title.text(
         0.0,
-        0.40,
+        0.56,
         panel_b_title,
         transform=ax_b_title.transAxes,
         ha="left",
@@ -1838,6 +1944,16 @@ def render_figure2(
         fontsize=f.FS_PANEL_TITLE - 1,
         fontweight="bold",
         color="black",
+    )
+    ax_b_title.text(
+        0.0,
+        0.08,
+        "Δ = cognitive-effort − low-demand",
+        transform=ax_b_title.transAxes,
+        ha="left",
+        va="center",
+        fontsize=f.FS_TICK - 1,
+        color=f.PALETTE["dark_gray"],
     )
     if panel_b_series:
         for bi, band in enumerate(f.BAND_ORDER):
@@ -1876,18 +1992,19 @@ def render_figure2(
                     lo_d[mask],
                     hi_d[mask],
                     color=color,
-                    alpha=f.FIGURE1_PANEL_B_CI_ALPHA,
+                    alpha=max(0.06, f.FIGURE1_PANEL_B_CI_ALPHA - 0.04),
                     linewidth=0,
                 )
                 ax.plot(lags[mask], mean_d[mask], color=color, lw=f.LINE_WIDTH)
             f._ref_vline(ax, 0.0)
             f._ref_hline(ax, 0.0)
+            ax.axvline(0.0, color=f.PALETTE["dark_gray"], lw=1.5, ls="-", alpha=0.88, zorder=1)
             ax.set_xlim(-60, 60)
-            ax.set_title(f._band_display(band), fontsize=f.FS_TICK - 1, pad=3)
+            ax.set_title(_band_short_label(band), fontsize=f.FS_TICK, pad=4)
             if bi >= 2:
-                ax.set_xlabel(f.LAG_XLABEL, fontsize=f.FS_AXIS - 4)
+                ax.set_xlabel(f.LAG_XLABEL, fontsize=f.FS_AXIS - 3)
             if bi % 2 == 0:
-                ax.set_ylabel(f"Δ {f.Z_YLABEL}", fontsize=f.FS_AXIS - 4)
+                ax.set_ylabel("Δ Fisher-z lag correlation", fontsize=f.FS_AXIS - 3)
             f._style_axes(ax)
         assert ax_b0 is not None
         f._add_panel_label(ax_b0, "B")
@@ -1908,7 +2025,12 @@ def render_figure2(
                 ),
             )
             panel_b_expected_na = True
-        f._mark_empty_panel(ax_b, msg, xlabel=f.LAG_XLABEL, ylabel=f"Δ {f.Z_YLABEL}")
+        f._mark_empty_panel(
+            ax_b,
+            msg,
+            xlabel=f.LAG_XLABEL,
+            ylabel="Δ Fisher-z lag correlation",
+        )
         f._set_panel_title(ax_b, panel_b_title)
         f._add_panel_label(ax_b, "B")
         has_b_nested = False
@@ -2031,31 +2153,50 @@ def render_figure2(
         sensitivity_studies=sensitivity_studies,
         pooled=pooled,
     )
+    panel_c_has_sensitivity_rows = any(
+        f._as_str(row.get("row_type")).casefold() == ROW_TYPE_SENSITIVITY_DISPLAY
+        for row in forest_export
+    )
     panel_c_hiit_only = bool(sensitivity_studies) and not studies
     panel_c_title = (
         f.sensitivity_display_title(
             "Alpha ΔZLPI", dataset_id=sensitivity_title_dataset
         )
         if panel_c_hiit_only
-        else "Alpha PRIMARY_META ΔZLPI"
+        else "Alpha state attenuation"
     )
+    # Display-only labels (do not alter exported source rows).
+    for row in studies:
+        ds = f._as_str(row.get("dataset_id")).casefold()
+        n_pairs = f._as_int(row.get("n_pairs"))
+        if ds:
+            row["display_label"] = f"{ds} (N = {n_pairs})"
     drawn = draw_alpha_meta_forest(
         ax_c,
         primary_studies=studies,
         sensitivity_studies=sensitivity_studies,
         pooled=pooled,
-        dataset_display_fn=f._dataset_display,
+        dataset_display_fn=lambda dataset_id, n_pairs=None: (
+            f"{f._as_str(dataset_id).casefold()} (N = {int(n_pairs)})"
+            if n_pairs not in {None, ""}
+            else f._as_str(dataset_id).casefold()
+        ),
         band_color_fn=f._band_color,
         ref_vline_fn=f._ref_vline,
         style_axes_fn=f._style_axes,
         set_panel_title_fn=f._set_panel_title,
         panel_title=panel_c_title,
-        xlabel=f"Δ {_endpoint_label()} ({f.ZLPI_METRIC})",
+        xlabel=f"Δ ZLPI (Fisher z)",
         marker_size=f.MARKER_SIZE,
         line_width=f.LINE_WIDTH,
         tick_fontsize=f.FS_TICK,
         axis_fontsize=f.FS_AXIS,
         palette=f.PALETTE,
+        pooled_section_label="",
+        prediction_interval_lw=8.0,
+        pooled_marker_size_delta=1.5,
+        ytick_fontsize_delta=-1.0,
+        header_fontsize_delta=-2.0,
     )
     if drawn:
         panel_c_expected_na = False
@@ -2069,11 +2210,12 @@ def render_figure2(
         f._mark_empty_panel(
             ax_c,
             panel_c_msg,
-            xlabel=f"Δ ZLPI ({f.CI_95_LABEL})",
+            xlabel=f"Δ ZLPI (Fisher z)",
             ylabel="Dataset",
         )
         f._set_panel_title(ax_c, panel_c_title)
     f._add_panel_label(ax_c, "C")
+    ax_c.axvline(0.0, color=f.PALETTE["dark_gray"], lw=1.35, ls="-", alpha=0.82, zorder=1)
     panel_c_csv = source_dir / "figure2_panel_c_alpha_meta_forest.csv"
     f.write_source_csv(
         panel_c_csv,
@@ -2158,6 +2300,12 @@ def render_figure2(
         inputs,
         panel_a_hiit_sensitivity=panel_a_hiit_sensitivity,
     )
+    marginal_rows = _drop_blocked_sensitivity_rows(marginal_rows, blocked_sensitivity_ids)
+    contrast_rows = _drop_blocked_sensitivity_rows(contrast_rows, blocked_sensitivity_ids)
+    if blocked_sensitivity_ids and not datasets_in_run:
+        marginal_rows = []
+        contrast_rows = []
+        coef_rows = []
     panel_d_hiit_sensitivity = bool(marginal_rows) and (
         panel_a_hiit_sensitivity
         or panel_d_rows_are_sensitivity_only(marginal_rows, protocol_rows=protocol)
@@ -2310,8 +2458,8 @@ def render_figure2(
         ):
             panel_e_summaries = prior_summaries
 
-    panel_e_mu_title = "Peak center, μ"
-    panel_e_fwhm_title = "Peak width, FWHM"
+    panel_e_mu_title = "Peak center μ"
+    panel_e_fwhm_title = "FWHM"
     panel_e_rest_color = f.PALETTE["green"]
     panel_e_task_color = f.PALETTE["vermillion"]
     panel_e_legend_handles: list[object] = []
@@ -2379,7 +2527,7 @@ def render_figure2(
                         np.full(len(values), bi) + y_off + jitter,
                         color=color,
                         s=5,
-                        alpha=0.12,
+                        alpha=0.10,
                         edgecolors="none",
                         zorder=2,
                     )
@@ -2443,7 +2591,7 @@ def render_figure2(
             ax.tick_params(axis="y", labelleft=False, length=0)
         # Manuscript band order top → bottom: Theta, Alpha, Beta, Low gamma.
         ax.set_ylim(len(f.BAND_ORDER) - 0.55, -0.55)
-        ax.set_xlabel(xlabel, fontsize=f.FS_AXIS - 2)
+        ax.set_xlabel(xlabel, fontsize=f.FS_AXIS - 1)
         f._style_axes(ax, grid=True)
         if show_zero:
             # Distinct from light gridlines; not a paired-state null label.
@@ -2491,7 +2639,7 @@ def render_figure2(
                     f"{prefix} {n_obs}/{n_part}",
                     ha="left",
                     va="center",
-                    fontsize=f.FS_TICK - 6,
+                    fontsize=f.FS_TICK - 2,
                     color=color,
                     fontfamily="monospace",
                     clip_on=False,
@@ -2510,7 +2658,7 @@ def render_figure2(
             transform=ax.transAxes,
             ha="center",
             va="top",
-            fontsize=f.FS_TICK - 6,
+            fontsize=f.FS_TICK - 2,
             color=f.PALETTE["dark_gray"],
             clip_on=False,
         )
@@ -2521,7 +2669,7 @@ def render_figure2(
             ax_e_mu,
             parameter="mu",
             value_field="peak_center_mu_s",
-            xlabel="Peak μ (s)",
+            xlabel="Peak center μ (s)",
             show_zero=True,
             show_ylabels=True,
         )
@@ -2549,7 +2697,7 @@ def render_figure2(
                 markersize=4.5,
                 markeredgecolor="black",
                 markeredgewidth=0.45,
-                label=f.format_role_display("low_demand", raw_label="rest"),
+                label="Low-demand",
             ),
             Line2D(
                 [0],
@@ -2560,7 +2708,7 @@ def render_figure2(
                 markersize=4.5,
                 markeredgecolor="black",
                 markeredgewidth=0.6,
-                label=f.format_role_display("high_demand", raw_label="task"),
+                label="Cognitive-effort",
             ),
         ]
     else:
@@ -2582,12 +2730,30 @@ def render_figure2(
             xlabel="FWHM (s)",
             ylabel=f.EEG_BAND_YLABEL,
         )
-    f._set_panel_title(ax_e_mu, panel_e_mu_title, fontsize=f.FS_PANEL_TITLE - 5, pad=6)
+    f._set_panel_title(ax_e_mu, panel_e_mu_title, fontsize=f.FS_PANEL_TITLE - 4, pad=6)
     f._set_panel_title(
-        ax_e_fwhm, panel_e_fwhm_title, fontsize=f.FS_PANEL_TITLE - 5, pad=6
+        ax_e_fwhm, panel_e_fwhm_title, fontsize=f.FS_PANEL_TITLE - 4, pad=6
     )
     # Keep the middle column title blank so subplot titles stay aligned.
-    ax_e_n.set_title(" ", fontsize=f.FS_PANEL_TITLE - 5, pad=6)
+    ax_e_n.set_title(" ", fontsize=f.FS_PANEL_TITLE - 4, pad=6)
+    suppressed_rows = [
+        r
+        for r in panel_e_summaries
+        if f._as_str(r.get("status")).casefold() == "suppressed"
+    ]
+    if suppressed_rows:
+        ax_e_n.text(
+            0.5,
+            -0.24,
+            f"Suppressed when identifiable proportion < {PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}",
+            transform=ax_e_n.transAxes,
+            ha="center",
+            va="top",
+            fontsize=f.FS_TICK - 2,
+            color=f.PALETTE["dark_gray"],
+            style="italic",
+            clip_on=False,
+        )
     panel_e_csv = source_dir / "figure2_panel_e_state_peaks.csv"
     panel_e_summary_csv = source_dir / "figure2_panel_e_state_summaries.csv"
     # Drop legacy wide paired-peaks export from prior Panel E layout.
@@ -2605,10 +2771,17 @@ def render_figure2(
             "sampling_unit=biological_participant",
             "estimand=mean_of_participant_means",
             "eligibility=state_specific_identifiable_peak",
+            "state_label_map=rest->low_demand,task->cognitive_effort",
+            f"low_identifiability_threshold={PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}",
             "enters_primary_meta=false",
             f"panel_status={f.PANEL_STATUS_SENSITIVITY_DISPLAY}",
         ]
-        panel_e_notes = f.FIGURE2_PANEL_E_SENSITIVITY_NOTE
+        panel_e_notes = (
+            f"{f.FIGURE2_PANEL_E_SENSITIVITY_NOTE.rstrip()} "
+            "State labels map as rest=low_demand and task=cognitive_effort. "
+            "Cohort-level summaries are suppressed when identifiable_n/candidate_n "
+            f"< {PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}."
+        )
         panel_e_panel_title = f.sensitivity_display_title(
             "Peak center and width by state", dataset_id=sensitivity_title_dataset
         )
@@ -2617,10 +2790,17 @@ def render_figure2(
             "cohort=PRIMARY_META_C5_pairs",
             "sampling_unit=biological_participant",
             "estimand=mean_of_participant_means",
+            "state_label_map=rest->low_demand,task->cognitive_effort",
+            f"low_identifiability_threshold={PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}",
             f"panel_status={f.PANEL_STATUS_EXPECTED_NOT_APPLICABLE}",
         ]
         panel_e_notes = f.annotate_expected_not_applicable(
-            f.FIGURE2_PANEL_E_NOTE,
+            (
+                f"{f.FIGURE2_PANEL_E_NOTE.rstrip()} "
+                "State labels map as rest=low_demand and task=cognitive_effort. "
+                "Cohort-level summaries are suppressed when identifiable_n/candidate_n "
+                f"< {PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}."
+            ),
             detail=panel_e_na_detail,
         )
         panel_e_panel_title = "Peak center and width by state"
@@ -2630,8 +2810,15 @@ def render_figure2(
             "sampling_unit=biological_participant",
             "estimand=mean_of_participant_means",
             "eligibility=state_specific_identifiable_peak",
+            "state_label_map=rest->low_demand,task->cognitive_effort",
+            f"low_identifiability_threshold={PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}",
         ]
-        panel_e_notes = f.FIGURE2_PANEL_E_NOTE
+        panel_e_notes = (
+            f"{f.FIGURE2_PANEL_E_NOTE.rstrip()} "
+            "State labels map as rest=low_demand and task=cognitive_effort. "
+            "Cohort-level summaries are suppressed when identifiable_n/candidate_n "
+            f"< {PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}."
+        )
         panel_e_panel_title = "Peak center and width by state"
     panel_sources.append(
         FigurePanelSource(
@@ -2686,11 +2873,16 @@ def render_figure2(
 
     if graded:
         # Group by contrast then band for y positions.
-        contrasts = ["passive__simplert", "passive__gonogo"]
+        contrasts = [
+            ("passive__gonogo", "gonogo"),
+            ("passive__simplert", "simplert"),
+        ]
         y_labels: list[str] = []
         positions: list[float] = []
+        group_centers: list[tuple[str, float]] = []
         y = 0.0
-        for contrast in contrasts:
+        for ci, (contrast, short) in enumerate(contrasts):
+            group_start = y
             for band in f.BAND_ORDER:
                 match = next(
                     (
@@ -2721,15 +2913,31 @@ def render_figure2(
                     markeredgewidth=0.5,
                     zorder=3,
                 )
-                short = "simplert" if "simplert" in contrast else "gonogo"
-                y_labels.append(f"{short} · {f._band_display(band)}")
+                y_labels.append(f"  {_band_short_label(band)}")
                 positions.append(y)
                 y += 1
+            group_centers.append((short, 0.5 * (group_start + y - 1)))
+            if ci < len(contrasts) - 1:
+                ax_f.axhline(y - 0.25, color=f.PALETTE["light_gray"], lw=1.0, ls="--", zorder=1)
+                y += 0.8
         f._ref_vline(ax_f, 0.0)
+        ax_f.axvline(0.0, color=f.PALETTE["dark_gray"], lw=1.45, ls="-", alpha=0.85, zorder=1)
         ax_f.set_yticks(positions)
-        ax_f.set_yticklabels(y_labels, fontsize=f.FS_TICK - 3)
+        ax_f.set_yticklabels(y_labels, fontsize=f.FS_TICK - 1)
+        for group_name, y_mid in group_centers:
+            ax_f.text(
+                -0.12,
+                y_mid,
+                group_name,
+                transform=ax_f.get_yaxis_transform(),
+                ha="right",
+                va="center",
+                fontsize=f.FS_TICK,
+                color=f.PALETTE["dark_gray"],
+                fontweight="bold",
+            )
         ax_f.set_xlabel(
-            f"Δ {_endpoint_label()} ({f.ZLPI_METRIC}; {f.CI_95_LABEL})",
+            "Δ ZLPI (effort − passive; Fisher z; Pointwise 95% CI)",
             fontsize=f.FS_AXIS,
         )
         f._style_axes(ax_f)
@@ -2801,28 +3009,27 @@ def render_figure2(
         )
     )
 
-    fig.suptitle(f.FIGURE2_TITLE, fontsize=f.FS_SUPTITLE - 2, fontweight="bold", y=0.992)
+    fig.suptitle(f.FIGURE2_TITLE, fontsize=f.FS_SUPTITLE, fontweight="bold", y=0.984)
     # Compact footer below axes; keep detailed prose in caption/changelog.
     fig.text(
         0.5,
-        0.010,
+        0.030,
         "\n".join(
             (
                 f.LAG_CONVENTION_NOTE,
-                "A/B: C5 pairs; paired bootstrap; no unpaired fallback; no cluster permutation.",
-                "C: absolute α PRIMARY_META ΔZLPI (no % attenuation). "
-                "D: Fisher-z ZLPI band×state interaction (low/high demand by band).",
-                "F: prespecified ds003690 graded contrasts only.",
+                "A/B: C5 pairs; Δ = cognitive-effort − low-demand; paired bootstrap; no unpaired fallback.",
+                "C pooled CI includes zero; no established alpha-specific attenuation.",
+                "E: peak summaries can be suppressed for low identifiability.",
             )
         ),
         ha="center",
         va="bottom",
-        fontsize=f.FS_TICK - 6,
+        fontsize=f.FS_TICK - 3,
         color=f.PALETTE["dark_gray"],
-        linespacing=1.40,
+        linespacing=1.30,
     )
     # Extra top margin for the figure title; A/B panel titles live in reserved rows.
-    fig.subplots_adjust(left=0.11, right=0.98, top=0.945, bottom=0.145)
+    fig.subplots_adjust(left=0.10, right=0.975, top=0.932, bottom=0.155)
     # Panel D: place "D" + title on one baseline above the axes; legend under title.
     pos_d = gs[1, 1].get_position(fig)
     title_y = pos_d.y1 + 0.034
@@ -2847,7 +3054,7 @@ def render_figure2(
         panel_d_title,
         ha="left",
         va="bottom",
-        fontsize=f.FS_PANEL_TITLE - 1,
+        fontsize=f.FS_PANEL_TITLE - 2,
         fontweight="bold",
         color="black",
         clip_on=False,
@@ -2859,7 +3066,7 @@ def render_figure2(
         bbox_to_anchor=(pos_d.x0, legend_y),
         bbox_transform=fig.transFigure,
         ncol=2,
-        fontsize=f.FS_TICK - 2,
+        fontsize=f.FS_LEGEND - 1,
         frameon=False,
         borderaxespad=0.0,
         handletextpad=0.35,
@@ -2900,7 +3107,7 @@ def render_figure2(
             loc="lower center",
             bbox_to_anchor=(0.5, 0.02),
             ncol=2,
-            fontsize=f.FS_TICK - 2,
+            fontsize=f.FS_LEGEND - 1,
             frameon=False,
             borderaxespad=0.0,
             handletextpad=0.35,
@@ -2947,7 +3154,15 @@ def render_figure2(
             "PRIMARY_META RE pooling.\n"
         )
     else:
-        panel_c_caption = f"C: {f.FIGURE2_PANEL_C_NOTE}\n"
+        panel_c_caption = (
+            "C: Alpha state attenuation (absolute paired ΔZLPI, high-demand − low-demand); "
+            "no percent attenuation. "
+            + (
+                "Sensitivity rows are shown as labeled display-only entries and are excluded from pooled RE.\n"
+                if panel_c_has_sensitivity_rows
+                else "Only the three primary datasets plus one pooled RE row are shown in this render.\n"
+            )
+        )
     if panel_d_hiit_sensitivity:
         panel_d_caption = (
             "D: Sensitivity display (display-only) — band×state interaction; "
@@ -2957,7 +3172,10 @@ def render_figure2(
             "(negative ⇒ stronger alpha attenuation); not PRIMARY_META.\n"
         )
     else:
-        panel_d_caption = f"D: {f.FIGURE2_PANEL_D_NOTE}\n"
+        panel_d_caption = (
+            "D: Model-estimated Fisher-z ZLPI by band and state (low-demand, cognitive-effort), "
+            "with alpha-versus-other-band contrasts (negative = stronger alpha attenuation).\n"
+        )
     if panel_e_hiit_sensitivity:
         panel_e_caption = (
             "E: Sensitivity display (display-only) — Gaussian peak centers (μ) and "
@@ -2969,18 +3187,33 @@ def render_figure2(
             "biological participants once for both μ and FWHM.\n"
         )
     else:
-        panel_e_caption = f"E: {f.FIGURE2_PANEL_E_NOTE}\n"
+        panel_e_caption = (
+            "E: Peak center μ and FWHM by state (low-demand, cognitive-effort), descriptive only. "
+            "Peak summaries may be non-identifiable and are suppressed when identifiable proportion "
+            f"< {PANEL_E_LOW_IDENTIFIABILITY_THRESHOLD:.2f}. "
+            "State labels map as rest=low_demand and task=cognitive_effort.\n"
+        )
     caption_path = output_dir / "figure2_caption.txt"
+    blocked_clause = (
+        ""
+        if not blocked_sensitivity_ids
+        else (
+            "Blocked sensitivity datasets were suppressed from manuscript-facing "
+            "display rows in this render.\n"
+        )
+    )
     caption_path.write_text(
         (
             f"{f.FIGURE2_TITLE}\n\n"
             f"{panel_a_caption}"
             f"{panel_b_caption}"
             f"{f.LAG_CURVE_DISPLAY_SMOOTH_NOTE}\n"
+            f"{blocked_clause}"
             f"{panel_c_caption}"
             f"{panel_d_caption}"
             f"{panel_e_caption}"
-            f"F: {f.FIGURE2_PANEL_F_NOTE}\n"
+            "F: Prespecified graded ds003690 contrasts only (effort − passive by band); "
+            "display-only grouped rows for gonogo and simplert.\n"
         ),
         encoding="utf-8",
     )
@@ -3000,6 +3233,14 @@ def render_figure2(
         if hiit_fallback
         else ""
     )
+    panel_c_changelog_line = (
+        "- Panel C: absolute PRIMARY_META alpha ΔZLPI forest; no percent attenuation; "
+        + (
+            "sensitivity display rows appear only when explicitly present/labeled and never enter RE pooling.\n"
+            if panel_c_has_sensitivity_rows or panel_c_hiit_only
+            else "this render contains primary rows plus pooled RE only.\n"
+        )
+    )
     changelog_path.write_text(
         (
             "# Figure 2 changelog\n\n"
@@ -3011,8 +3252,7 @@ def render_figure2(
             "curves and ribbon boundaries; source-data CSVs remain unsmoothed; "
             "all CIs/tests from original data.\n"
             f"{changelog_extra}"
-            "- Panel C: absolute PRIMARY_META α ΔZLPI forest; no percent attenuation; "
-            "one combined sensitivity display-only row never enters RE pooling.\n"
+            f"{panel_c_changelog_line}"
             "- Panel D: Fisher-z ZLPI band×state interaction (low/high demand); "
             "alpha-versus-other-band state-effect contrasts "
             "(negative ⇒ stronger alpha attenuation).\n"

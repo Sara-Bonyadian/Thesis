@@ -32,6 +32,7 @@ from .inference import PRIMARY_POWER_REPRESENTATION
 ROW_TYPE_PRIMARY = "primary"
 ROW_TYPE_SENSITIVITY_DISPLAY = "sensitivity_display"
 ROW_TYPE_POOLED = "pooled"
+ANALYSIS_STATUS_COMPLETED = "completed"
 
 HIIT_DATASET_ID = "hiit"
 # All low–high demand ΔZLPI contrasts (protocol session × pre/post) for combined
@@ -160,6 +161,15 @@ def _primary_slice_ok(row: Mapping[str, object], *, band: str = "alpha") -> bool
     return True
 
 
+def _pooled_row_eligible(row: Mapping[str, object]) -> bool:
+    """True only for completed pooled meta rows with >=2 datasets."""
+    if _as_str(row.get("analysis_status"), ANALYSIS_STATUS_COMPLETED).casefold() != (
+        ANALYSIS_STATUS_COMPLETED
+    ):
+        return False
+    return _as_int(row.get("n_datasets")) >= 2
+
+
 def _hiit_session_unit_key(row: Mapping[str, object]) -> str:
     """Panel-B-aligned HIIT unit: session subject_id (PH/PS separate).
 
@@ -252,6 +262,7 @@ def sensitivity_forest_rows(
                 "band": band.casefold(),
                 "endpoint_name": ENDPOINT_ZLPI,
                 "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "power_representation": PRIMARY_POWER_REPRESENTATION,
                 "effect_mean": summary["effect_mean"],
                 "effect_sd": summary["effect_sd"],
                 "effect_se": summary["effect_se"],
@@ -470,6 +481,7 @@ def primary_meta_alpha_forest_rows(
                 "band": "alpha",
                 "endpoint_name": ENDPOINT_ZLPI,
                 "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "power_representation": PRIMARY_POWER_REPRESENTATION,
                 "effect_mean": _as_float(row.get("effect_mean")),
                 "ci_low": _as_float(row.get("ci_low")),
                 "ci_high": _as_float(row.get("ci_high")),
@@ -506,16 +518,20 @@ def primary_meta_alpha_forest_rows(
         flag = str(row.get("is_primary_analysis", "true")).strip().casefold()
         if flag not in {"true", "1", "yes", ""}:
             continue
+        if not _pooled_row_eligible(row):
+            continue
         pooled = {
             "band": "alpha",
             "endpoint_name": ENDPOINT_ZLPI,
             "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "power_representation": PRIMARY_POWER_REPRESENTATION,
             "pooled_effect": _as_float(row.get("pooled_effect")),
             "ci_low": _as_float(row.get("ci_low")),
             "ci_high": _as_float(row.get("ci_high")),
             "prediction_low": _as_float(row.get("prediction_low")),
             "prediction_high": _as_float(row.get("prediction_high")),
             "n_datasets": _as_int(row.get("n_datasets")),
+            "analysis_status": _as_str(row.get("analysis_status")),
             "i2": _as_float(row.get("i2")),
             "tau2": _as_float(row.get("tau2")),
         }
@@ -541,7 +557,7 @@ def build_alpha_forest_export(
         payload["row_type"] = ROW_TYPE_SENSITIVITY_DISPLAY
         payload["enters_meta"] = False
         export.append(payload)
-    if pooled is not None and math.isfinite(
+    if pooled is not None and _pooled_row_eligible(pooled) and math.isfinite(
         float(pooled.get("pooled_effect", float("nan")))
     ):
         export.append(
@@ -551,6 +567,7 @@ def build_alpha_forest_export(
                 "band": "alpha",
                 "endpoint_name": ENDPOINT_ZLPI,
                 "duration_s": EXPECTED_PRIMARY_DURATION_S,
+                "power_representation": PRIMARY_POWER_REPRESENTATION,
                 "effect_mean": pooled["pooled_effect"],
                 "ci_low": pooled["ci_low"],
                 "ci_high": pooled["ci_high"],
@@ -585,14 +602,23 @@ def draw_alpha_meta_forest(
     tick_fontsize: float,
     axis_fontsize: float,
     palette: Mapping[str, str],
+    pooled_section_label: str = "Pooled PRIMARY_META",
+    prediction_interval_lw: float = 6.0,
+    pooled_marker_size_delta: float = 0.0,
+    ytick_fontsize_delta: float = -2.0,
+    header_fontsize_delta: float = -3.0,
 ) -> bool:
     """Draw PRIMARY_META + optional HIIT sensitivity rows + pooled diamond.
 
     Returns True if anything was drawn. Y-axis is inverted so the first primary
     study is at the top (standard forest orientation).
     """
-    has_pooled = pooled is not None and math.isfinite(
+    has_pooled = (
+        pooled is not None
+        and _pooled_row_eligible(pooled)
+        and math.isfinite(
         float(pooled.get("pooled_effect", float("nan")))
+        )
     )
     if not primary_studies and not sensitivity_studies and not has_pooled:
         return False
@@ -679,7 +705,7 @@ def draw_alpha_meta_forest(
 
     if has_pooled:
         assert pooled is not None
-        _section_break("Pooled PRIMARY_META")
+        _section_break(pooled_section_label)
         pe = float(pooled["pooled_effect"])
         plo = float(pooled["ci_low"])
         phi = float(pooled["ci_high"])
@@ -690,7 +716,7 @@ def draw_alpha_meta_forest(
                 [pred_lo, pred_hi],
                 [y_pos, y_pos],
                 color=palette["light_gray"],
-                lw=6,
+                lw=float(prediction_interval_lw),
                 solid_capstyle="butt",
                 zorder=2,
                 label="Prediction interval",
@@ -704,7 +730,7 @@ def draw_alpha_meta_forest(
             xerr=xerr,
             fmt="D",
             color=palette["dark_gray"],
-            markersize=marker_size,
+            markersize=marker_size + float(pooled_marker_size_delta),
             capsize=4,
             elinewidth=line_width,
             zorder=3,
@@ -717,7 +743,9 @@ def draw_alpha_meta_forest(
 
     ref_vline_fn(ax, 0.0)
     ax.set_yticks(positions)
-    ax.set_yticklabels(y_labels, fontsize=tick_fontsize - 2)
+    ax.set_yticklabels(
+        y_labels, fontsize=tick_fontsize + float(ytick_fontsize_delta)
+    )
     ax.set_xlabel(xlabel, fontsize=axis_fontsize)
     style_axes_fn(ax)
     set_panel_title_fn(ax, panel_title)
@@ -731,7 +759,7 @@ def draw_alpha_meta_forest(
             transform=ax.get_yaxis_transform(),
             ha="left",
             va="center",
-            fontsize=tick_fontsize - 3,
+            fontsize=tick_fontsize + float(header_fontsize_delta),
             color=palette["dark_gray"],
             fontstyle="italic",
             clip_on=True,
@@ -748,6 +776,7 @@ FOREST_EXPORT_FIELDS = (
     "band",
     "endpoint_name",
     "duration_s",
+    "power_representation",
     "effect_mean",
     "ci_low",
     "ci_high",

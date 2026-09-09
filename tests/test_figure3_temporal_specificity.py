@@ -47,6 +47,7 @@ from ppg_eeg.confirmatory.nulls import (
     compute_endpoint_index_from_series,
     deterministic_seed,
     phase_randomize_series,
+    run_null_battery,
     valid_circular_shifts,
     _null_statistics_for_unit,
 )
@@ -464,6 +465,8 @@ class TestFigure3PanelAForest(unittest.TestCase):
             )
             self.assertEqual(inference["run_class"], "smoke_diagnostic")
             self.assertEqual(str(inference.get("pooled_estimate_plotted")).casefold(), "false")
+            self.assertEqual(len(artifacts.manuscript.source_csvs), 0)
+            self.assertEqual(len(artifacts.manuscript.panels), 0)
             recomputed = infer_participant_null_deltas(
                 participant_deltas_from_matched(
                     analyze_null_slice(
@@ -803,10 +806,10 @@ class TestSurrogateContracts(unittest.TestCase):
             hr_z=hr,
             eeg_z=eeg,
         )
-        row_a, _, _ = _null_statistics_for_unit(
+        row_a, _, _, _ = _null_statistics_for_unit(
             unit, null_type=NULL_TYPE_CIRCULAR_SHIFT, n_surrogates=20
         )
-        row_b, _, _ = _null_statistics_for_unit(
+        row_b, _, _, _ = _null_statistics_for_unit(
             unit, null_type=NULL_TYPE_CIRCULAR_SHIFT, n_surrogates=20
         )
         self.assertEqual(row_a["null_mean"], row_b["null_mean"])
@@ -885,8 +888,14 @@ class TestFigure3PanelBInnovationNormalization(unittest.TestCase):
                 eeg_z=eeg_b,
             ),
         ]
-        obs_rows, _draw_rows, diag_rows = _panel_b_cross_subject_and_innovation(
+        c4 = run_null_battery(
             units,
+            n_surrogates=64,
+            null_types=(NULL_TYPE_CROSS_SUBJECT_MISMATCH, NULL_TYPE_AR1_INNOVATIONS),
+        )
+        obs_rows, _draw_rows, diag_rows = _panel_b_cross_subject_and_innovation(
+            c4.subject_rows,
+            c4.surrogate_rows,
             n_null_draws=64,
         )
         self.assertEqual(len(obs_rows), 2)
@@ -1157,7 +1166,7 @@ class TestFigure3PanelAEmpiricalNullGeometry(unittest.TestCase):
             self.assertIn("biological participants", subtitle_text)
             self.assertNotIn("Dataset × null method", ax.get_ylabel())
             xlabel = ax.get_xlabel()
-            self.assertIn("Standardized ZLPI", xlabel)
+            self.assertIn("Null-relative Z (Z_null)", xlabel)
             self.assertIn("observation-specific null", xlabel)
             plt.close(fig)
 
@@ -1196,6 +1205,9 @@ class TestFigure3PanelAEmpiricalNullGeometry(unittest.TestCase):
             self.assertTrue(all(str(r["complete"]).casefold() == "false" for r in vals))
             self.assertTrue(
                 all(str(r["used_fallback_summary"]).casefold() == "true" for r in vals)
+            )
+            self.assertTrue(
+                (out / "source_data" / "figure3_panel_a_incomplete_surrogate_export.flag").is_file()
             )
 
 

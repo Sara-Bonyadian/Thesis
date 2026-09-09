@@ -18,9 +18,12 @@ import numpy as np
 from .duration_contracts import ENDPOINT_ZLPI, EXPECTED_PRIMARY_DURATION_S, ZLPI_FLANKS_S
 from .reason_codes import (
     ARTIFACT_CONTROL_NOT_AVAILABLE,
+    INSUFFICIENT_COMMON_SUPPORT,
+    MISSING_REQUIRED_MODALITY,
     STRUCTURED_NC_FIELDS,
     UNSUPPORTED_CONTROL_FOR_MODALITY,
     attach_structured_reason,
+    map_exclusion_to_reason_code,
     with_structured_nc_fields,
 )
 from .paired_delta_inference import cluster_bootstrap_mean_ci
@@ -123,6 +126,8 @@ OBSERVATION_COLUMNS: tuple[str, ...] = (
 )
 
 SUMMARY_COLUMNS: tuple[str, ...] = (
+    "dataset_id",
+    "dataset_role",
     "control",
     "display_label",
     "display_label_short",
@@ -143,6 +148,9 @@ SUMMARY_COLUMNS: tuple[str, ...] = (
     "n_sign_changes",
     "n_observations",
     "n_baseline_eligible",
+    "n_control_computable",
+    "n_paired_complete_case",
+    "composition_differs_from_baseline",
     "n_biological_participants",
     "denominator_label",
     "analysis_role",
@@ -658,34 +666,57 @@ def panel_d_control_family(control: str) -> str:
     return PANEL_D_CONTROL_FAMILY.get(key, PANEL_D_CONTROL_FAMILY.get(control, "signal_level"))
 
 
+def _normalized_reason_text(reason: str) -> str:
+    text = _as_str(reason).casefold().replace("_", " ").replace("-", " ")
+    return " ".join(text.split())
+
+
 def short_not_computable_reason_code(reason: str) -> str:
     """Compact figure annotation; full reason remains in tables/metadata."""
-    text = _as_str(reason).casefold()
-    if not text:
+    raw_text = _as_str(reason).casefold()
+    normalized = _normalized_reason_text(reason)
+    if not normalized:
         return ""
-    # Structural 1 Hz event-mask / strict-common-support incompatibility (not a near-miss).
-    if (
-        "1hz_envelope_cannot_support_event_centered_masking" in text
-        or "strict_global_common_support_after_masking" in text
-        or ("1 hz" in text and "mask" in text)
-        or ("1hz" in text and "mask" in text)
-        or "cannot support event-centered masking" in text
-        or "cannot support event_centered_masking" in text
-    ):
-        return "1 Hz mask incompatible"
-    if "insufficient_common_support" in text or text == "insufficient_overlap_after_masking":
+    if "1 hz" in normalized and "mask" in normalized:
+        return "1 Hz mask structurally incompatible"
+    if normalized == _normalized_reason_text(INSUFFICIENT_COMMON_SUPPORT):
         return "insufficient support"
-    if "support" in text or "masking" in text or "common_support" in text:
-        return "insufficient support"
+    if normalized in {
+        _normalized_reason_text(MISSING_REQUIRED_MODALITY),
+        _normalized_reason_text(UNSUPPORTED_CONTROL_FOR_MODALITY),
+    }:
+        return "PPG modality unavailable"
+    if normalized == _normalized_reason_text(ARTIFACT_CONTROL_NOT_AVAILABLE):
+        return "artifact control unavailable"
+    if "multichannel event locked eeg" in normalized and "not available" in normalized:
+        return "ECG template unavailable (event-locked EEG unavailable)"
+    if "template" in normalized and "event locked" in normalized and "not available" in normalized:
+        return "ECG template unavailable (event-locked EEG unavailable)"
+    if "reaggregation" in normalized:
+        return "ECG-prone channel reaggregation unavailable"
+    if "cannot support event centered masking" in normalized or "strict common support" in normalized:
+        return "1 Hz mask structurally incompatible"
+    if "declared ecg only dataset policy does not allow ppg fallback controls" in normalized:
+        return "PPG modality unavailable"
+    if "ppg events are not valid substitutes for ecg r peaks" in normalized:
+        return "PPG cannot substitute for ECG-required control"
+    if "declared ppg but no ppg source control available" in normalized:
+        return "declared PPG but no PPG source/control available"
     if (
-        "ppg_only" in text
-        or "no_ecg" in text
-        or ("ecg" in text and ("unavailable" in text or "not available" in text))
+        "cannot support event-centered masking" in raw_text
+        or "cannot support event_centered_masking" in raw_text
+        or "strict_common_support" in raw_text
     ):
-        return "ECG unavailable"
-    if "channel" in text or "reaggreg" in text:
-        return "channel reaggregation unavailable"
-    if "covariate" in text or "beat_count" in text:
+        return "1 Hz mask structurally incompatible"
+    if "insufficient common support" in normalized or normalized == "insufficient overlap after masking":
+        return "insufficient support"
+    if "support" in normalized or "masking" in normalized or "common support" in normalized:
+        return "insufficient support"
+    if "ppg" in normalized and "unavailable" in normalized:
+        return "PPG modality unavailable"
+    if "control absent from upstream observation table" in normalized:
+        return "declared PPG but no PPG source/control available"
+    if "covariate" in normalized or "beat count" in normalized:
         return "covariates unavailable"
     return "not computable"
 
@@ -852,6 +883,9 @@ def _summarize_control(
             "n_sign_changes": 0,
             "n_observations": 0,
             "n_baseline_eligible": baseline_eligible,
+            "n_control_computable": 0,
+            "n_paired_complete_case": 0,
+            "composition_differs_from_baseline": bool(baseline_eligible > 0),
             "n_biological_participants": 0,
             "denominator_label": f"0/{baseline_eligible}",
             "analysis_role": "cardiac_control",
@@ -921,6 +955,9 @@ def _summarize_control(
         "n_sign_changes": n_sign_changes,
         "n_observations": n_obs,
         "n_baseline_eligible": baseline_eligible,
+        "n_control_computable": n_obs,
+        "n_paired_complete_case": n_obs,
+        "composition_differs_from_baseline": bool(n_obs != baseline_eligible),
         "n_biological_participants": unique_participants,
         "denominator_label": f"{n_obs}/{baseline_eligible}",
         "analysis_role": ("primary_reference" if control == CONTROL_BASELINE else "cardiac_control"),
@@ -1084,6 +1121,9 @@ def compute_panel_d_cardiac_controls(
             "n_baseline_eligible": (
                 "baseline-eligible observation × band rows for the locked D240 absolute_log10 ZLPI"
             ),
+            "n_control_computable": "observation × band rows with computable control endpoint",
+            "n_paired_complete_case": "paired complete-case rows used for baseline vs control delta",
+            "composition_differs_from_baseline": "true when paired complete-case N differs from baseline eligible N",
             "n_biological_participants": "unique biological participants in the paired summary",
             "denominator_label": "n_observations / n_baseline_eligible",
         },
@@ -1189,6 +1229,7 @@ def compute_panel_d_from_observation_controls(
             item["eligibility"] = "computed" if _as_bool(item.get("computable")) else "not_computable"
         if "exclusion_reason" not in item:
             item["exclusion_reason"] = _as_str(item.get("not_computable_reason"))
+        item.setdefault("reason_code", _as_str(item.get("reason_code")))
         obs.append(item)
 
     present_controls = {
@@ -1236,7 +1277,24 @@ def compute_panel_d_from_observation_controls(
         CONTROL_RPEAK_MASK: "Cardiac-event mask",
     }
 
-    def _empty_summary(control: str, reason: str) -> dict[str, object]:
+    declared_modalities: set[str] = set()
+    for row in dataset_qc_rows:
+        declared = _as_str(row.get("protocol_declared_cardiac_modalities")).casefold()
+        if "ecg" in declared:
+            declared_modalities.add("ecg")
+        if "ppg" in declared:
+            declared_modalities.add("ppg")
+
+    def _absent_control_reason(control: str) -> tuple[str, str]:
+        if control in {CONTROL_PPG_MASK, CONTROL_PPG_TEMPLATE} and declared_modalities == {"ecg"}:
+            return UNSUPPORTED_CONTROL_FOR_MODALITY, "declared ECG-only dataset policy does not allow PPG fallback controls"
+        if control in {CONTROL_PPG_MASK, CONTROL_PPG_TEMPLATE} and "ppg" in declared_modalities:
+            return "declared_ppg_but_no_ppg_source_control_available", "declared PPG but no PPG source/control available in upstream observation table"
+        if control in {CONTROL_ECG_TEMPLATE, CONTROL_ECG_CHANNELS} and declared_modalities == {"ppg"}:
+            return UNSUPPORTED_CONTROL_FOR_MODALITY, "declared PPG-only dataset policy does not allow ECG-only controls"
+        return ARTIFACT_CONTROL_NOT_AVAILABLE, "control absent from upstream observation table"
+
+    def _empty_summary(control: str, reason_code: str, reason: str) -> dict[str, object]:
         return {
             "control": control,
             "display_label": label_map.get(control, control),
@@ -1258,27 +1316,34 @@ def compute_panel_d_from_observation_controls(
             "n_sign_changes": 0,
             "n_observations": 0,
             "n_baseline_eligible": n_baseline_eligible,
+            "n_control_computable": 0,
+            "n_paired_complete_case": 0,
+            "composition_differs_from_baseline": bool(n_baseline_eligible > 0),
             "n_biological_participants": 0,
             "denominator_label": f"0/{n_baseline_eligible}",
             "analysis_role": ("primary_reference" if control == CONTROL_BASELINE else "cardiac_control"),
             "computability_status": "not_computable",
             "computability_reason": reason,
-            "short_reason_code": short_not_computable_reason_code(reason),
+            "short_reason_code": short_not_computable_reason_code(reason_code or reason),
         }
 
     summaries: list[dict[str, object]] = []
     for control in ordered_controls:
         members = [row for row in obs if _as_str(row.get("control_type")) == control]
         if not members and control != CONTROL_BASELINE:
+            absent_code, absent_reason = _absent_control_reason(control)
             summaries.append(
                 _empty_summary(
                     control,
-                    "control_absent_from_upstream_observation_table",
+                    absent_code,
+                    absent_reason,
                 )
             )
             continue
         pairs: list[tuple[float, float, str]] = []
+        n_control_computable = 0
         computability_reason = ""
+        computability_reason_code = ""
         for row in members:
             key = (
                 _as_str(row.get("dataset_id")).casefold(),
@@ -1295,13 +1360,19 @@ def compute_panel_d_from_observation_controls(
             pid = _as_str(row.get("participant_id"))
             if math.isfinite(base) and math.isfinite(ctl) and _as_bool(row.get("computable", True)):
                 pairs.append((base, ctl, pid))
+                n_control_computable += 1
             if not _as_bool(row.get("computable")) and not computability_reason:
                 computability_reason = _as_str(row.get("not_computable_reason"))
+                computability_reason_code = _as_str(
+                    row.get("reason_code"),
+                    map_exclusion_to_reason_code(computability_reason),
+                )
         if not pairs:
             summaries.append(
                 _empty_summary(
                     control,
-                    computability_reason or "no_matched_computable_observations",
+                    computability_reason_code or ARTIFACT_CONTROL_NOT_AVAILABLE,
+                    computability_reason or "no matched computable observations",
                 )
             )
             continue
@@ -1361,6 +1432,9 @@ def compute_panel_d_from_observation_controls(
                 "n_sign_changes": n_sign_changes,
                 "n_observations": n_obs,
                 "n_baseline_eligible": n_baseline_eligible,
+                "n_control_computable": n_control_computable,
+                "n_paired_complete_case": n_obs,
+                "composition_differs_from_baseline": bool(n_obs != n_baseline_eligible),
                 "n_biological_participants": len({p[2] for p in pairs if p[2]}),
                 "denominator_label": f"{n_obs}/{n_baseline_eligible}",
                 "analysis_role": ("primary_reference" if control == CONTROL_BASELINE else "cardiac_control"),
@@ -1382,6 +1456,9 @@ def compute_panel_d_from_observation_controls(
             "n_baseline_eligible": (
                 "baseline-eligible observation × band rows for the locked D240 absolute_log10 ZLPI"
             ),
+            "n_control_computable": "observation × band rows with computable control endpoint",
+            "n_paired_complete_case": "paired complete-case rows used for baseline vs control delta",
+            "composition_differs_from_baseline": "true when paired complete-case N differs from baseline eligible N",
             "n_biological_participants": "unique biological participants in the paired summary",
             "denominator_label": "n_observations / n_baseline_eligible",
         },

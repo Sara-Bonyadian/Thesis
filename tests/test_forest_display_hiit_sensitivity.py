@@ -296,6 +296,80 @@ class HiitSensitivityForestDisplayTests(unittest.TestCase):
             caption2 = (out2 / "figure2_caption.txt").read_text(encoding="utf-8")
             self.assertIn("excluded from the pooled random-effects", caption2)
 
+    def test_singleton_or_incomplete_meta_does_not_emit_pooled_row(self) -> None:
+        effects = [
+            {
+                "dataset_id": "ds003838",
+                "contrast_id": "rest__memory",
+                "duration_s": 240,
+                "endpoint_name": ENDPOINT_ZLPI,
+                "band": "alpha",
+                "power_representation": PRIMARY_REPRESENTATION,
+                "is_primary_analysis": True,
+                "n_pairs": 4,
+                "effect_mean": -0.20,
+                "ci_low": -0.30,
+                "ci_high": -0.10,
+                "enters_meta": True,
+            }
+        ]
+        meta = [
+            {
+                "endpoint_name": ENDPOINT_ZLPI,
+                "duration_s": 240,
+                "band": "alpha",
+                "power_representation": PRIMARY_REPRESENTATION,
+                "is_primary_analysis": True,
+                "analysis_status": "skipped_insufficient_datasets",
+                "pooled_effect": -0.20,
+                "ci_low": -0.30,
+                "ci_high": -0.10,
+                "prediction_low": "",
+                "prediction_high": "",
+                "n_datasets": 1,
+            }
+        ]
+
+        def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+            import csv
+
+            if not rows:
+                path.write_text("dataset_id\n", encoding="utf-8")
+                return
+            fields = list(rows[0].keys())
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_csv(root / "dataset_effects.csv", effects)
+            _write_csv(root / "meta_analysis_results.csv", meta)
+            _write_csv(root / "paired_contrasts.csv", [])
+            _write_csv(root / "protocol_audit.csv", [])
+            render_figure2(
+                {
+                    "dataset_effects": root / "dataset_effects.csv",
+                    "meta_analysis": root / "meta_analysis_results.csv",
+                    "paired_contrasts": root / "paired_contrasts.csv",
+                    "protocol_audit": root / "protocol_audit.csv",
+                    "curves_d240": None,
+                    "endpoints_d240": None,
+                    "subject_level": None,
+                    "null_summary": None,
+                    "peak_params": None,
+                    "peak_equivalence": None,
+                    "mixed_model": None,
+                },
+                root / "fig2",
+            )
+            rows = read_csv_rows(
+                root / "fig2" / "source_data" / "figure2_panel_c_alpha_meta_forest.csv"
+            )
+            self.assertTrue(any(r.get("row_type") == ROW_TYPE_PRIMARY for r in rows))
+            self.assertFalse(any(r.get("row_type") == ROW_TYPE_POOLED for r in rows))
+
 
 if __name__ == "__main__":
     unittest.main()

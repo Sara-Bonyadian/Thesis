@@ -163,10 +163,11 @@ class TestCardiacControlsUpstream(unittest.TestCase):
                 c3_dir=c3,
                 output_dir=out,
             )
-            ppg_rows = [r for r in result.observation_rows if r["control_type"] == CONTROL_PPG_MASK and r["band"] == "theta"]
-            self.assertTrue(ppg_rows)
-            self.assertFalse(bool(ppg_rows[0]["computable"]))
-            self.assertIn("not valid substitutes", str(ppg_rows[0]["not_computable_reason"]))
+            ecg_rows = [r for r in result.observation_rows if r["control_type"] == CONTROL_ECG_MASK and r["band"] == "theta"]
+            self.assertTrue(ecg_rows)
+            self.assertFalse(bool(ecg_rows[0]["computable"]))
+            self.assertEqual(str(ecg_rows[0].get("reason_code", "")), "unsupported_control_for_modality")
+            self.assertIn("forbids PPG fallback", str(ecg_rows[0]["not_computable_reason"]))
 
     def test_ppg_event_mask_1hz_hits_integer_second_without_rounding(self) -> None:
         rows = [{"time_s": float(t), "theta_absolute_log10_power_z": 1.0} for t in range(10)]

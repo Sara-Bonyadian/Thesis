@@ -6,12 +6,19 @@ only for valid within-subject pairings. ZLPI, MWPI, and SWPI stay separate.
 
 Peak shape / timing fields
 --------------------------
-When ``has_identifiable_peak`` is False, ``peak_center_mu_s``, ``sigma_s``, and
-``fwhm_s`` are intentionally left empty (NaN / blank in CSV). Downstream stages
+When ``has_identifiable_peak`` is False, ``peak_height_A``, ``peak_center_mu_s``,
+``sigma_s``, and ``fwhm_s`` are intentionally left empty (NaN / blank in CSV).
+Downstream stages
 must not treat those blanks as missing-data errors; use
-``has_identifiable_peak`` / ``peak_exclusion_reason`` instead. Other fit
-diagnostics (e.g. ``peak_height_A``, ``baseline_C``) may still be present when
-the optimizer converged without an identifiable positive peak.
+``has_identifiable_peak`` / ``peak_exclusion_reason`` instead. Baseline
+diagnostics (e.g. ``baseline_C``) may still be present when the optimizer
+converged without an identifiable positive peak **on D180/D240**.
+D60/D120 never export Option C ``A``/``μ``/``FWHM``; those fields stay blank
+with ``peak_exclusion_reason=option_c_peak_requires_d180_d240``.
+
+Participant ``r0`` is ``tanh`` of the run-averaged Fisher-z ``z0``, not the
+mean of Pearson ``r0``. Flank means are copied from C3 and averaged in
+Fisher-z space.
 """
 
 from __future__ import annotations
@@ -24,8 +31,12 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from ..datasets import CanonicalObservation
+from .duration_contracts import STANDARD_ZLPI_DURATIONS_S
 from .endpoints import METRICS_TEMPLATE
-from .peak_model import PARAMS_FILENAME
+from .peak_model import (
+    EXCLUSION_OPTION_C_NOT_APPLICABLE,
+    PARAMS_FILENAME,
+)
 from .protocol_audit import (
     ContrastSpec,
     ProtocolSpec,
@@ -93,6 +104,9 @@ SUBJECT_LEVEL_FIELDS = (
     "local_prominence",
     "r0",
     "z0",
+    "negative_flank_mean_z",
+    "positive_flank_mean_z",
+    "combined_flank_mean_z",
     "n_common_support",
     "peak_converged",
     "has_identifiable_peak",
@@ -223,6 +237,16 @@ def _mean(values: Sequence[float]) -> float:
     return float(sum(finite) / len(finite))
 
 
+def _tanh(z: float) -> float:
+    if not math.isfinite(float(z)):
+        return float("nan")
+    return math.tanh(float(z))
+
+
+def _option_c_duration(duration_s: object) -> bool:
+    return _as_int(duration_s) in STANDARD_ZLPI_DURATIONS_S
+
+
 def _semicolon_join(values: Sequence[str]) -> str:
     return ";".join(sorted({v for v in values if v}))
 
@@ -288,17 +312,39 @@ def normalize_keys(row: Mapping[str, object]) -> dict[str, str]:
     # Prefer a clean subject_id as the legacy analysis identity. When subject_id
     # embeds BIDS ses/run tokens (legacy exploratory strings), fall back to
     # observation-id parsing so participant stays biological (e.g. ``ab4``).
+    # Session-qualified subjects (HIIT ``01_ph``) are not already-normalized
+    # participant IDs — leave participant_id unset so protocol parsing yields
+    # the biological id and session separately.
     subject_embeds_bids = (
         "-ses-" in subject_id
         or "_ses-" in subject_id
         or "-run-" in subject_id
         or "_run-" in subject_id
     )
-    participant_hint = (
+    session_qualified_subject = False
+    if (
         subject_id
-        if subject_id and not subject_embeds_bids
-        else _participant_from_observation_id(dataset_id, observation_id)
-    ) or subject_id or _participant_from_observation_id(dataset_id, observation_id)
+        and session_label
+        and not subject_embeds_bids
+        and subject_id.endswith("_" + session_label)
+    ):
+        stem = subject_id[: -(len(session_label) + 1)]
+        # HIIT ``01_ph``: one token plus session suffix. Multi-token subjects
+        # such as mindfulness ``mbd-01_part1_step1`` stay as the analysis
+        # identity until the pending pairing-id fix lands.
+        session_qualified_subject = bool(stem) and "_" not in stem
+    if subject_embeds_bids:
+        participant_hint = _participant_from_observation_id(
+            dataset_id, observation_id
+        ) or None
+    elif session_qualified_subject:
+        participant_hint = None
+    elif subject_id:
+        participant_hint = subject_id
+    else:
+        participant_hint = _participant_from_observation_id(
+            dataset_id, observation_id
+        ) or None
     obs = CanonicalObservation(
         dataset_id=dataset_id or "unknown",
         observation_id=observation_id or "unknown",
@@ -363,25 +409,51 @@ def combine_endpoint_and_peak_rows(
         keys = normalize_keys(endpoint)
         peak = peaks_by_key.get(_join_key(endpoint), {})
         duration_s = _as_int(endpoint.get("duration_s"))
-        has_identifiable_peak = (
-            _as_bool(peak.get("has_identifiable_peak")) if peak else False
+        option_c = _option_c_duration(duration_s)
+        peak_exclusion = (
+            _as_str(peak.get("exclusion_reason")) if peak else "missing_peak_fit"
         )
-        # Shape/timing parameters are reportable only for identifiable peaks.
-        peak_center = (
-            _as_float(peak.get("peak_center_mu_s"))
-            if peak and has_identifiable_peak
-            else float("nan")
-        )
-        sigma_s = (
-            _as_float(peak.get("sigma_s"))
-            if peak and has_identifiable_peak
-            else float("nan")
-        )
-        fwhm_s = (
-            _as_float(peak.get("fwhm_s"))
-            if peak and has_identifiable_peak
-            else float("nan")
-        )
+        if not option_c:
+            if not peak_exclusion or peak_exclusion == "missing_peak_fit":
+                peak_exclusion = EXCLUSION_OPTION_C_NOT_APPLICABLE
+            has_identifiable_peak = False
+            peak_converged = False
+            report_timing = False
+            baseline_c = float("nan")
+            peak_height_a = float("nan")
+            peak_center = float("nan")
+            sigma_s = float("nan")
+            fwhm_s = float("nan")
+        else:
+            has_identifiable_peak = (
+                _as_bool(peak.get("has_identifiable_peak")) if peak else False
+            )
+            peak_converged = _as_bool(peak.get("converged")) if peak else False
+            report_timing = (
+                _as_bool(peak.get("report_timing_shift")) if peak else False
+            )
+            baseline_c = _as_float(peak.get("baseline_C")) if peak else float("nan")
+            peak_height_a = (
+                _as_float(peak.get("peak_height_A"))
+                if peak and has_identifiable_peak
+                else float("nan")
+            )
+            # Shape/timing parameters are reportable only for identifiable peaks.
+            peak_center = (
+                _as_float(peak.get("peak_center_mu_s"))
+                if peak and has_identifiable_peak
+                else float("nan")
+            )
+            sigma_s = (
+                _as_float(peak.get("sigma_s"))
+                if peak and has_identifiable_peak
+                else float("nan")
+            )
+            fwhm_s = (
+                _as_float(peak.get("fwhm_s"))
+                if peak and has_identifiable_peak
+                else float("nan")
+            )
         combined.append(
             {
                 **keys,
@@ -409,22 +481,25 @@ def combine_endpoint_and_peak_rows(
                 "local_prominence": _as_float(endpoint.get("local_prominence")),
                 "r0": _as_float(endpoint.get("r0")),
                 "z0": _as_float(endpoint.get("z0")),
+                "negative_flank_mean_z": _as_float(
+                    endpoint.get("negative_flank_mean_z")
+                ),
+                "positive_flank_mean_z": _as_float(
+                    endpoint.get("positive_flank_mean_z")
+                ),
+                "combined_flank_mean_z": _as_float(
+                    endpoint.get("combined_flank_mean_z")
+                ),
                 "n_common_support": _as_float(endpoint.get("n_common_support")),
-                "peak_converged": _as_bool(peak.get("converged")) if peak else False,
+                "peak_converged": peak_converged,
                 "has_identifiable_peak": has_identifiable_peak,
-                "report_timing_shift": (
-                    _as_bool(peak.get("report_timing_shift")) if peak else False
-                ),
-                "baseline_C": _as_float(peak.get("baseline_C")) if peak else float("nan"),
-                "peak_height_A": (
-                    _as_float(peak.get("peak_height_A")) if peak else float("nan")
-                ),
+                "report_timing_shift": report_timing,
+                "baseline_C": baseline_c,
+                "peak_height_A": peak_height_a,
                 "peak_center_mu_s": peak_center,
                 "sigma_s": sigma_s,
                 "fwhm_s": fwhm_s,
-                "peak_exclusion_reason": (
-                    _as_str(peak.get("exclusion_reason")) if peak else "missing_peak_fit"
-                ),
+                "peak_exclusion_reason": peak_exclusion,
             }
         )
     return combined
@@ -455,6 +530,7 @@ def build_subject_level_metrics(
 
         first = members[0]
         has_identifiable_peak = all(bool(m["has_identifiable_peak"]) for m in members)
+        z0_mean = _mean([float(m["z0"]) for m in endpoint_source])
         subject_rows.append(
             {
                 "dataset_id": first["dataset_id"],
@@ -492,8 +568,17 @@ def build_subject_level_metrics(
                 "local_prominence": _mean(
                     [float(m["local_prominence"]) for m in endpoint_source]
                 ),
-                "r0": _mean([float(m["r0"]) for m in endpoint_source]),
-                "z0": _mean([float(m["z0"]) for m in endpoint_source]),
+                "z0": z0_mean,
+                "r0": _tanh(z0_mean),
+                "negative_flank_mean_z": _mean(
+                    [float(m["negative_flank_mean_z"]) for m in endpoint_source]
+                ),
+                "positive_flank_mean_z": _mean(
+                    [float(m["positive_flank_mean_z"]) for m in endpoint_source]
+                ),
+                "combined_flank_mean_z": _mean(
+                    [float(m["combined_flank_mean_z"]) for m in endpoint_source]
+                ),
                 "n_common_support": _mean(
                     [float(m["n_common_support"]) for m in endpoint_source]
                 ),
@@ -503,8 +588,10 @@ def build_subject_level_metrics(
                     bool(m["report_timing_shift"]) for m in members
                 ),
                 "baseline_C": _mean([float(m["baseline_C"]) for m in peak_source]),
-                "peak_height_A": _mean(
-                    [float(m["peak_height_A"]) for m in peak_source]
+                "peak_height_A": (
+                    _mean([float(m["peak_height_A"]) for m in peak_members])
+                    if has_identifiable_peak and peak_members
+                    else float("nan")
                 ),
                 # Blank when any run lacks an identifiable peak (not missing data).
                 "peak_center_mu_s": (

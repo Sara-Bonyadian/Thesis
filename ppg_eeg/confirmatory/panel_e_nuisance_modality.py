@@ -29,7 +29,12 @@ from matplotlib.gridspec import GridSpec
 
 from .duration_contracts import ENDPOINT_ZLPI, EXPECTED_PRIMARY_DURATION_S
 from .paired_delta_inference import DEFAULT_CLUSTER_BOOTSTRAP_DRAWS
-from .reason_codes import STRUCTURED_NC_FIELDS, with_structured_nc_fields
+from .reason_codes import (
+    ARTIFACT_CONTROL_NOT_AVAILABLE,
+    EXCLUDED_BY_MANUSCRIPT_DESIGN,
+    STRUCTURED_NC_FIELDS,
+    with_structured_nc_fields,
+)
 
 PANEL_E_BAND = "alpha"
 PANEL_E_DURATION_S = int(EXPECTED_PRIMARY_DURATION_S)
@@ -88,9 +93,9 @@ SPEC_SEED_OFFSET: dict[str, int] = {
 
 SPEC_DISPLAY_LABELS: dict[str, str] = {
     "baseline": "Baseline",
-    "delta_mean_hr": "Mean HR change",
-    "delta_broadband_power_ex_alpha": "Broadband change, excluding alpha",
-    "delta_hr_broadband_ex_alpha": "HR + broadband change, excluding alpha",
+    "delta_mean_hr": "+ HR",
+    "delta_broadband_power_ex_alpha": "+ Broadband ex-α",
+    "delta_hr_broadband_ex_alpha": "+ HR + Broadband ex-α",
     "delta_broadband_power": "Broadband change, including alpha (sensitivity)",
     "delta_hr_broadband": "HR + broadband change, including alpha (sensitivity)",
     "obs_baseline": "Obs-level: state (unadjusted)",
@@ -189,6 +194,30 @@ BROADBAND_DEFINITION = {
 }
 
 
+# Candidate derivative column names probed before declaring a nuisance available.
+NUISANCE_DERIVATIVE_PROBE: dict[str, tuple[str, ...]] = {
+    "motion": ("motion", "motion_rms", "accelerometer", "motion_available"),
+    "eog": ("eog", "veog", "heog", "eog_available", "ocular_artifact"),
+    "emg": ("emg", "emg_available", "muscle_artifact"),
+    "bad_window_rate": (
+        "bad_window_rate",
+        "rejected_window_fraction",
+        "artifact_window_fraction",
+    ),
+    "respiration": ("respiration", "resp", "resp_rate", "respiration_available"),
+}
+
+PLANNED_NUISANCE_LABELS: dict[str, str] = {
+    "motion": "Motion",
+    "eog": "EOG",
+    "emg": "EMG",
+    "bad_window_rate": "Bad-window rate",
+    "respiration": "Respiration",
+    "eye_state": "Eye state",
+    "modality_ecg_ppg": "ECG/PPG modality",
+}
+
+
 @dataclass(frozen=True)
 class PanelEResult:
     observation_rows: tuple[dict[str, object], ...]
@@ -197,7 +226,7 @@ class PanelEResult:
     observation_level_rows: tuple[dict[str, object], ...]
     diagnostic_rows: tuple[dict[str, object], ...]
     missingness_rows: tuple[dict[str, object], ...]
-    audit_old_vs_new_rows: tuple[dict[str, object], ...]
+    availability_rows: tuple[dict[str, object], ...]
     nuisance_state_summary_rows: tuple[dict[str, object], ...]
     metadata: dict[str, object]
 
@@ -246,7 +275,7 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, object]], fields: Sequenc
         for row in rows:
             row = with_structured_nc_fields(
                 row,
-                stage="C7",
+                stage="C6",
                 specification_id=str(row.get("specification_id") or path.stem),
             )
             payload: dict[str, object] = {}
@@ -556,6 +585,107 @@ def assess_modality_identifiability(rows: Sequence[Mapping[str, object]]) -> dic
         "n_ecg": sum(1 for r in rows if _as_str(r.get("cardiac_signal_type")).casefold() == "ecg"),
         "n_ppg": sum(1 for r in rows if _as_str(r.get("cardiac_signal_type")).casefold() == "ppg"),
     }
+
+
+def _column_names(rows: Sequence[Mapping[str, object]]) -> set[str]:
+    names: set[str] = set()
+    for row in rows:
+        names.update(_as_str(k).casefold() for k in row.keys())
+    return names
+
+
+def _has_finite_values(rows: Sequence[Mapping[str, object]], column: str) -> bool:
+    key = column.casefold()
+    for row in rows:
+        for field, value in row.items():
+            if _as_str(field).casefold() != key:
+                continue
+            if math.isfinite(_as_float(value)):
+                return True
+    return False
+
+
+def probe_planned_nuisance_availability(
+    *,
+    aligned_rows: Sequence[Mapping[str, object]],
+    subject_rows: Sequence[Mapping[str, object]],
+    contrast_rows: Sequence[Mapping[str, object]],
+    modality_info: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Return availability / not-identifiable rows for planned Panel E nuisances."""
+    columns = _column_names(aligned_rows) | _column_names(subject_rows)
+    out: list[dict[str, object]] = []
+
+    for nuisance_id, candidates in NUISANCE_DERIVATIVE_PROBE.items():
+        present_cols = [c for c in candidates if c.casefold() in columns]
+        finite_cols = [c for c in present_cols if _has_finite_values(aligned_rows + list(subject_rows), c)]
+        if finite_cols:
+            status = STATUS_COMPUTED
+            reason_code = ""
+            reason = f"finite values present in {', '.join(finite_cols)}"
+            available = True
+        else:
+            status = STATUS_NOT_AVAILABLE
+            reason_code = ARTIFACT_CONTROL_NOT_AVAILABLE
+            reason = (
+                "No retained observation-level measure in aligned/subject derivatives"
+                if not present_cols
+                else f"columns present ({', '.join(present_cols)}) but no finite values"
+            )
+            available = False
+        out.append(
+            {
+                "planned_adjustment": PLANNED_NUISANCE_LABELS[nuisance_id],
+                "nuisance_id": nuisance_id,
+                "status": status if available else "Not available",
+                "computability_status": status,
+                "available": available,
+                "reason_code": reason_code,
+                "reason": reason,
+                "definition": "probe:" + ",".join(candidates),
+                "n_finite": len(finite_cols),
+                "n_total": len(contrast_rows),
+            }
+        )
+
+    out.append(
+        {
+            "planned_adjustment": PLANNED_NUISANCE_LABELS["eye_state"],
+            "nuisance_id": "eye_state",
+            "status": "Not identifiable",
+            "computability_status": STATUS_NOT_IDENTIFIABLE,
+            "available": False,
+            "reason_code": EXCLUDED_BY_MANUSCRIPT_DESIGN,
+            "reason": "Fixed by low-demand versus high-demand protocol condition",
+            "definition": "not modeled when structurally confounded with state contrast",
+            "n_finite": 0,
+            "n_total": len(contrast_rows),
+        }
+    )
+
+    modality_identifiable = bool(modality_info.get("identifiable"))
+    out.append(
+        {
+            "planned_adjustment": PLANNED_NUISANCE_LABELS["modality_ecg_ppg"],
+            "nuisance_id": "modality_ecg_ppg",
+            "status": "Not identifiable" if not modality_identifiable else STATUS_COMPUTED,
+            "computability_status": (
+                STATUS_COMPUTED if modality_identifiable else STATUS_NOT_IDENTIFIABLE
+            ),
+            "available": modality_identifiable,
+            "reason_code": (
+                ""
+                if modality_identifiable
+                else EXCLUDED_BY_MANUSCRIPT_DESIGN
+            ),
+            "reason": _as_str(modality_info.get("reason")),
+            "definition": "within-dataset ECG/PPG variation required for modality coefficient",
+            "n_finite": int(modality_info.get("n_ecg", 0) or 0)
+            + int(modality_info.get("n_ppg", 0) or 0),
+            "n_total": len(contrast_rows),
+        }
+    )
+    return out
 
 
 def _design_matrix_uncentered(
@@ -948,6 +1078,7 @@ def _spec_row(
     baseline_fit: Mapping[str, object] | None,
     plot_order: int,
     analysis_family: str,
+    n_baseline_eligible: int,
 ) -> dict[str, object]:
     status = STATUS_COMPUTED if fit.get("ok") else STATUS_NOT_COMPUTABLE
     if not fit.get("ok") and "rank" in _as_str(fit.get("reason")).casefold():
@@ -972,6 +1103,8 @@ def _spec_row(
     )
     if status != STATUS_COMPUTED:
         est = float("nan")
+    n_usable = int(fit.get("n_observations") or 0)
+    composition_differs = bool(n_baseline_eligible > 0 and n_usable != n_baseline_eligible)
     return {
         "specification_id": spec_id,
         "display_label": SPEC_DISPLAY_LABELS.get(spec_id, spec_id),
@@ -992,10 +1125,13 @@ def _spec_row(
         "ci_upper": _as_float(fit.get("ci_upper")) if status == STATUS_COMPUTED else float("nan"),
         "standard_error": _as_float(fit.get("standard_error")) if status == STATUS_COMPUTED else float("nan"),
         "p_value": _as_float(fit.get("p_value")) if status == STATUS_COMPUTED else float("nan"),
-        "n_observations": int(fit.get("n_observations") or 0),
+        "n_observations": n_usable,
+        "n_specification_usable": n_usable,
+        "n_baseline_eligible": int(n_baseline_eligible),
         "n_participants": int(fit.get("n_participants") or 0),
         "n_ecg_observations": int(fit.get("n_ecg") or 0),
         "n_ppg_observations": int(fit.get("n_ppg") or 0),
+        "composition_differs_from_baseline": composition_differs,
         **change_info,
         "direction_preserved": (
             "yes"
@@ -1167,19 +1303,27 @@ def compute_panel_e_nuisance_modality(
     peak_qc_rows: Sequence[Mapping[str, object]] = (),
     protocol_rows: Sequence[Mapping[str, object]] = (),
     endpoint_rows: Sequence[Mapping[str, object]] = (),
+    subject_rows: Sequence[Mapping[str, object]] = (),
     bootstrap_draws: int = BOOTSTRAP_DRAWS,
     bootstrap_seed: int = BOOTSTRAP_SEED,
 ) -> PanelEResult:
-    """Compute corrected Panel E paired Δ-nuisance robustness analysis."""
+    """Compute Panel E paired Δ-nuisance robustness (C6 upstream only)."""
     del bootstrap_draws
+    del protocol_rows
     contrast_rows = build_panel_e_contrast_rows(
         paired_rows=paired_rows,
         aligned_rows=aligned_rows,
         data_audit_rows=data_audit_rows,
         peak_qc_rows=peak_qc_rows,
-        protocol_rows=protocol_rows,
     )
     modality_info = assess_modality_identifiability(contrast_rows)
+
+    baseline_eligible_rows = [
+        r
+        for r in contrast_rows
+        if math.isfinite(_as_float(r.get("delta_endpoint_index")))
+    ]
+    n_baseline_eligible = len(baseline_eligible_rows)
 
     # Common sample: finite ΔZLPI and finite primary Δ-nuisances (HR + ex-alpha broadband).
     # Also require alpha-inclusive broadband finite so sensitivity specs share the same n.
@@ -1230,6 +1374,7 @@ def compute_panel_e_nuisance_modality(
             baseline_fit=base_fit,
             plot_order=order,
             analysis_family="paired_delta",
+            n_baseline_eligible=n_baseline_eligible,
         )
         specification_rows.append(row)
         common_sample_rows.append(dict(row))
@@ -1241,6 +1386,7 @@ def compute_panel_e_nuisance_modality(
             baseline_fit=base_fit,
             plot_order=order,
             analysis_family="paired_delta_sensitivity_circular",
+            n_baseline_eligible=n_baseline_eligible,
         )
         row["plotted"] = False
         row["circularity_warning"] = (
@@ -1279,109 +1425,78 @@ def compute_panel_e_nuisance_modality(
             baseline_fit=obs_base,
             plot_order=order,
             analysis_family="observation_level",
+            n_baseline_eligible=n_baseline_eligible,
         )
         row["plotted"] = False
         obs_level_out.append(row)
 
-    audit_rows = _audit_centered_identity(common_rows)
     nuisance_summaries = _nuisance_state_summaries(common_rows)
 
-    # Missingness / availability summary for planned variables.
-    missingness_rows = [
+    implemented_availability = [
         {
-            "variable": "delta_mean_hr",
+            "planned_adjustment": "Mean HR change",
+            "nuisance_id": "delta_mean_hr",
+            "status": STATUS_COMPUTED,
+            "computability_status": STATUS_COMPUTED,
             "available": True,
+            "reason_code": "",
+            "reason": "D240 segment mean hr_bpm from aligned features",
+            "definition": "mean_hr_tetris - mean_hr_rest (bpm)",
             "n_finite": sum(1 for r in contrast_rows if math.isfinite(_as_float(r.get("delta_mean_hr")))),
             "n_total": len(contrast_rows),
-            "definition": "mean_hr_tetris - mean_hr_rest (bpm); D240 segment means from hr_bpm",
         },
         {
-            "variable": "delta_broadband_power_ex_alpha",
+            "planned_adjustment": "Broadband change, excluding alpha",
+            "nuisance_id": "delta_broadband_power_ex_alpha",
+            "status": STATUS_COMPUTED,
+            "computability_status": STATUS_COMPUTED,
             "available": True,
+            "reason_code": "",
+            "reason": "theta+beta+low_gamma absolute_log10 power composite",
+            "definition": json.dumps(BROADBAND_DEFINITION["primary"]),
             "n_finite": sum(
                 1
                 for r in contrast_rows
                 if math.isfinite(_as_float(r.get("delta_broadband_power_ex_alpha")))
             ),
             "n_total": len(contrast_rows),
-            "definition": json.dumps(BROADBAND_DEFINITION["primary"]),
         },
         {
-            "variable": "delta_broadband_power",
+            "planned_adjustment": "Broadband change, including alpha (sensitivity)",
+            "nuisance_id": "delta_broadband_power",
+            "status": STATUS_COMPUTED,
+            "computability_status": STATUS_COMPUTED,
             "available": True,
+            "reason_code": "",
+            "reason": "sensitivity-only alpha-inclusive broadband composite",
+            "definition": json.dumps(BROADBAND_DEFINITION["alpha_inclusive_sensitivity"]),
             "n_finite": sum(
                 1 for r in contrast_rows if math.isfinite(_as_float(r.get("delta_broadband_power")))
             ),
             "n_total": len(contrast_rows),
-            "definition": json.dumps(BROADBAND_DEFINITION["alpha_inclusive_sensitivity"]),
-        },
-        {
-            "variable": "motion",
-            "available": False,
-            "n_finite": 0,
-            "n_total": len(contrast_rows),
-            "definition": "not retained",
-        },
-        {
-            "variable": "eog",
-            "available": False,
-            "n_finite": 0,
-            "n_total": len(contrast_rows),
-            "definition": "not retained",
-        },
-        {
-            "variable": "emg",
-            "available": False,
-            "n_finite": 0,
-            "n_total": len(contrast_rows),
-            "definition": "not retained",
-        },
-        {
-            "variable": "bad_window_rate",
-            "available": False,
-            "n_finite": 0,
-            "n_total": len(contrast_rows),
-            "definition": "not retained",
-        },
-        {
-            "variable": "respiration",
-            "available": False,
-            "n_finite": 0,
-            "n_total": len(contrast_rows),
-            "definition": "protocol-declared only",
-        },
-        {
-            "variable": "eye_state",
-            "available": False,
-            "n_finite": 0,
-            "n_total": len(contrast_rows),
-            "definition": "not identifiable: determined by low-/high-demand protocol condition",
-        },
-        {
-            "variable": "modality_ecg_ppg",
-            "available": False,
-            "n_finite": 0,
-            "n_total": len(contrast_rows),
-            "definition": modality_info.get("reason"),
         },
     ]
+    probed_availability = probe_planned_nuisance_availability(
+        aligned_rows=aligned_rows,
+        subject_rows=subject_rows,
+        contrast_rows=contrast_rows,
+        modality_info=modality_info,
+    )
+    availability_rows = implemented_availability + probed_availability
 
     diagnostic_rows = [
         {
-            "diagnostic_type": "centered_covariate_identity",
-            "raw_mean_delta_zlpi": audit_rows[0]["raw_mean_delta_zlpi"] if audit_rows else float("nan"),
-            "max_abs_old_intercept_minus_mean": max(
-                (_as_float(r.get("abs_old_intercept_minus_raw_mean")) for r in audit_rows),
-                default=float("nan"),
-            ),
-            "conclusion": (
-                "Previous zero Δβ values were algebraically guaranteed by centered "
-                "pair-average covariate OLS, not empirical coefficient stability."
-            ),
-        },
-        {
             "diagnostic_type": "modality_identifiability",
             **{k: modality_info.get(k) for k in ("identifiable", "reason", "signals_present", "n_ecg", "n_ppg")},
+        },
+        {
+            "diagnostic_type": "sample_composition",
+            "n_baseline_eligible": n_baseline_eligible,
+            "n_common_sample": len(common_rows),
+            "composition_differs_from_baseline": bool(
+                n_baseline_eligible > 0 and len(common_rows) != n_baseline_eligible
+            ),
+            "primary_specs_share_common_sample": True,
         },
         {
             "diagnostic_type": "broadband_definition_primary_ex_alpha",
@@ -1404,7 +1519,8 @@ def compute_panel_e_nuisance_modality(
     ]
 
     metadata = {
-        "schema_version": "figure3_panel_e_nuisance_modality_v2_1_ex_alpha_primary",
+        "schema_version": "figure3_panel_e_nuisance_modality_v3_c6_upstream",
+        "pipeline_stage": "C6",
         "title": PANEL_E_FIGURE_TITLE,
         "subtitle": PANEL_E_SUBTITLE,
         "stem": PANEL_E_STEM,
@@ -1430,6 +1546,7 @@ def compute_panel_e_nuisance_modality(
             "spec_seed_offsets": dict(SPEC_SEED_OFFSET),
         },
         "n_contrasts_available": len(contrast_rows),
+        "n_baseline_eligible": n_baseline_eligible,
         "n_contrasts_common_sample": len(common_rows),
         "n_participants_common_sample": len(
             {_as_str(r.get("participant_id")) for r in common_rows}
@@ -1442,24 +1559,14 @@ def compute_panel_e_nuisance_modality(
         "estimable_spec_order": list(ESTIMABLE_SPEC_ORDER),
         "sensitivity_spec_order": list(SENSITIVITY_SPEC_ORDER),
         "no_imputation_policy": "Non-finite values never replaced with zero; no proxies.",
-        "legacy_method_status": (
-            "pair-average + centered covariates retained only in "
-            "figure3_panel_e_nuisance_modality_audit_old_vs_new.csv; not used for manuscript conclusion"
-        ),
-        "algebraic_audit_conclusion": (
-            "Original zero Δβ values were a consequence of centered-covariate OLS algebra "
-            "(intercept identically equals unadjusted mean ΔZLPI), not an empirical stability finding."
-        ),
-        "hiit_robustness_scope": (  # deprecated key name; value is dataset-general
-            "A single-dataset run cannot support full nuisance/modality robustness claims "
-            "when most planned nuisance variables are unavailable and ECG/PPG modality has "
-            "no within-dataset variation. Multi-dataset execution is required to test "
-            "ECG-versus-PPG modality."
+        "c7_consumption_note": (
+            "C7 Figure 3E must load these C6 exports via load_panel_e_result_from_upstream "
+            "and must not refit nuisance models."
         ),
         "common_sample_note": (
             f"Common sample: {len(common_rows)} paired contrasts from "
             f"{len({_as_str(r.get('participant_id')) for r in common_rows})} participants; "
-            f"PPG {n_ppg}, ECG {n_ecg}"
+            f"PPG {n_ppg}, ECG {n_ecg}; baseline eligible {n_baseline_eligible}"
         ),
     }
 
@@ -1500,48 +1607,103 @@ def compute_panel_e_nuisance_modality(
         common_sample_rows=tuple(common_sample_rows),
         observation_level_rows=tuple(obs_level_out),
         diagnostic_rows=tuple(diagnostic_rows),
-        missingness_rows=tuple(missingness_rows),
-        audit_old_vs_new_rows=tuple(audit_rows),
+        missingness_rows=tuple(availability_rows),
+        availability_rows=tuple(availability_rows),
         nuisance_state_summary_rows=tuple(nuisance_summaries),
         metadata=metadata,
     )
 
 
-def write_panel_e_exports(result: PanelEResult, source_dir: Path) -> dict[str, Path]:
-    source_dir = Path(source_dir)
-    source_dir.mkdir(parents=True, exist_ok=True)
+def write_panel_e_upstream_exports(result: PanelEResult, output_dir: Path) -> dict[str, Path]:
+    """Write canonical C6 Panel E exports."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
 
-    def _dump(name: str, rows: Sequence[Mapping[str, object]]) -> Path:
-        path = source_dir / f"{PANEL_E_STEM}_{name}.csv"
-        fields = sorted({k for r in rows for k in r.keys()}) if rows else ["placeholder"]
-        _write_csv(path, rows, fields)
-        return path
+    def _infer_dataset_id() -> str:
+        row_groups = (
+            result.observation_rows,
+            result.specification_rows,
+            result.common_sample_rows,
+            result.observation_level_rows,
+            result.diagnostic_rows,
+            result.availability_rows,
+            result.nuisance_state_summary_rows,
+        )
+        found: set[str] = set()
+        for rows in row_groups:
+            for row in rows:
+                dataset_id = _as_str(row.get("dataset_id")).casefold()
+                if dataset_id:
+                    found.add(dataset_id)
+        if len(found) == 1:
+            return next(iter(found))
+        return _as_str(result.metadata.get("dataset_id")).casefold()
 
-    paths["observations"] = _dump("observation_level", result.observation_rows)
-    paths["specifications"] = _dump("specifications", result.specification_rows)
-    paths["common_sample"] = _dump("common_sample", result.common_sample_rows)
-    paths["observation_level_models"] = _dump(
-        "observation_level_models", result.observation_level_rows
+    inferred_dataset_id = _infer_dataset_id()
+
+    def _with_dataset_id(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            if inferred_dataset_id and not _as_str(item.get("dataset_id")):
+                item["dataset_id"] = inferred_dataset_id
+            out.append(item)
+        return out
+
+    def _dump(name: str, filename: str, rows: Sequence[Mapping[str, object]]) -> None:
+        path = output_dir / filename
+        stamped_rows = _with_dataset_id(rows)
+        fields = sorted({k for r in stamped_rows for k in r.keys()}) if stamped_rows else ["placeholder"]
+        _write_csv(path, stamped_rows, fields)
+        paths[name] = path
+
+    _dump("observations", f"{PANEL_E_STEM}_observation_level.csv", result.observation_rows)
+    _dump("specifications", f"{PANEL_E_STEM}_specifications.csv", result.specification_rows)
+    _dump("common_sample", f"{PANEL_E_STEM}_common_sample.csv", result.common_sample_rows)
+    _dump(
+        "observation_level_models",
+        f"{PANEL_E_STEM}_observation_level_models.csv",
+        result.observation_level_rows,
     )
-    paths["diagnostics"] = _dump("diagnostics", result.diagnostic_rows)
-    paths["missingness"] = _dump("missingness", result.missingness_rows)
-    paths["audit_old_vs_new"] = _dump("audit_old_vs_new", result.audit_old_vs_new_rows)
-    paths["nuisance_state_summary"] = _dump(
-        "nuisance_state_summary", result.nuisance_state_summary_rows
+    _dump("diagnostics", f"{PANEL_E_STEM}_diagnostics.csv", result.diagnostic_rows)
+    _dump("availability", f"{PANEL_E_STEM}_availability.csv", result.availability_rows)
+    _dump(
+        "nuisance_state_summary",
+        f"{PANEL_E_STEM}_nuisance_state_summary.csv",
+        result.nuisance_state_summary_rows,
     )
-    paths["metadata"] = source_dir / f"{PANEL_E_STEM}_metadata.json"
-    paths["metadata"].write_text(
-        json.dumps(result.metadata, indent=2, sort_keys=True, default=str) + "\n",
+    meta_path = output_dir / f"{PANEL_E_STEM}_metadata.json"
+    meta_payload = dict(result.metadata)
+    if inferred_dataset_id and not _as_str(meta_payload.get("dataset_id")):
+        meta_payload["dataset_id"] = inferred_dataset_id
+    meta_path.write_text(
+        json.dumps(meta_payload, indent=2, sort_keys=True, default=str) + "\n",
         encoding="utf-8",
     )
+    paths["metadata"] = meta_path
     return paths
+
+
+def write_panel_e_exports(result: PanelEResult, source_dir: Path) -> dict[str, Path]:
+    """Write C7 figure source_data copies from an upstream-loaded Panel E result."""
+    source_dir = Path(source_dir)
+    source_dir.mkdir(parents=True, exist_ok=True)
+    return write_panel_e_upstream_exports(result, source_dir)
 
 
 def panel_e_caption(result: PanelEResult) -> str:
     meta = result.metadata
     n_pairs = meta.get("n_contrasts_common_sample")
     n_part = meta.get("n_participants_common_sample")
+    contrast_ids = sorted(
+        {
+            _as_str(row.get("contrast_id"))
+            for row in result.observation_rows
+            if _as_str(row.get("contrast_id"))
+        }
+    )
+    n_contrasts = len(contrast_ids)
     lines = [
         PANEL_E_FIGURE_TITLE,
         "",
@@ -1553,19 +1715,59 @@ def panel_e_caption(result: PanelEResult) -> str:
         "coefficient is the OLS intercept (expected ΔZLPI at zero nuisance change) with "
         "participant-clustered bootstrap 95% CIs. Δβ uncertainty uses paired bootstrap "
         "coefficient differences. "
-        "Mean HR adjustment produces negligible coefficient change. "
+        "Across primary datasets, the adjusted ΔZLPI intercepts remained near zero and "
+        "their 95% confidence intervals included zero after mean-HR, broadband-ex-alpha, "
+        "and joint adjustment where computable. "
         "Broadband excluding alpha (theta/beta/low-gamma absolute log10 power) is the "
         "preferred power adjustment; alpha-inclusive broadband is sensitivity-only because "
         "it partially overlaps the alpha series entering ZLPI and is not an independent "
         "nuisance control. "
-        "Unavailable variables were not proxied or imputed. "
+        "Unavailable variables were not proxied or imputed; motion, EOG, EMG, bad-window "
+        "burden, and respiration were unavailable and therefore not tested. "
         "Eye state and ECG/PPG modality are non-identifiable when constant within the "
         "dataset; broader multi-modality datasets are required to assess ECG-versus-PPG "
         "robustness. "
         "Combinations of missing channels (for example EOG with eye state, or modality "
         "with other physiology) remain untestable for the same reasons.",
     ]
+    if n_contrasts > 1 and n_pairs is not None and n_part is not None:
+        lines.append(
+            f"Sample disclosure: {n_part} biological participants contribute {n_contrasts} "
+            f"paired contrasts ({n_pairs} paired-contrast observations); N reflects paired "
+            "observations, not independent participants."
+        )
     return "\n".join(lines) + "\n"
+
+
+def _panel_e_unavailable_table_rows(result: PanelEResult) -> list[dict[str, str]]:
+    planned_order = (
+        "Motion",
+        "EOG",
+        "EMG",
+        "Bad-window rate",
+        "Respiration",
+        "Eye state",
+        "ECG/PPG modality",
+    )
+    by_adjustment = {
+        _as_str(row.get("planned_adjustment")).casefold(): dict(row)
+        for row in result.availability_rows
+        if _as_str(row.get("planned_adjustment"))
+    }
+    out: list[dict[str, str]] = []
+    for label in planned_order:
+        row = by_adjustment.get(label.casefold(), {})
+        status_key = _as_str(row.get("computability_status") or row.get("status")).casefold()
+        status_text = status_key.replace("_", " ").title() if status_key else "Not available"
+        reason = _as_str(row.get("reason"), "No retained observation-level measure")
+        out.append(
+            {
+                "planned_adjustment": label,
+                "status": status_text,
+                "reason": reason,
+            }
+        )
+    return out
 
 
 def verify_panel_e_integrity(result: PanelEResult) -> list[str]:
@@ -1574,7 +1776,7 @@ def verify_panel_e_integrity(result: PanelEResult) -> list[str]:
     for row in plotted:
         if _as_str(row.get("endpoint_name")) != PANEL_E_ENDPOINT:
             failures.append("plotted row estimand mismatch")
-        if bool(row.get("predictors_centered")):
+        if _as_bool(row.get("predictors_centered")):
             failures.append(f"{row.get('specification_id')}: predictors unexpectedly centered")
         if row.get("computability_status") != STATUS_COMPUTED:
             failures.append(f"{row.get('specification_id')}: non-computed plotted")
@@ -1647,7 +1849,7 @@ def verify_panel_e_integrity(result: PanelEResult) -> list[str]:
                 continue
             if row.get("computability_status") != STATUS_COMPUTED:
                 continue
-            if bool(row.get("predictors_centered")) and abs(
+            if bool(_as_bool(row.get("predictors_centered"))) and abs(
                 _as_float(row.get("estimate")) - base_est
             ) < 1e-12:
                 failures.append(
@@ -1716,7 +1918,7 @@ def render_panel_e_figure(
     sample_identical = len(n_obs_set) == 1 and len(n_part_set) == 1
 
     _configure_publication_style()
-    fig = plt.figure(figsize=(14.4, 8.4), constrained_layout=False)
+    fig = plt.figure(figsize=(14.8, 8.8), constrained_layout=False)
     # Always attach Agg so layout tests / headless renders can call get_renderer().
     FigureCanvasAgg(fig)
     gs = GridSpec(
@@ -1725,12 +1927,12 @@ def render_panel_e_figure(
         figure=fig,
         height_ratios=[1.65, 1.0],
         width_ratios=[2.55, 1.35] if sample_identical else [2.3, 1.15, 1.05],
-        hspace=0.55,
-        wspace=0.22,
-        left=0.28,
+        hspace=0.52,
+        wspace=0.20,
+        left=0.24,
         right=0.985,
-        top=0.78,
-        bottom=0.05,
+        top=0.80,
+        bottom=0.06,
     )
     ax = fig.add_subplot(gs[0, 0])
     ax_delta = fig.add_subplot(gs[0, 1], sharey=ax)
@@ -1795,10 +1997,10 @@ def render_panel_e_figure(
                 transform=ax_info.get_yaxis_transform(),
             )
 
-    ax.axvline(0.0, color="#444444", ls="-", lw=1.2, zorder=1)
+    ax.axvline(0.0, color="#444444", ls="-", lw=1.35, zorder=1)
     if math.isfinite(baseline_est):
         ax.axvline(baseline_est, color=PALETTE["orange"], ls="--", lw=1.35, zorder=1)
-    ax_delta.axvline(0.0, color="#444444", ls="-", lw=1.15, zorder=1)
+    ax_delta.axvline(0.0, color="#444444", ls="-", lw=1.35, zorder=1)
 
     labels = [_as_str(r.get("display_label")) for r in ordered]
     ax.set_yticks(list(y_pos))
@@ -1849,12 +2051,12 @@ def render_panel_e_figure(
 
     ax.set_ylim(-0.55, n - 0.45)
     ax_delta.set_ylim(-0.55, n - 0.45)
-    ax.set_title("Adjusted estimate, 95% CI", fontsize=FS_TICK - 1, pad=8, loc="left")
-    ax_delta.set_title("Change from baseline, 95% CI", fontsize=FS_TICK - 1, pad=8, loc="left")
+    ax.set_title("Adjusted estimate (95% CI)", fontsize=FS_TICK, pad=8, loc="left")
+    ax_delta.set_title("Δ from baseline (95% CI)", fontsize=FS_TICK, pad=8, loc="left")
     ax.set_xlabel(
-        "Adjusted low–high demand ΔZLPI\nAlpha, Fisher z", fontsize=FS_AXIS - 3
+        "Adjusted ΔZLPI (effort − low-demand)\nAlpha, Fisher z", fontsize=FS_AXIS - 2
     )
-    ax_delta.set_xlabel("Δβ from baseline\nPaired-bootstrap 95% CI", fontsize=FS_AXIS - 3)
+    ax_delta.set_xlabel("Δβ from baseline\nPaired-bootstrap 95% CI", fontsize=FS_AXIS - 2)
     for a in (ax, ax_delta):
         a.grid(False)
         for yi in y_pos:
@@ -1882,14 +2084,14 @@ def render_panel_e_figure(
         bbox_to_anchor=(0.58, 0.845),
         ncol=4,
         frameon=False,
-        fontsize=FS_TICK - 2,
+        fontsize=FS_TICK - 1,
         handletextpad=0.4,
         columnspacing=1.2,
     )
 
-    fig.suptitle(PANEL_E_FIGURE_TITLE, fontsize=15, fontweight="bold", y=0.985)
-    fig.text(0.5, 0.945, PANEL_E_SUBTITLE, ha="center", va="top", fontsize=FS_TICK - 1, color="#555555")
-    fig.text(0.5, 0.905, "A. Estimable specifications", ha="center", va="top", fontsize=FS_TICK - 1, color="#333333")
+    fig.suptitle(PANEL_E_FIGURE_TITLE, fontsize=FS_AXIS + 4, fontweight="bold", y=0.986)
+    fig.text(0.5, 0.946, PANEL_E_SUBTITLE, ha="center", va="top", fontsize=FS_TICK, color="#555555")
+    fig.text(0.5, 0.906, "A. Estimable specifications", ha="center", va="top", fontsize=FS_TICK, color="#333333")
     sample_note = _as_str(
         result.metadata.get("common_sample_note"),
         (
@@ -1899,13 +2101,20 @@ def render_panel_e_figure(
             f"ECG {result.metadata.get('n_ecg')}"
         ),
     )
-    fig.text(0.5, 0.875, sample_note, ha="center", va="top", fontsize=FS_TICK - 2, color="#555555")
+    n_pairs_meta = int(result.metadata.get("n_contrasts_common_sample") or 0)
+    n_part_meta = int(result.metadata.get("n_participants_common_sample") or 0)
+    sample_note = (
+        f"{sample_note}. N disclosure: {n_part_meta} participants / "
+        f"{n_pairs_meta} paired-contrast observations."
+    )
+    fig.text(0.5, 0.875, sample_note, ha="center", va="top", fontsize=FS_TICK - 1, color="#555555")
 
     ax_table.set_axis_off()
-    ax_table.set_title("B. Planned but unavailable checks", loc="left", fontsize=FS_TICK, pad=14)
+    ax_table.set_title("B. Planned but unavailable checks", loc="left", fontsize=FS_TICK + 1, pad=14)
+    unavailable_rows = _panel_e_unavailable_table_rows(result)
     table_data = [
         [r["planned_adjustment"], r["status"], _wrap_table_text(r["reason"], width=58)]
-        for r in UNAVAILABLE_TABLE
+        for r in unavailable_rows
     ]
     table = ax_table.table(
         cellText=table_data,
@@ -1916,7 +2125,7 @@ def render_panel_e_figure(
         bbox=[0.02, 0.02, 0.96, 0.88],
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(FS_TICK - 2)
+    table.set_fontsize(FS_TICK - 1)
     for (row, col), cell in table.get_celld().items():
         cell.set_edgecolor("#DDDDDD")
         cell.PAD = 0.02
@@ -1956,9 +2165,8 @@ def render_panel_e_figure(
         note.write_text(
             "\n".join(
                 [
-                    "Panel E internal QC (v2.1 ex-alpha primary)",
-                    str(result.metadata.get("algebraic_audit_conclusion", "")),
-                    str(result.metadata.get("hiit_robustness_scope", "")),
+                    "Panel E internal QC (v3 C6 upstream)",
+                    str(result.metadata.get("c7_consumption_note", "")),
                     "",
                     "Primary (manuscript) coefficients:",
                     *[
@@ -2011,6 +2219,7 @@ __all__ = [
     "write_panel_e_exports",
     "verify_panel_e_integrity",
     "render_panel_e_figure",
-    "fit_paired_intercept_cluster_boot",
+    "probe_planned_nuisance_availability",
+    "write_panel_e_upstream_exports",
     "BROADBAND_DEFINITION",
 ]

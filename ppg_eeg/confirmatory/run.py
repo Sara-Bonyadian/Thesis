@@ -31,6 +31,12 @@ from .artifact_controls import run_confirmatory_artifact_controls
 from .cardiac_controls_upstream import (
     run_confirmatory_cardiac_controls_upstream,
 )
+from .panel_e_nuisance_upstream import (
+    run_confirmatory_panel_e_upstream,
+)
+from .panel_f_topography_upstream import (
+    run_confirmatory_panel_f_upstream,
+)
 from .config import (
     ConfirmatoryDatasetConfig,
     ConfirmatoryMasterConfig,
@@ -159,6 +165,129 @@ def _obs_dir(stage_root: Path, observation_id: str) -> Path:
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _as_int(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def _as_float(value: object) -> float:
+    return float(value)
+
+
+def _duration_endpoint_label_errors(*, root: Path) -> list[str]:
+    expected = {
+        60: "short_window_proximal_index",
+        120: "mid_window_proximal_index",
+        180: "zlpi",
+        240: "zlpi",
+    }
+    errors: list[str] = []
+    for path in sorted(root.glob("*.csv")):
+        try:
+            rows = _read_csv(path)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{path.name}: unreadable csv ({type(exc).__name__})")
+            continue
+        if not rows:
+            continue
+        if "duration_s" not in rows[0] or "endpoint_name" not in rows[0]:
+            continue
+        for idx, row in enumerate(rows, start=2):
+            duration_s = _as_int(row.get("duration_s"))
+            if duration_s not in expected:
+                continue
+            endpoint = str(row.get("endpoint_name") or "").strip().casefold()
+            if endpoint != expected[duration_s]:
+                errors.append(
+                    f"{path.name}:{idx} endpoint={endpoint!r} for D{duration_s} "
+                    f"(expected {expected[duration_s]!r})"
+                )
+    return errors
+
+
+def _short_duration_peak_parameter_errors(*, root: Path) -> list[str]:
+    forbidden_fields = ("peak_height_A", "peak_center_mu_s", "sigma_s", "fwhm_s")
+    short_durations = {60, 120}
+    errors: list[str] = []
+    for path in sorted(root.glob("*.csv")):
+        try:
+            rows = _read_csv(path)
+        except Exception:  # noqa: BLE001
+            continue
+        if not rows:
+            continue
+        header = set(rows[0].keys())
+        if "duration_s" not in header:
+            continue
+        present = tuple(field for field in forbidden_fields if field in header)
+        if not present:
+            continue
+        for idx, row in enumerate(rows, start=2):
+            duration_s = _as_int(row.get("duration_s"))
+            if duration_s not in short_durations:
+                continue
+            for field in present:
+                text = str(row.get(field) or "").strip()
+                if not text:
+                    continue
+                try:
+                    value = _as_float(text)
+                except ValueError:
+                    errors.append(
+                        f"{path.name}:{idx} non-numeric short-duration {field}={text!r}"
+                    )
+                    break
+                if math.isfinite(value):
+                    errors.append(
+                        f"{path.name}:{idx} finite short-duration {field}={value}"
+                    )
+                    break
+    return errors
+
+
+def _peak_center_equivalence_duration_errors(*, root: Path) -> list[str]:
+    path = root / "peak_center_equivalence.csv"
+    if not path.is_file():
+        return []
+    rows = _read_csv(path)
+    errors: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        duration_s = _as_int(row.get("duration_s"))
+        endpoint = str(row.get("endpoint_name") or "").strip().casefold()
+        if duration_s is None:
+            continue
+        if duration_s not in {180, 240}:
+            errors.append(
+                f"{path.name}:{idx} unexpected duration D{duration_s} in peak-center equivalence"
+            )
+        if endpoint and endpoint != "zlpi":
+            errors.append(
+                f"{path.name}:{idx} unexpected endpoint_name={endpoint!r} "
+                "in peak-center equivalence"
+            )
+    return errors
+
+
+def _assert_no_stale_short_duration_peak_inference(*, root: Path, stage_name: str) -> None:
+    errors = []
+    errors.extend(_duration_endpoint_label_errors(root=root))
+    errors.extend(_short_duration_peak_parameter_errors(root=root))
+    errors.extend(_peak_center_equivalence_duration_errors(root=root))
+    if errors:
+        preview = "; ".join(errors[:10])
+        if len(errors) > 10:
+            preview += f"; ... ({len(errors)} total)"
+        raise StageError(
+            f"{stage_name} integrity failed: stale short-duration peak inference or "
+            f"endpoint-label mismatch detected. {preview}"
+        )
 
 
 def _write_stage_status(ctx: StageContext, stage: str, status: str, detail: str) -> None:
@@ -673,12 +802,32 @@ def run_c6(ctx: StageContext) -> dict[str, object]:
     )
     run_confirmatory_cardiac_controls_upstream(
         c0_dir=ctx.stage_dir("C0"),
+        c1a_dir=ctx.stage_dir("C1a"),
         c1b_dir=ctx.stage_dir("C1b"),
         c1c_dir=ctx.stage_dir("C1c"),
         c3_dir=ctx.stage_dir("C3"),
         output_dir=out,
     )
-    return {"inference_and_sensitivities": str(out)}
+    panel_e = run_confirmatory_panel_e_upstream(
+        c0_dir=ctx.stage_dir("C0"),
+        c1b_dir=ctx.stage_dir("C1b"),
+        c1c_dir=ctx.stage_dir("C1c"),
+        c3_dir=ctx.stage_dir("C3"),
+        c5_dir=group,
+        output_dir=out,
+    )
+    panel_f = run_confirmatory_panel_f_upstream(
+        c0_dir=ctx.stage_dir("C0"),
+        c5_dir=group,
+        output_dir=out,
+        confirmatory_root=out.parent,
+    )
+    _assert_no_stale_short_duration_peak_inference(root=out, stage_name="C6")
+    return {
+        "inference_and_sensitivities": str(out),
+        "panel_e_nuisance": {k: str(v) for k, v in panel_e.paths.items()},
+        "panel_f_topography_gamma": {k: str(v) for k, v in panel_f.paths.items()},
+    }
 
 
 def run_c7(ctx: StageContext) -> dict[str, object]:
@@ -714,6 +863,7 @@ def run_c7(ctx: StageContext) -> dict[str, object]:
         shutil.copy2(path, publish / path.name)
     for path in ctx.stage_dir("C3").glob("confirmatory_endpoint_qc_D*.csv"):
         shutil.copy2(path, publish / path.name)
+    _assert_no_stale_short_duration_peak_inference(root=publish, stage_name="C7/publish")
 
     report_dir = ctx.stage_dir("C7")
     paths = run_confirmatory_reporting(

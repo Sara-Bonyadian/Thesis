@@ -859,9 +859,12 @@ def secondary_band_null_fdr_table(
     return records
 
 
-def independent_unit_verdict_rows() -> list[dict[str, str]]:
+def independent_unit_verdict_rows(
+    *,
+    dataset_ids: Sequence[str] | None = None,
+) -> list[dict[str, str]]:
     """Human-readable independent-unit verdict per confirmatory dataset."""
-    return [
+    rows = [
         {
             "dataset_id": "hiit",
             "independent_unit": "dataset_id::participant_id",
@@ -920,6 +923,14 @@ def independent_unit_verdict_rows() -> list[dict[str, str]]:
                 "within mbd participant."
             ),
         },
+    ]
+    if dataset_ids is None:
+        return rows
+    wanted = {str(ds).strip().casefold() for ds in dataset_ids if str(ds).strip()}
+    return [
+        row
+        for row in rows
+        if str(row.get("dataset_id", "")).strip().casefold() in wanted
     ]
 
 

@@ -11,6 +11,7 @@ import csv
 import json
 import hashlib
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -80,6 +81,7 @@ from .panel_d_cardiac_controls import (
     CONTROL_ECG_CHANNELS,
     CONTROL_ICA_TEMPLATE,
     CONTROL_ORDER,
+    PanelDCardiacControlsResult,
     CONTROL_RPEAK_MASK,
     PANEL_D_PLOT_CONTROL_ORDER,
     compute_panel_d_cardiac_controls,
@@ -91,12 +93,12 @@ from .panel_d_cardiac_controls import (
 )
 from .panel_e_nuisance_modality import (
     PANEL_E_STEM,
-    compute_panel_e_nuisance_modality,
     render_panel_e_figure,
 )
+from .panel_e_nuisance_upstream import load_panel_e_result_from_upstream
+from .panel_f_topography_upstream import load_panel_f_result_from_upstream
 from .panel_f_topography_gamma import (
     PANEL_F_STEM,
-    compute_panel_f_topography,
     render_panel_f_figure,
 )
 from .protocol_audit import condition_semantics_for
@@ -244,32 +246,30 @@ FIGURE1_PANEL_D_SURROGATE_RULE_NOTE = (
 )
 FIGURE1_PANEL_D_NOTE = (
     FIGURE1_PANEL_D_SURROGATE_RULE_NOTE
-    + " Sensitivity datasets may contribute one descriptive estimate. Protocol "
-    "session conditions are analysis units (Panel B-aligned; counted separately). "
-    "Within each session condition, available pre-/post-intervention low-demand "
-    "ZLPI are averaged before the group mean. Sensitivity rows are summaries, "
-    "not independent primary datasets. Surrogate marks use the median of all "
-    "low-demand condition-level median_empirical_p values for that band within "
-    "the sensitivity cohort."
+    + " When sensitivity display rows are present, protocol session conditions are "
+    "analysis units (Panel B-aligned; counted separately). Within each session "
+    "condition, available pre-/post-intervention low-demand ZLPI are averaged "
+    "before the group mean. Sensitivity rows are descriptive summaries, not "
+    "independent primary datasets, and are excluded from pooled claims."
 )
 FIGURE1_PANEL_D_ASTERISK_LABEL = (
     f"* = circular-shift surrogate p < {FIGURE1_PANEL_D_SURROGATE_ALPHA:g} only"
 )
 FIGURE1_PANEL_E_NOTE = (
-    "Alpha-focused replication display of the equal four-band primary meta "
-    "(one prespecified contrast per dataset); not an alpha-only confirmatory hierarchy. "
-    "Sensitivity datasets may contribute one descriptive estimate. Protocol session "
-    "conditions are analysis units (Panel B-aligned; counted separately). Within each "
-    "session condition, available low-demand–high-demand ΔZLPI contrasts are averaged "
-    "before group summarization. Sensitivity rows are excluded from the pooled "
-    "random-effects meta-analysis."
+    "Low-demand D240 alpha ZLPI replication across the three primary cohorts "
+    "(one independent study effect per dataset). Study CIs and the pooled "
+    "random-effects estimate (with prediction interval) come from the same model. "
+    "Only eligible low-demand standard ZLPI observations enter this panel; "
+    "sensitivity/external cohorts are excluded from primary pooling."
 )
+FIGURE1_PANEL_F_IDENTIFIABILITY_MIN = 0.30
 FIGURE1_PANEL_F_NOTE = (
     "Near-zero central peak: linear baseline from distant flanks (20≤|τ|≤60 s), "
     "nonnegative Gaussian on baseline-adjusted |τ|≤20 s; identifiable peaks only "
     "(A ≥ 1.8×RMSE, SE(A), weak-edge). Group μ/FWHM: mean of per-session-condition "
     "means (Panel B-aligned; protocol session conditions counted as separate units) "
-    "with hierarchical CI; μ TOST / ±2 s on that mean. FWHM on log scale "
+    "with hierarchical CI; μ TOST / ±2 s on that mean. μ estimates are suppressed "
+    f"when identifiability < {FIGURE1_PANEL_F_IDENTIFIABILITY_MIN:.2f}. FWHM on log scale "
     "(back-transformed CI)."
 )
 
@@ -280,9 +280,9 @@ FIGURE2_TITLE = (
 FIGURE3_TITLE = "Temporal specificity and core robustness"
 FIGURE2_PANEL_C_NOTE = (
     "Alpha PRIMARY_META absolute paired ΔZLPI (high-demand − low-demand); "
-    "no percent attenuation. Sensitivity datasets may contribute one descriptive "
-    "estimate (protocol session conditions counted separately, Panel B-aligned) "
-    "and are excluded from the pooled random-effects meta-analysis."
+    "no percent attenuation. When sensitivity display rows are present they are "
+    "explicitly labeled `sensitivity_display`, remain descriptive only, and are "
+    "excluded from the pooled random-effects meta-analysis."
 )
 FIGURE2_PANEL_D_OUTCOME_LABEL = "Model-estimated Fisher-z ZLPI"
 FIGURE2_PANEL_D_NOTE = (
@@ -405,53 +405,56 @@ FIGURE3_PANEL_B_ENCODING_NOTE = (
 FIGURE3_PANEL_B_FOOTNOTE_SHORT = (
     "B: color = band · shape = index (ZLPI 240/180; MWPI 120; SWPI 60)"
 )
-FIGURE3_FIGSIZE = (21.2, 15.4)
+FIGURE3_FIGSIZE = (21.0, 17.2)
 FIGURE3_SUBPLOT_ADJUST = {
-    "left": 0.075,
-    "right": 0.988,
-    "top": 0.925,
+    "left": 0.070,
+    "right": 0.985,
+    "top": 0.922,
     "bottom": 0.108,
-    "wspace": 0.32,
-    "hspace": 0.40,
+    "wspace": 0.26,
+    "hspace": 0.42,
 }
 # Mild right bias so Panel D has room without starving A/C.
-FIGURE3_GRID_WIDTH_RATIOS = (1.0, 1.32)
-FIGURE3_GRID_HEIGHT_RATIOS = (1.05, 1.0)
+FIGURE3_GRID_WIDTH_RATIOS = (0.93, 1.50)
+FIGURE3_GRID_HEIGHT_RATIOS = (1.0, 1.12)
 # Nested Panel D: compact labels/status, widened coefficient and Δ axes.
 # No sharey between columns — sharey reserves empty left gutters on plot axes.
 FIGURE3_PANEL_D_WIDTH_RATIOS = (0.95, 1.78, 1.58, 1.18)
 FIGURE3_PANEL_D_WSPACE = 0.10
 FIGURE3_PANEL_D_ROW_LABELS = {
-    "beat_count_adjusted": "Beat-count\nadjusted",
-    "ppg_pulse_locked_template_subtraction": "PPG template\nsubtraction",
+    "baseline": "Baseline",
+    "beat_count_adjusted": "Beat-count adj.",
+    "ecg_cardiac_template_subtraction": "ECG template",
+    "ecg_prone_channels_removed": "ECG-prone ch. removed",
+    "ecg_r_peak_mask": "ECG event mask",
+    "ppg_pulse_locked_template_subtraction": "PPG template",
     "ppg_systolic_peak_mask": "PPG event mask",
-    "ecg_cardiac_template_subtraction": "ECG template\nsubtraction",
-    "ecg_prone_channels_removed": "ECG-prone\nchannels rem.",
 }
-FIGURE3_PANEL_D_STATUS_HEADER = "Computable / baseline-eligible\nobservation-band rows"
-FIGURE3_PANEL_D_TITLE = "Cardiac-field and pulse-synchronous controls"
+FIGURE3_PANEL_D_STATUS_HEADER = "Status / denominator"
+FIGURE3_PANEL_D_TITLE = "Cardiac controls"
 FIGURE3_PANEL_D_SUBTITLE = "Controlled estimates and paired changes from baseline"
-PANEL_A_XLABEL = "Standardized ZLPI\nrelative to observation-specific null"
-PANEL_A_TITLE = "Observed theta ZLPI relative to autocorrelation-preserving nulls"
-FIGURE3_SUPPLEMENT_FIGSIZE = (14.5, 13.8)
+NULL_RELATIVE_Z_TERM = "Null-relative Z (Z_null)"
+NULL_RELATIVE_Z_FORMULA = "Z_null = (observed − null_mean) / null_sd"
+PANEL_A_XLABEL = "Null-relative Z (Z_null)"
+PANEL_A_TITLE = "Theta ZLPI vs autocorrelation-preserving nulls"
+FIGURE3_SUPPLEMENT_FIGSIZE = (15.2, 14.8)
 FIGURE3_SUPPLEMENT_SUBPLOT_ADJUST = {
     "left": 0.15,
     "right": 0.97,
-    "top": 0.915,
+    "top": 0.920,
     "bottom": 0.085,
-    "wspace": 0.34,
-    "hspace": 0.36,
+    "wspace": 0.42,
+    "hspace": 0.44,
 }
 FIGURE3_CI_LINEWIDTH = 1.6
 FIGURE3_MARKER_SIZE = 7.5
 FIGURE3_SCATTER_SIZE = 36.0
 FIGURE3_REF_LINEWIDTH = 1.0
-# Display-only: analysis remains on the 1-s lag grid; plotting uses every Nth lag.
+# Display-only lag thinning helper (Figure 1 Panel B currently uses step=1).
 FIGURE1_DISPLAY_LAG_STEP_S = 2
 FIGURE1_DISPLAY_GRID_DISCLOSURE = (
     "Correlations and all inferential analyses used the predefined 1-s lag grid; "
-    "for visual clarity, the displayed mean curve and pointwise confidence band "
-    "show every second lag value."
+    "displayed curves show that same 1-s grid."
 )
 
 _STYLE_CONFIGURED = False
@@ -757,14 +760,23 @@ def _render_figure3_panel_d_paired_axes(
     subplot_spec,
     *,
     summaries: Sequence[Mapping[str, object]],
+    show_headers: bool = True,
+    show_xlabels: bool = True,
+    show_panel_label: bool = False,
 ) -> tuple[plt.Axes, plt.Axes, plt.Axes, list[str]]:
-    """Draw Panel D as aligned coefficient, Δ, and status columns."""
-    from matplotlib.lines import Line2D
-
+    """Draw one dataset block for Panel D in clean 4-column layout."""
     by_control = _panel_d_summary_lookup(summaries)
     baseline_row = by_control.get(CONTROL_BASELINE, {})
     baseline_level = _as_float(baseline_row.get("estimate"))
-    plot_controls = list(PANEL_D_PLOT_CONTROL_ORDER)
+    plot_controls = [
+        "baseline",
+        "beat_count_adjusted",
+        "ecg_cardiac_template_subtraction",
+        "ecg_prone_channels_removed",
+        "ecg_r_peak_mask",
+        "ppg_pulse_locked_template_subtraction",
+        "ppg_systolic_peak_mask",
+    ]
     integrity = verify_panel_d_summary_integrity(
         [
             by_control[c]
@@ -775,44 +787,69 @@ def _render_figure3_panel_d_paired_axes(
     if integrity:
         raise ValueError("Panel D visualization integrity failed: " + "; ".join(integrity))
 
-    # Row 0 = plot body; row 1 = legend / NC note (keeps them off the axes).
     gs_d = subplot_spec.subgridspec(
-        2,
+        1,
         4,
-        height_ratios=[1.0, 0.20],
-        width_ratios=list(FIGURE3_PANEL_D_WIDTH_RATIOS),
-        wspace=FIGURE3_PANEL_D_WSPACE,
-        hspace=0.18,
+        width_ratios=[1.42, 1.38, 1.22, 1.58],
+        wspace=0.12,
     )
-    # Do not sharey: shared y-axes reserve invisible tick gutters between columns.
     ax_lab = fig.add_subplot(gs_d[0, 0])
-    ax_coef = fig.add_subplot(gs_d[0, 1])
-    ax_delta = fig.add_subplot(gs_d[0, 2])
-    ax_status = fig.add_subplot(gs_d[0, 3])
-    ax_leg = fig.add_subplot(gs_d[1, 1:3])
-    ax_note = fig.add_subplot(gs_d[1, 3])
-    ax_leg.set_axis_off()
-    ax_note.set_axis_off()
+    ax_coef = fig.add_subplot(gs_d[0, 1], sharey=ax_lab)
+    ax_delta = fig.add_subplot(gs_d[0, 2], sharey=ax_lab)
+    ax_status = fig.add_subplot(gs_d[0, 3], sharey=ax_lab)
 
-    n_rows = len(plot_controls)
-    # Uneven y with an explicit gap between statistical and signal-level groups.
-    y_positions = np.asarray([5.05, 3.20, 2.10, 1.00, -0.10], dtype=float)
-    if n_rows != len(y_positions):
-        y_positions = np.arange(n_rows, dtype=float)[::-1]
+    y_positions = np.arange(len(plot_controls), dtype=float)[::-1] * 1.18
     coef_color = PALETTE["dark_gray"]
     delta_color = PALETTE["blue"]
     baseline_marker_color = PALETTE["orange"]
-    nc_color = "#6E6E6E"
-    group_color = "#5E5E5E"
-    zero_color = "#7A7A7A"
-    status_x = 0.0
-    guide_color = "#F0F0F0"
-
+    nc_color = "#666666"
+    zero_color = "#777777"
+    guide_color = "#EFEFEF"
     x_coef_vals: list[float] = []
     x_delta_vals: list[float] = []
+
+    def _compact_nc_phrase(reason: str) -> str:
+        # Prefer the already-compact short_reason_code / reason text directly.
+        # Do not re-run short_not_computable_reason_code on short codes — that
+        # collapses several known phrases to the generic "not computable" fallback.
+        text = _as_str(reason)
+        text_cf = text.casefold()
+        if "1 hz" in text_cf and "mask" in text_cf:
+            return "NC · 1-Hz mask incompatible"
+        if "channel reaggregation" in text_cf or "reaggregation" in text_cf:
+            return "NC · channel reaggregation unavailable"
+        if "template unavailable" in text_cf or "event-locked" in text_cf or "event locked" in text_cf:
+            return "NC · template unavailable"
+        if (
+            "ppg modality unavailable" in text_cf
+            or "ppg source/control" in text_cf
+            or "no ppg source" in text_cf
+        ):
+            return "NC · PPG unavailable"
+        if (
+            "ppg cannot substitute" in text_cf
+            or "not valid substitute" in text_cf
+            or "not valid substitutes" in text_cf
+        ):
+            return "NC · PPG not ECG substitute"
+        # Last resort: try long-form normalizer once, then rematch.
+        shortened = _as_str(short_not_computable_reason_code(text))
+        short_cf = shortened.casefold()
+        if "1 hz" in short_cf and "mask" in short_cf:
+            return "NC · 1-Hz mask incompatible"
+        if "reaggregation" in short_cf:
+            return "NC · channel reaggregation unavailable"
+        if "template unavailable" in short_cf:
+            return "NC · template unavailable"
+        if "ppg modality unavailable" in short_cf or "ppg source/control" in short_cf:
+            return "NC · PPG unavailable"
+        if "ppg cannot substitute" in short_cf:
+            return "NC · PPG not ECG substitute"
+        return "NC · not computable"
+
     for yi, control in zip(y_positions, plot_controls, strict=True):
         row = by_control.get(control, {})
-        status = _as_str(row.get("computability_status")).casefold()
+        status = _as_str(row.get("computability_status")).casefold() or "not_computable"
         estimate = _as_float(row.get("estimate"))
         lo = _as_float(row.get("ci_lower"))
         hi = _as_float(row.get("ci_upper"))
@@ -822,23 +859,15 @@ def _render_figure3_panel_d_paired_axes(
         denom = _as_str(row.get("denominator_label")) or ""
 
         if status == "computed" and math.isfinite(estimate):
-            if math.isfinite(baseline_level):
-                ax_coef.plot(
-                    [baseline_level, estimate],
-                    [yi, yi],
-                    color="#B8B8B8",
-                    linewidth=1.15,
-                    zorder=2,
-                    solid_capstyle="round",
-                )
+            if control != CONTROL_BASELINE and math.isfinite(baseline_level):
                 ax_coef.scatter(
                     [baseline_level],
                     [yi],
                     marker="D",
-                    s=36,
+                    s=34,
                     color=baseline_marker_color,
                     edgecolors=coef_color,
-                    linewidths=0.55,
+                    linewidths=0.45,
                     zorder=3,
                 )
             xerr = None
@@ -850,17 +879,17 @@ def _render_figure3_panel_d_paired_axes(
             ax_coef.errorbar(
                 estimate,
                 yi,
-                xerr=xerr,
-                fmt="o",
-                color=coef_color,
-                markersize=FIGURE3_MARKER_SIZE,
-                capsize=2.5,
-                elinewidth=FIGURE3_CI_LINEWIDTH,
+                xerr=xerr if control != CONTROL_BASELINE else None,
+                fmt="D" if control == CONTROL_BASELINE else "o",
+                color=baseline_marker_color if control == CONTROL_BASELINE else coef_color,
+                markersize=6.8,
+                capsize=2.2,
+                elinewidth=1.35,
                 markeredgecolor=coef_color,
-                markeredgewidth=0.45,
+                markeredgewidth=0.4,
                 zorder=4,
             )
-            if math.isfinite(change):
+            if control != CONTROL_BASELINE and math.isfinite(change):
                 dxerr = None
                 if math.isfinite(clo) and math.isfinite(chi):
                     dxerr = [[max(0.0, change - clo)], [max(0.0, chi - change)]]
@@ -873,81 +902,65 @@ def _render_figure3_panel_d_paired_axes(
                     xerr=dxerr,
                     fmt="o",
                     color=delta_color,
-                    markersize=FIGURE3_MARKER_SIZE,
+                    markersize=6.5,
                     capsize=2.5,
-                    elinewidth=FIGURE3_CI_LINEWIDTH,
+                    elinewidth=1.3,
                     markeredgecolor=delta_color,
-                    markeredgewidth=0.45,
+                    markeredgewidth=0.4,
                     zorder=4,
                 )
             ax_status.text(
-                status_x,
+                0.02,
                 yi,
-                f"Computable  {denom}",
+                f"OK · {denom}",
                 ha="left",
                 va="center",
                 fontsize=FS_TICK - 3,
                 color=coef_color,
                 clip_on=False,
+                transform=ax_status.get_yaxis_transform(),
             )
         else:
-            reason = _panel_d_figure_reason(
-                _as_str(row.get("short_reason_code")) or _as_str(row.get("computability_reason"))
-            )
             ax_status.text(
-                status_x,
-                yi + (0.16 if reason else 0.0),
-                f"NC  {denom or '0'}",
+                0.02,
+                yi,
+                f"{_compact_nc_phrase(_as_str(row.get('short_reason_code')) or _as_str(row.get('computability_reason')))} · {denom or '0'}",
                 ha="left",
                 va="center",
                 fontsize=FS_TICK - 3,
                 color=nc_color,
-                fontweight="bold",
                 clip_on=False,
+                transform=ax_status.get_yaxis_transform(),
             )
-            if reason:
-                ax_status.text(
-                    status_x,
-                    yi - 0.22,
-                    reason,
-                    ha="left",
-                    va="center",
-                    fontsize=FS_TICK - 4,
-                    color=nc_color,
-                    clip_on=False,
-                )
 
     if math.isfinite(baseline_level):
         ax_coef.axvline(
             baseline_level,
             color=baseline_marker_color,
             linestyle=":",
-            linewidth=1.55,
+            linewidth=1.35,
             alpha=0.98,
             zorder=1,
         )
     for ax in (ax_coef, ax_delta):
-        ax.axvline(0.0, color=zero_color, lw=1.25, ls="--", zorder=1)
+        ax.axvline(0.0, color=zero_color, lw=1.3, ls="-", zorder=1)
 
-    y_labels = [_panel_d_row_label(c) for c in plot_controls]
-    y_lo, y_hi = -0.55, 5.95
+    y_labels = [FIGURE3_PANEL_D_ROW_LABELS.get(c, _panel_d_row_label(c)) for c in plot_controls]
+    y_lo = float(min(y_positions)) - 0.55
+    y_hi = float(max(y_positions)) + 0.55
     for ax in (ax_lab, ax_coef, ax_delta, ax_status):
         ax.set_ylim(y_lo, y_hi)
         ax.set_yticks(list(y_positions))
         ax.tick_params(axis="y", which="both", left=False, labelleft=False, length=0)
         ax.set_yticklabels([])
-
-    # Flush labels to the right edge of the label column (avoids empty gutter from
-    # external yticklabels hanging left of the axes box).
     for yi, lab in zip(y_positions, y_labels, strict=True):
         ax_lab.text(
-            1.0,
+            0.98,
             yi,
             lab,
             ha="right",
             va="center",
-            fontsize=FS_TICK - 1,
-            linespacing=1.05,
+            fontsize=FS_TICK,
             color=PALETTE["dark_gray"],
             clip_on=False,
             transform=ax_lab.get_yaxis_transform(),
@@ -965,43 +978,51 @@ def _render_figure3_panel_d_paired_axes(
     ax_status.patch.set_alpha(0.0)
     ax_status.grid(False)
 
-    for i, line in enumerate(FIGURE3_PANEL_D_STATUS_HEADER.split("\n")):
+    if show_headers:
+        # Place headers in axes coordinates so they clear the panel/dataset titles.
+        header_y = 1.02
+        ax_lab.text(
+            0.0,
+            header_y,
+            "Control",
+            transform=ax_lab.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=FS_TICK,
+            color=PALETTE["dark_gray"],
+            clip_on=False,
+        )
+        ax_coef.text(
+            0.5,
+            header_y,
+            "Controlled coefficient",
+            transform=ax_coef.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=FS_TICK,
+            color=PALETTE["dark_gray"],
+            clip_on=False,
+        )
+        ax_delta.text(
+            0.5,
+            header_y,
+            "Δ from baseline",
+            transform=ax_delta.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=FS_TICK,
+            color=PALETTE["dark_gray"],
+            clip_on=False,
+        )
         ax_status.text(
-            status_x,
-            1.048 - 0.038 * i,
-            line,
+            0.02,
+            header_y,
+            FIGURE3_PANEL_D_STATUS_HEADER,
             transform=ax_status.transAxes,
             ha="left",
             va="bottom",
-            fontsize=FS_TICK - 4,
-            color=coef_color,
-            clip_on=False,
-        )
-
-    if n_rows >= 2:
-        sep_y = 4.05
-        for ax in (ax_coef, ax_delta):
-            ax.axhline(sep_y, color="#DDDDDD", linewidth=0.85, zorder=0)
-        ax_lab.text(
-            1.0,
-            float(y_positions[0]) + 0.62,
-            "STATISTICAL SENSITIVITY",
-            ha="right",
-            va="bottom",
-            fontsize=FS_TICK - 4,
-            fontweight="bold",
-            color=group_color,
-            clip_on=False,
-        )
-        ax_lab.text(
-            1.0,
-            float(y_positions[1]) + 0.62,
-            "SIGNAL-LEVEL CONTROLS",
-            ha="right",
-            va="bottom",
-            fontsize=FS_TICK - 4,
-            fontweight="bold",
-            color=group_color,
+            fontsize=FS_TICK - 1,
+            color=PALETTE["dark_gray"],
             clip_on=False,
         )
 
@@ -1027,11 +1048,15 @@ def _render_figure3_panel_d_paired_axes(
 
     ax_coef.set_xlim(*_coef_limits(x_coef_vals))
     ax_delta.set_xlim(*_delta_limits(x_delta_vals))
-    ax_coef.set_xlabel("Controlled coefficient\n(Fisher z)", fontsize=FS_AXIS - 5, labelpad=5)
-    ax_delta.set_xlabel("Change from baseline\nΔ Fisher z", fontsize=FS_AXIS - 5, labelpad=5)
+    if show_xlabels:
+        ax_coef.set_xlabel("Fisher z", fontsize=FS_AXIS - 3, labelpad=4)
+        ax_delta.set_xlabel("Δ Fisher z", fontsize=FS_AXIS - 3, labelpad=4)
+    else:
+        ax_coef.tick_params(labelbottom=False)
+        ax_delta.tick_params(labelbottom=False)
     for ax in (ax_coef, ax_delta):
         ax.minorticks_off()
-        ax.tick_params(axis="x", pad=1.5, labelsize=FS_TICK - 3, width=1.0, length=3.2)
+        ax.tick_params(axis="x", pad=1.5, labelsize=FS_TICK - 1, width=1.0, length=3.2)
         ax.tick_params(axis="y", length=0)
         for spine in ("bottom", "left"):
             ax.spines[spine].set_linewidth(AXIS_LINE_WIDTH)
@@ -1043,79 +1068,8 @@ def _render_figure3_panel_d_paired_axes(
         for y in y_positions:
             ax.axhline(y, color=guide_color, linewidth=0.75, zorder=0)
 
-    _set_panel_title(
-        ax_lab,
-        FIGURE3_PANEL_D_TITLE,
-        fontsize=FS_PANEL_TITLE - 1,
-        pad=20,
-    )
-    ax_lab.text(
-        0.0,
-        1.012,
-        FIGURE3_PANEL_D_SUBTITLE,
-        transform=ax_lab.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=FS_TICK - 2,
-        color="#6A6A6A",
-        clip_on=False,
-    )
-    _add_panel_label(ax_lab, "D")
-
-    legend_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker="D",
-            color="none",
-            markerfacecolor=baseline_marker_color,
-            markeredgecolor=coef_color,
-            markersize=6.5,
-            label="Baseline",
-        ),
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="none",
-            markerfacecolor=coef_color,
-            markeredgecolor=coef_color,
-            markersize=6.5,
-            label="Controlled",
-        ),
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="none",
-            markerfacecolor=delta_color,
-            markeredgecolor=delta_color,
-            markersize=6.5,
-            label="Δ from baseline",
-        ),
-    ]
-    ax_leg.legend(
-        handles=legend_handles,
-        loc="center",
-        ncol=3,
-        frameon=False,
-        fontsize=FS_TICK - 4,
-        handletextpad=0.35,
-        columnspacing=1.25,
-        borderaxespad=0.0,
-    )
-    ax_note.text(
-        0.0,
-        0.50,
-        "NC = not computable;\nfull reasons in caption/metadata.",
-        ha="left",
-        va="center",
-        fontsize=FS_TICK - 5,
-        color=nc_color,
-        linespacing=1.15,
-        transform=ax_note.transAxes,
-        clip_on=False,
-    )
+    if show_panel_label:
+        _add_panel_label(ax_lab, "D")
     return ax_coef, ax_delta, ax_status, plot_controls
 
 
@@ -1224,6 +1178,8 @@ def _band_display(band: str) -> str:
     text = _as_str(band).replace("_", " ").strip().casefold()
     if not text:
         return "Band"
+    if text in {"low gamma", "gamma"}:
+        return "Low-γ"
     return text[:1].upper() + text[1:]
 
 
@@ -1235,6 +1191,35 @@ def _dataset_display(dataset_id: str, *, n_pairs: int | None = None) -> str:
     if n_pairs is not None and n_pairs >= 0:
         return f"{label} (n = {n_pairs} pairs)"
     return label
+
+
+_RUN_UNIT_SUFFIX_RE = re.compile(r"^(?P<bio>.+)_run-(?P<run>[0-9]+)$", re.IGNORECASE)
+
+
+def _panel_a_biological_id_from_analysis_unit(dataset_id: str, analysis_unit_id: str) -> str:
+    """Best-effort biological participant ID from a Panel A analysis-unit token."""
+    ds = _as_str(dataset_id).casefold()
+    unit = _as_str(analysis_unit_id).casefold()
+    if not unit:
+        return ""
+    if ds == "ds003690":
+        match = _RUN_UNIT_SUFFIX_RE.match(unit)
+        if match is not None:
+            return _as_str(match.group("bio")).casefold()
+    return unit
+
+
+def _panel_a_analysis_unit_definition(dataset_id: str, analysis_unit_ids: set[str]) -> str:
+    ds = _as_str(dataset_id).casefold()
+    if not analysis_unit_ids:
+        return "unknown"
+    if ds == "ds003690":
+        run_like = sum(1 for unit in analysis_unit_ids if _RUN_UNIT_SUFFIX_RE.match(unit))
+        if run_like == len(analysis_unit_ids):
+            return "participant_run_unit (biological_participant_id + run index)"
+        if run_like > 0:
+            return "mixed_analysis_unit (run-qualified + biological participant IDs)"
+    return "biological_participant_id"
 
 
 STATE_ROLE_DISPLAY: dict[str, str] = {
@@ -1452,10 +1437,10 @@ def _annotate_lag_regions(ax: plt.Axes, duration_s: int, *, enabled: bool) -> No
     shoulder_style = {**base_style, "fontsize": FS_TICK - 5, "va": "top"}
     flank_mid = 0.5 * (contract.flank_inner_s + contract.flank_outer_s)
     shoulder_mid = 0.5 * (contract.shoulders_inner_s + contract.shoulders_outer_s)
-    ax.text(-flank_mid, y_flank, "distant -", **flank_style)
-    ax.text(-shoulder_mid, y_shoulder, "shoulder -", **shoulder_style)
+    ax.text(-flank_mid, y_flank, "flank −", **flank_style)
+    ax.text(-shoulder_mid, y_shoulder, "shoulder −", **shoulder_style)
     ax.text(shoulder_mid, y_shoulder, "shoulder +", **shoulder_style)
-    ax.text(flank_mid, y_flank, "distant +", **flank_style)
+    ax.text(flank_mid, y_flank, "flank +", **flank_style)
 
 
 def _set_lag_axes(ax: plt.Axes, duration_s: int) -> None:
@@ -1531,8 +1516,52 @@ def resolve_reporting_inputs(confirmatory_root: str | Path) -> dict[str, Path | 
         "mixed_model_contrasts": "mixed_model_contrasts.csv",
         "aligned_d240": "features_confirmatory_aligned_D240.csv",
         "data_audit": "data_audit.csv",
+        "panel_e_specifications": f"{PANEL_E_STEM}_specifications.csv",
+        "panel_e_common_sample": f"{PANEL_E_STEM}_common_sample.csv",
+        "panel_e_observations": f"{PANEL_E_STEM}_observation_level.csv",
+        "panel_e_availability": f"{PANEL_E_STEM}_availability.csv",
+        "panel_e_diagnostics": f"{PANEL_E_STEM}_diagnostics.csv",
+        "panel_e_metadata": f"{PANEL_E_STEM}_metadata.json",
+        "panel_f_summary": f"{PANEL_F_STEM}_summary.csv",
+        "panel_f_observations": f"{PANEL_F_STEM}_observation_level.csv",
+        "panel_f_montage": f"{PANEL_F_STEM}_montage_membership.csv",
+        "panel_f_gamma_montage_sensitivity": f"{PANEL_F_STEM}_gamma_montage_sensitivity.csv",
+        "panel_f_metadata": f"{PANEL_F_STEM}_metadata.json",
+        "low_demand_alpha_effects": "low_demand_alpha_replication_effects.csv",
+        "low_demand_alpha_meta": "low_demand_alpha_replication_meta.csv",
+        "low_demand_alpha_loo": "low_demand_alpha_replication_loo.csv",
     }
-    return {key: discover_named_file(root, name) for key, name in names.items()}
+    resolved = {key: discover_named_file(root, name) for key, name in names.items()}
+    # Prefer sibling C6 upstream Panel E exports.
+    if root.name == "publish":
+        c6_dir = root.parent.parent / "C6"
+    elif root.name == "figures":
+        c6_dir = root.parent.parent / "C6"
+    elif root.name == "C7":
+        c6_dir = root.parent / "C6"
+    else:
+        c6_dir = root / "C6"
+    if c6_dir.is_dir():
+        for key, filename in (
+            ("panel_e_specifications", f"{PANEL_E_STEM}_specifications.csv"),
+            ("panel_e_common_sample", f"{PANEL_E_STEM}_common_sample.csv"),
+            ("panel_e_observations", f"{PANEL_E_STEM}_observation_level.csv"),
+            ("panel_e_availability", f"{PANEL_E_STEM}_availability.csv"),
+            ("panel_e_diagnostics", f"{PANEL_E_STEM}_diagnostics.csv"),
+            ("panel_e_metadata", f"{PANEL_E_STEM}_metadata.json"),
+            ("panel_f_summary", f"{PANEL_F_STEM}_summary.csv"),
+            ("panel_f_observations", f"{PANEL_F_STEM}_observation_level.csv"),
+            ("panel_f_montage", f"{PANEL_F_STEM}_montage_membership.csv"),
+            ("panel_f_gamma_montage_sensitivity", f"{PANEL_F_STEM}_gamma_montage_sensitivity.csv"),
+            ("panel_f_metadata", f"{PANEL_F_STEM}_metadata.json"),
+            ("low_demand_alpha_effects", "low_demand_alpha_replication_effects.csv"),
+            ("low_demand_alpha_meta", "low_demand_alpha_replication_meta.csv"),
+            ("low_demand_alpha_loo", "low_demand_alpha_replication_loo.csv"),
+        ):
+            c6_path = c6_dir / filename
+            if c6_path.is_file():
+                resolved[key] = c6_path
+    return resolved
 
 
 def write_source_csv(
@@ -2053,7 +2082,7 @@ def _plot_panel_a_empirical_nulls(
     panel_label: str = "A",
     full_surrogate_distributions: bool = True,
 ) -> list[dict[str, object]]:
-    """Plot pooled surrogate densities with biological-participant overlays.
+    """Plot dataset-faceted surrogate densities with biological-participant overlays.
 
     Returns plot-layer audit rows describing each geometry.
     """
@@ -2174,9 +2203,15 @@ def _plot_panel_a_empirical_nulls(
             distributions.append(sur)
             bio_point_sets.append(bio_vals)
             dataset_means.append(ds_mean)
-            label = _null_display_label(null_type) if single_dataset else (
-                f"{_null_display_label(null_type)}"
-            )
+            null_label = {
+                NULL_TYPE_CIRCULAR_SHIFT: "Circular shift",
+                NULL_TYPE_PHASE_RANDOMIZATION: "Phase randomized",
+                NULL_TYPE_BLOCK_SHUFFLE: "Block shuffled",
+            }.get(null_type, _null_display_label(null_type))
+            if single_dataset:
+                label = null_label
+            else:
+                label = f"{dataset_id} | {null_label}"
             labels.append(label)
             row_meta.append(
                 {
@@ -2280,7 +2315,7 @@ def _plot_panel_a_empirical_nulls(
         )
         return layer_rows
 
-    y = np.arange(len(distributions), dtype=float)
+    y = np.arange(len(distributions), dtype=float) * 1.14
     # Full empirical null geometry (all surrogate values; no downsampling).
     vio = ax.violinplot(
         distributions,
@@ -2289,7 +2324,7 @@ def _plot_panel_a_empirical_nulls(
         showmeans=False,
         showmedians=False,
         showextrema=False,
-        widths=0.78,
+        widths=0.70,
     )
     for body, meta in zip(vio["bodies"], row_meta, strict=True):
         null_type = _as_str(meta.get("null_type")).casefold()
@@ -2301,7 +2336,7 @@ def _plot_panel_a_empirical_nulls(
             color = PALETTE["green"]
         body.set_facecolor(color)
         body.set_edgecolor(PALETTE["dark_gray"])
-        body.set_alpha(0.28)
+        body.set_alpha(0.22)
         body.set_linewidth(0.5)
         # Keep the lower half of each horizontal violin so observed points remain readable.
         path = body.get_paths()[0]
@@ -2319,13 +2354,13 @@ def _plot_panel_a_empirical_nulls(
                     16,
                 )
             )
-            jitter = rng.uniform(-0.12, 0.12, size=bio_vals.size)
+            jitter = rng.uniform(-0.08, 0.08, size=bio_vals.size)
             ax.scatter(
                 bio_vals,
                 y[idx] + jitter,
-                s=22,
+                s=13,
                 color=PALETTE["dark_gray"],
-                alpha=0.75,
+                alpha=0.52,
                 linewidths=0.0,
                 zorder=4,
                 label="Participant observed" if idx == 0 else None,
@@ -2334,7 +2369,7 @@ def _plot_panel_a_empirical_nulls(
             ax.scatter(
                 [dataset_means[idx]],
                 [y[idx]],
-                s=42,
+                s=46,
                 marker="D",
                 color=PALETTE["vermillion"],
                 edgecolors=PALETTE["dark_gray"],
@@ -2344,11 +2379,15 @@ def _plot_panel_a_empirical_nulls(
             )
 
     _ref_vline(ax, 0.0)
+    ax.axvline(0.0, color=PALETTE["dark_gray"], lw=1.35, ls="-", alpha=0.85, zorder=1)
+    for i in range(1, len(row_meta)):
+        if row_meta[i]["dataset_id"] != row_meta[i - 1]["dataset_id"]:
+            ax.axhline((y[i] + y[i - 1]) / 2.0, color=PALETTE["light_gray"], lw=1.0, ls="--", zorder=0)
     ax.set_yticks(list(y))
-    ax.set_yticklabels(labels, fontsize=FS_TICK - 2)
+    ax.set_yticklabels(labels, fontsize=FS_TICK - 1)
     ax.set_xlabel(
         xlabel,
-        fontsize=FS_AXIS - 3,
+        fontsize=FS_AXIS - 2,
         labelpad=8,
         linespacing=1.15,
     )
@@ -2362,7 +2401,7 @@ def _plot_panel_a_empirical_nulls(
     role_disp = _as_str(first.get("dataset_role"), "unknown").title()
     if single_dataset:
         subtitle = (
-            f"{_dataset_display(_as_str(first.get('dataset_id')))} — {role_disp} | "
+            f"{_as_str(first.get('dataset_id')).casefold()} — {role_disp} | "
             f"D{PRIMARY_DURATION_S} | "
             f"{int(first['n_biological_participants'])} biological participants | "
             f"{int(first['n_analysis_units'])} sessions | "
@@ -2371,8 +2410,7 @@ def _plot_panel_a_empirical_nulls(
         )
     else:
         subtitle = (
-            f"Primary + sensitivity | D{PRIMARY_DURATION_S} | "
-            "rows = null method; see eligibility/hierarchy exports for per-dataset counts"
+            f"D{PRIMARY_DURATION_S} | dataset × null rows | no cross-dataset pooling"
         )
     if not full_surrogate_distributions or not all(
         bool(m.get("full_distributions")) for m in row_meta
@@ -2388,7 +2426,7 @@ def _plot_panel_a_empirical_nulls(
         transform=ax.transAxes,
         ha="left",
         va="bottom",
-        fontsize=FS_PANEL_TITLE - 4,
+        fontsize=FS_PANEL_TITLE - 3,
         color=PALETTE["dark_gray"],
         clip_on=False,
     )
@@ -2399,7 +2437,7 @@ def _plot_panel_a_empirical_nulls(
         transform=ax.transAxes,
         ha="left",
         va="bottom",
-        fontsize=FS_TICK - 4,
+        fontsize=FS_TICK - 2,
         color=PALETTE["dark_gray"],
         alpha=0.88,
         clip_on=False,
@@ -2448,7 +2486,7 @@ def _plot_panel_a_empirical_nulls(
         loc="upper center",
         bbox_to_anchor=(0.5, -0.20),
         ncol=2,
-        fontsize=FS_LEGEND - 3,
+        fontsize=FS_LEGEND - 1,
         frameon=False,
         handlelength=1.5,
         handletextpad=0.45,
@@ -2586,321 +2624,207 @@ def _seeded_bio_derangement(
 
 
 def _panel_b_cross_subject_and_innovation(
-    units: Sequence[SeriesUnit],
+    null_rows: Sequence[Mapping[str, object]],
+    surrogate_rows: Sequence[Mapping[str, object]],
     *,
     n_null_draws: int,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
-    """Observation-level cross-subject HR mismatch and innovations analyses."""
-    if not units:
+    """Observation-level cross-subject and innovations controls from locked C4 outputs."""
+    if not null_rows:
         return [], [], []
 
-    unit_meta = {unit.observation_id: _panel_b_unit_keys(unit) for unit in units}
-    pools: dict[tuple[str, ...], list[SeriesUnit]] = defaultdict(list)
-    for unit in units:
-        meta = unit_meta[unit.observation_id]
-        pools[
-            (
-                meta["dataset_id"],
-                unit.condition.casefold(),
-                unit.modality.casefold(),
-                str(int(unit.duration_s)),
-                unit.band.casefold(),
-                unit.power_representation.casefold(),
-            )
-        ].append(unit)
+    from .group_tables import normalize_keys
+    from .nulls import NULL_TYPE_AR1_INNOVATIONS, NULL_TYPE_CROSS_SUBJECT_MISMATCH
 
-    donor_draw_map: dict[str, list[str]] = {}
-    ineligible_cross_reason: dict[str, str] = {}
-    cross_draw_rows: list[dict[str, object]] = []
-
-    for pool_key, pool_units in pools.items():
-        bios = [unit_meta[unit.observation_id]["biological_participant_id"] for unit in pool_units]
-        unique_bios = {bio for bio in bios if bio}
-        if len(unique_bios) < 2:
-            for unit in pool_units:
-                ineligible_cross_reason[unit.observation_id] = "insufficient_biological_donor_pool"
-            continue
-        seed = deterministic_seed(
-            "|".join(pool_key),
-            f"panel_b_cross_hr|draws={n_null_draws}",
-            "cross_subject_mismatch",
+    def _is_slice(row: Mapping[str, object]) -> bool:
+        return (
+            _as_int(row.get("duration_s")) == int(PRIMARY_DURATION_S)
+            and _as_str(row.get("band")).casefold() == PRIMARY_BAND.casefold()
+            and _as_str(row.get("power_representation")).casefold() == PRIMARY_REPRESENTATION.casefold()
+            and _as_str(row.get("endpoint_name"), ENDPOINT_ZLPI).casefold() == ENDPOINT_ZLPI
         )
-        rng = np.random.default_rng(seed)
-        draw_assignments: list[np.ndarray] = []
-        for _draw in range(int(n_null_draws) + 1):
-            perm = _seeded_bio_derangement(bios, rng)
-            if perm is None:
-                draw_assignments = []
-                break
-            draw_assignments.append(perm)
-        if not draw_assignments:
-            for unit in pool_units:
-                ineligible_cross_reason[unit.observation_id] = "no_valid_biological_derangement"
-            continue
-        for focal_idx, focal in enumerate(pool_units):
-            donors = [pool_units[int(perm[focal_idx])].observation_id for perm in draw_assignments]
-            donor_draw_map[focal.observation_id] = donors
-            for draw_idx, donor_obs in enumerate(donors):
-                donor_unit = next(u for u in pool_units if u.observation_id == donor_obs)
-                cross_draw_rows.append(
-                    {
-                        "dataset_id": unit_meta[focal.observation_id]["dataset_id"],
-                        "observation_id": focal.observation_id,
-                        "biological_participant_id": unit_meta[focal.observation_id]["biological_participant_id"],
-                        "session_id": unit_meta[focal.observation_id]["session_id"],
-                        "condition": focal.condition,
-                        "state": unit_meta[focal.observation_id]["state"],
-                        "period": unit_meta[focal.observation_id]["period"],
-                        "session_type": unit_meta[focal.observation_id]["session_type"],
-                        "band": focal.band,
-                        "duration_s": int(focal.duration_s),
-                        "endpoint_name": contract_for_duration(focal.duration_s).endpoint_name,
-                        "draw_index": int(draw_idx),
-                        "is_cross_observed_draw": bool(draw_idx == 0),
-                        "donor_observation_id": donor_obs,
-                        "donor_biological_participant_id": unit_meta[donor_obs]["biological_participant_id"],
-                        "donor_session_id": unit_meta[donor_obs]["session_id"],
-                        "donor_period": unit_meta[donor_obs]["period"],
-                        "donor_state": unit_meta[donor_obs]["state"],
-                    }
-                )
+
+    cross_rows = {
+        _as_str(row.get("observation_id")): row
+        for row in null_rows
+        if _is_slice(row) and _as_str(row.get("null_type")).casefold() == NULL_TYPE_CROSS_SUBJECT_MISMATCH
+    }
+    ar1_rows = {
+        _as_str(row.get("observation_id")): row
+        for row in null_rows
+        if _is_slice(row) and _as_str(row.get("null_type")).casefold() == NULL_TYPE_AR1_INNOVATIONS
+    }
 
     observation_rows: list[dict[str, object]] = []
     innovation_diag_rows: list[dict[str, object]] = []
+    all_obs = sorted(set(cross_rows) | set(ar1_rows))
+    for observation_id in all_obs:
+        cross_row = cross_rows.get(observation_id, {})
+        ar1_row = ar1_rows.get(observation_id, {})
+        base = cross_row if cross_row else ar1_row
+        if not base:
+            continue
+        keys = normalize_keys(base)
+        dataset_id = _as_str(keys.get("dataset_id"), _as_str(base.get("dataset_id"))).casefold()
+        condition = _as_str(base.get("condition"))
+        state, period, session_type = _panel_b_parse_state_period(dataset_id, condition)
+        session_id = _as_str(keys.get("session_id"), "single").casefold() or "single"
+        biological_participant_id = _as_str(keys.get("participant_id")).casefold()
 
-    for unit in units:
-        meta = unit_meta[unit.observation_id]
-        endpoint_name = contract_for_duration(unit.duration_s).endpoint_name
-        identity = {
-            "dataset_id": unit.dataset_id,
-            "subject_id": unit.subject_id,
-            "task": unit.task,
-            "condition": unit.condition,
-            "observation_id": unit.observation_id,
-        }
-        observed = compute_endpoint_index_from_series(
-            unit.hr_z,
-            unit.eeg_z,
-            duration_s=unit.duration_s,
-            identity=identity,
-            band=unit.band,
-            power_representation=unit.power_representation,
-            duration_role=unit.duration_role,
-            is_primary_representation=unit.is_primary_representation,
-            pair=unit.pair,
-        )
-        e_correct = _as_float(observed.get("endpoint_index"))
-        observed_eligible = bool(observed.get("eligible"))
+        z_correct = _as_float(cross_row.get("effect_size_surrogate_z"))
+        z_cross = _as_float(cross_row.get("cross_subject_null_normalized_effect"))
+        delta_z = (z_correct - z_cross) if math.isfinite(z_correct) and math.isfinite(z_cross) else float("nan")
 
+        cross_status = _as_str(cross_row.get("status")).casefold()
+        ar1_status = _as_str(ar1_row.get("status")).casefold()
         exclusion_reason = ""
-        cross_values: list[float] = []
-        donor_obs_ids = donor_draw_map.get(unit.observation_id, [])
-        if not observed_eligible:
-            exclusion_reason = "observed_endpoint_ineligible"
-        elif unit.observation_id in ineligible_cross_reason:
-            exclusion_reason = ineligible_cross_reason[unit.observation_id]
-        elif not donor_obs_ids:
-            exclusion_reason = "missing_donor_assignments"
-        else:
-            donor_by_obs = {u.observation_id: u for u in units}
-            for donor_obs in donor_obs_ids:
-                donor = donor_by_obs.get(donor_obs)
-                if donor is None:
-                    cross_values.append(float("nan"))
-                    continue
-                if len(donor.hr_z) != len(unit.eeg_z):
-                    cross_values.append(float("nan"))
-                    continue
-                cross_metrics = compute_endpoint_index_from_series(
-                    donor.hr_z,
-                    unit.eeg_z,
-                    duration_s=unit.duration_s,
-                    identity=identity,
-                    band=unit.band,
-                    power_representation=unit.power_representation,
-                    duration_role=unit.duration_role,
-                    is_primary_representation=unit.is_primary_representation,
-                    pair=unit.pair,
-                )
-                cross_values.append(_as_float(cross_metrics.get("endpoint_index")))
-            if sum(1 for value in cross_values if math.isfinite(value)) < int(n_null_draws):
-                exclusion_reason = "insufficient_finite_cross_draws"
+        if cross_row and cross_status != "computed":
+            exclusion_reason = _as_str(cross_row.get("reason_code") or cross_row.get("reason") or "cross_subject_not_computable")
+        elif ar1_row and ar1_status != "computed":
+            exclusion_reason = _as_str(ar1_row.get("reason_code") or ar1_row.get("reason") or "ar1_not_computable")
+        elif not (math.isfinite(z_correct) and math.isfinite(z_cross) and math.isfinite(_as_float(ar1_row.get("effect_size_surrogate_z")))):
+            exclusion_reason = "nonfinite_null_normalized_effect"
 
-        e_cross_obs = float("nan")
-        cross_null = []
-        mu_cross = float("nan")
-        sd_cross = float("nan")
-        z_correct = float("nan")
-        z_cross = float("nan")
-        delta_z = float("nan")
-        if not exclusion_reason and cross_values:
-            e_cross_obs = _as_float(cross_values[0])
-            cross_null = [float(value) for value in cross_values[1:] if math.isfinite(float(value))]
-            z_correct, mu_cross, sd_cross, _cross_floor, cross_reason = _null_standardize_effect(
-                e_correct,
-                cross_null,
-                required_draws=int(n_null_draws),
-            )
-            z_cross, _mu_cross2, _sd_cross2, _cross_floor2, cross_reason2 = _null_standardize_effect(
-                e_cross_obs,
-                cross_null,
-                required_draws=int(n_null_draws),
-            )
-            if cross_reason and not exclusion_reason:
-                exclusion_reason = cross_reason
-            if cross_reason2 and not exclusion_reason:
-                exclusion_reason = cross_reason2
-            if math.isfinite(z_correct) and math.isfinite(z_cross):
-                delta_z = z_correct - z_cross
-            else:
-                delta_z = float("nan")
-
-        # AR(1) innovations (observed endpoint from innovations, not raw series).
-        hr_phi = _fit_ar1_phi_for_panel(unit.hr_z)
-        eeg_phi = _fit_ar1_phi_for_panel(unit.eeg_z)
-        # AR(1) innovations are defined for t>=1; sample 0 is undefined.
-        # Trimming index 0 avoids circularly shifting a structural NaN through
-        # the common-support anchor window, which can collapse the innovation
-        # null distribution to a single eligible shift.
-        hr_inn_full = ar1_innovations(unit.hr_z)
-        eeg_inn_full = ar1_innovations(unit.eeg_z)
-        hr_inn = np.asarray(hr_inn_full[1:], dtype=float)
-        eeg_inn = np.asarray(eeg_inn_full[1:], dtype=float)
-        ac_hr_before = lag1_autocorrelation(unit.hr_z)
-        ac_eeg_before = lag1_autocorrelation(unit.eeg_z)
-        ac_hr_after = lag1_autocorrelation(hr_inn)
-        ac_eeg_after = lag1_autocorrelation(eeg_inn)
-        innov_eff_n = int(np.sum(np.isfinite(hr_inn) & np.isfinite(eeg_inn)))
-        innovation_failure = ""
-        innovation_observed = float("nan")
-        innovation_null_vals: list[float] = []
-        innovation_null_finite_draws = 0
-        innovation_null_mean = float("nan")
-        innovation_null_sd = float("nan")
-        z_innovation = float("nan")
-        shifts = valid_circular_shifts(len(eeg_inn))
-        if innov_eff_n < 3:
-            innovation_failure = "insufficient_innovation_length"
-        elif shifts.size == 0:
-            innovation_failure = "no_valid_innovation_circular_shift"
-        else:
-            innov_obs_metrics = compute_endpoint_index_from_series(
-                hr_inn,
-                eeg_inn,
-                duration_s=unit.duration_s,
-                identity=identity,
-                band=unit.band,
-                power_representation=unit.power_representation,
-                duration_role=unit.duration_role,
-                is_primary_representation=unit.is_primary_representation,
-                pair=unit.pair,
-            )
-            innovation_observed = _as_float(innov_obs_metrics.get("endpoint_index"))
-            innov_seed = deterministic_seed(
-                unit.observation_id,
-                f"{unit.duration_s}|{unit.band}|{unit.power_representation}|innovation",
-                "circular_shift",
-            )
-            innov_rng = np.random.default_rng(innov_seed)
-            for _ in range(int(n_null_draws)):
-                shift = int(innov_rng.choice(shifts))
-                eeg_shift = circular_shift_series(eeg_inn, shift)
-                null_metrics = compute_endpoint_index_from_series(
-                    hr_inn,
-                    eeg_shift,
-                    duration_s=unit.duration_s,
-                    identity=identity,
-                    band=unit.band,
-                    power_representation=unit.power_representation,
-                    duration_role=unit.duration_role,
-                    is_primary_representation=unit.is_primary_representation,
-                    pair=unit.pair,
-                )
-                innovation_null_vals.append(_as_float(null_metrics.get("endpoint_index")))
-            finite_innovation_null = [
-                float(value)
-                for value in innovation_null_vals
-                if math.isfinite(float(value))
-            ]
-            innovation_null_finite_draws = len(finite_innovation_null)
-            if innovation_null_finite_draws < int(n_null_draws):
-                innovation_failure = "insufficient_finite_innovation_draws"
-            else:
-                (
-                    z_innovation,
-                    innovation_null_mean,
-                    innovation_null_sd,
-                    _innovation_floor,
-                    innovation_reason,
-                ) = _null_standardize_effect(
-                    innovation_observed,
-                    finite_innovation_null,
-                    required_draws=int(n_null_draws),
-                )
-                if innovation_reason:
-                    innovation_failure = innovation_reason
-
-        innovation_diag_rows.append(
-            {
-                "dataset_id": meta["dataset_id"],
-                "observation_id": unit.observation_id,
-                "biological_participant_id": meta["biological_participant_id"],
-                "session_id": meta["session_id"],
-                "condition": unit.condition,
-                "state": meta["state"],
-                "period": meta["period"],
-                "session_type": meta["session_type"],
-                "band": unit.band,
-                "duration_s": int(unit.duration_s),
-                "endpoint_name": endpoint_name,
-                "lag1_hr_before": ac_hr_before,
-                "lag1_eeg_before": ac_eeg_before,
-                "lag1_hr_after": ac_hr_after,
-                "lag1_eeg_after": ac_eeg_after,
-                "ar1_phi_hr": hr_phi,
-                "ar1_phi_eeg": eeg_phi,
-                "innovation_effective_length": innov_eff_n,
-                "innovation_null_finite_draws": innovation_null_finite_draws,
-                "innovation_null_nonfinite_draws": int(n_null_draws)
-                - innovation_null_finite_draws,
-                "model_failure_flag": bool(innovation_failure),
-                "model_failure_reason": innovation_failure,
-            }
-        )
-
+        n_cross = _as_int(cross_row.get("n_surrogates_finite"), 0)
+        n_ar1 = _as_int(ar1_row.get("n_surrogates_finite"), 0)
         observation_rows.append(
             {
-                "dataset_id": meta["dataset_id"],
-                "biological_participant_id": meta["biological_participant_id"],
-                "session_id": meta["session_id"],
-                "condition": unit.condition,
-                "period": meta["period"],
-                "state": meta["state"],
-                "session_type": meta["session_type"],
-                "observation_id": unit.observation_id,
-                "band": unit.band,
-                "duration_s": int(unit.duration_s),
-                "endpoint_name": endpoint_name,
-                "representation": unit.power_representation,
-                "correct_endpoint": e_correct,
-                "cross_observed_endpoint": e_cross_obs,
-                "mean_cross_subject_endpoint": mu_cross,
-                "cross_subject_null_mean": mu_cross,
-                "cross_subject_null_sd": sd_cross,
+                "dataset_id": dataset_id,
+                "biological_participant_id": biological_participant_id,
+                "session_id": session_id,
+                "condition": condition,
+                "period": period,
+                "state": state,
+                "session_type": session_type,
+                "observation_id": observation_id,
+                "band": PRIMARY_BAND,
+                "duration_s": int(PRIMARY_DURATION_S),
+                "endpoint_name": ENDPOINT_ZLPI,
+                "representation": PRIMARY_REPRESENTATION,
+                "correct_endpoint": _as_float(cross_row.get("observed_endpoint_index")),
+                "cross_observed_endpoint": _as_float(cross_row.get("cross_observed_endpoint_index")),
+                "mean_cross_subject_endpoint": _as_float(cross_row.get("null_mean")),
+                "cross_subject_null_mean": _as_float(cross_row.get("null_mean")),
+                "cross_subject_null_sd": _as_float(cross_row.get("null_std")),
                 "correct_null_normalized_effect": z_correct,
                 "cross_subject_null_normalized_effect": z_cross,
                 "paired_specificity_contrast_delta_z": delta_z,
-                "innovation_endpoint": innovation_observed,
-                "innovation_null_mean": innovation_null_mean,
-                "innovation_null_sd": innovation_null_sd,
-                "innovation_null_normalized_effect": z_innovation,
-                "innovation_null_finite_draws": innovation_null_finite_draws,
-                "innovation_null_nonfinite_draws": int(n_null_draws)
-                - innovation_null_finite_draws,
-                "n_cross_subject_draws": len(cross_null),
-                "n_innovation_null_draws": len(innovation_null_vals),
+                "innovation_endpoint": _as_float(ar1_row.get("observed_endpoint_index")),
+                "innovation_null_mean": _as_float(ar1_row.get("null_mean")),
+                "innovation_null_sd": _as_float(ar1_row.get("null_std")),
+                "innovation_null_normalized_effect": _as_float(ar1_row.get("effect_size_surrogate_z")),
+                "innovation_null_finite_draws": n_ar1,
+                "innovation_null_nonfinite_draws": max(0, int(n_null_draws) - n_ar1),
+                "n_cross_subject_draws": n_cross,
+                "n_innovation_null_draws": n_ar1,
                 "eligibility_flag": (not exclusion_reason),
                 "exclusion_reason": exclusion_reason,
+                "status": _as_str(cross_row.get("status") or ar1_row.get("status")),
+                "reason_code": _as_str(cross_row.get("reason_code") or ar1_row.get("reason_code")),
+                "reason": _as_str(cross_row.get("reason") or ar1_row.get("reason")),
+                "required_evidence": _as_str(
+                    cross_row.get("required_evidence") or ar1_row.get("required_evidence")
+                ),
+                "observed_evidence": _as_str(
+                    cross_row.get("observed_evidence") or ar1_row.get("observed_evidence")
+                ),
+                "stage": _as_str(cross_row.get("stage") or ar1_row.get("stage")),
+                "specification_id": _as_str(
+                    cross_row.get("specification_id") or ar1_row.get("specification_id")
+                ),
+                "participant_id": _as_str(
+                    cross_row.get("participant_id") or ar1_row.get("participant_id")
+                ),
+            }
+        )
+        innovation_diag_rows.append(
+            {
+                "dataset_id": dataset_id,
+                "observation_id": observation_id,
+                "biological_participant_id": biological_participant_id,
+                "session_id": session_id,
+                "condition": condition,
+                "state": state,
+                "period": period,
+                "session_type": session_type,
+                "band": PRIMARY_BAND,
+                "duration_s": int(PRIMARY_DURATION_S),
+                "endpoint_name": ENDPOINT_ZLPI,
+                "lag1_hr_before": float("nan"),
+                "lag1_eeg_before": float("nan"),
+                "lag1_hr_after": float("nan"),
+                "lag1_eeg_after": float("nan"),
+                "ar1_phi_hr": float("nan"),
+                "ar1_phi_eeg": float("nan"),
+                "innovation_effective_length": float("nan"),
+                "innovation_null_finite_draws": n_ar1,
+                "innovation_null_nonfinite_draws": max(0, int(n_null_draws) - n_ar1),
+                "model_failure_flag": bool(ar1_row and ar1_status != "computed"),
+                "model_failure_reason": _as_str(
+                    ar1_row.get("reason_code") or ar1_row.get("reason")
+                ),
+            }
+        )
+
+    cross_draw_rows: list[dict[str, object]] = []
+    for row in observation_rows:
+        cross_draw_rows.append(
+            {
+                "dataset_id": _as_str(row.get("dataset_id")),
+                "observation_id": _as_str(row.get("observation_id")),
+                "biological_participant_id": _as_str(row.get("biological_participant_id")),
+                "session_id": _as_str(row.get("session_id")),
+                "condition": _as_str(row.get("condition")),
+                "state": _as_str(row.get("state")),
+                "period": _as_str(row.get("period")),
+                "session_type": _as_str(row.get("session_type")),
+                "band": PRIMARY_BAND,
+                "duration_s": int(PRIMARY_DURATION_S),
+                "endpoint_name": ENDPOINT_ZLPI,
+                "draw_index": 0,
+                "is_cross_observed_draw": True,
+                "donor_observation_id": _as_str(cross_rows.get(_as_str(row.get("observation_id")), {}).get("cross_partner_observation_id")),
+                "donor_biological_participant_id": _as_str(cross_rows.get(_as_str(row.get("observation_id")), {}).get("cross_partner_participant_id")),
+                "donor_session_id": _as_str(cross_rows.get(_as_str(row.get("observation_id")), {}).get("cross_partner_session_id")),
+                "donor_period": "",
+                "donor_state": "",
+            }
+        )
+    for row in surrogate_rows:
+        if _as_str(row.get("null_type")).casefold() != NULL_TYPE_CROSS_SUBJECT_MISMATCH:
+            continue
+        if _as_int(row.get("duration")) != int(PRIMARY_DURATION_S):
+            continue
+        if _as_str(row.get("band")).casefold() != PRIMARY_BAND.casefold():
+            continue
+        if _as_str(row.get("representation")).casefold() != PRIMARY_REPRESENTATION.casefold():
+            continue
+        if _as_str(row.get("endpoint"), ENDPOINT_ZLPI).casefold() != ENDPOINT_ZLPI:
+            continue
+        base_state, base_period, base_session_type = _panel_b_parse_state_period(
+            _as_str(row.get("dataset_id")).casefold(),
+            _as_str(row.get("condition")),
+        )
+        cross_draw_rows.append(
+            {
+                "dataset_id": _as_str(row.get("dataset_id")).casefold(),
+                "observation_id": _as_str(row.get("observation_id")),
+                "biological_participant_id": _as_str(row.get("biological_participant_id")).casefold(),
+                "session_id": _as_str(row.get("session_id")).casefold() or "single",
+                "condition": _as_str(row.get("condition")),
+                "state": base_state,
+                "period": base_period,
+                "session_type": base_session_type,
+                "band": _as_str(row.get("band")).casefold(),
+                "duration_s": _as_int(row.get("duration"), PRIMARY_DURATION_S),
+                "endpoint_name": _as_str(row.get("endpoint"), ENDPOINT_ZLPI).casefold(),
+                "draw_index": _as_int(row.get("surrogate_index"), -1) + 1,
+                "is_cross_observed_draw": False,
+                "donor_observation_id": _as_str(row.get("partner_observation_id")),
+                "donor_biological_participant_id": _as_str(row.get("partner_participant_id")),
+                "donor_session_id": _as_str(row.get("partner_session_id")),
+                "donor_period": "",
+                "donor_state": "",
             }
         )
     return observation_rows, cross_draw_rows, innovation_diag_rows
@@ -2975,52 +2899,71 @@ def _panel_b_group_summaries(
         "innovation_null_normalized_effect",
     )
     out: list[dict[str, object]] = []
-    for estimand in estimands:
-        vals = np.asarray(
-            [
-                _as_float(row.get(estimand))
-                for row in participant_rows
-                if math.isfinite(_as_float(row.get(estimand)))
-            ],
-            dtype=float,
-        )
-        n = int(vals.size)
-        mean = float(np.mean(vals)) if n else float("nan")
-        ci_low = float("nan")
-        ci_high = float("nan")
-        if n >= 2:
-            se = float(np.std(vals, ddof=1) / math.sqrt(n))
-            t_crit = float(stats.t.ppf(0.975, df=n - 1))
-            ci_low = mean - t_crit * se
-            ci_high = mean + t_crit * se
-        out.append(
-            {
-                "estimand": estimand,
-                "band": PRIMARY_BAND,
-                "endpoint_name": ENDPOINT_ZLPI,
-                "estimate": mean,
-                "ci_low": ci_low,
-                "ci_high": ci_high,
-                "inferential_n": n,
-                "biological_participant_n": len(
-                    {
-                        _as_str(row.get("biological_participant_id")).casefold()
-                        for row in participant_rows
-                    }
-                ),
-                "session_unit_n": len(
-                    {
-                        (
-                            _as_str(row.get("biological_participant_id")).casefold(),
-                            _as_str(row.get("session_id"), "single").casefold() or "single",
-                        )
-                        for row in observation_rows
-                        if _as_bool(row.get("eligibility_flag"), False)
-                    }
-                ),
-                "method": "student_t_participant_means",
-            }
-        )
+    dataset_ids = sorted(
+        {
+            _as_str(row.get("dataset_id")).casefold()
+            for row in participant_rows
+            if _as_str(row.get("dataset_id"))
+        }
+    )
+    for dataset_id in dataset_ids:
+        ds_participants = [
+            row
+            for row in participant_rows
+            if _as_str(row.get("dataset_id")).casefold() == dataset_id
+        ]
+        ds_observations = [
+            row
+            for row in observation_rows
+            if _as_str(row.get("dataset_id")).casefold() == dataset_id
+            and _as_bool(row.get("eligibility_flag"), False)
+        ]
+        for estimand in estimands:
+            vals = np.asarray(
+                [
+                    _as_float(row.get(estimand))
+                    for row in ds_participants
+                    if math.isfinite(_as_float(row.get(estimand)))
+                ],
+                dtype=float,
+            )
+            n = int(vals.size)
+            mean = float(np.mean(vals)) if n else float("nan")
+            ci_low = float("nan")
+            ci_high = float("nan")
+            if n >= 2:
+                se = float(np.std(vals, ddof=1) / math.sqrt(n))
+                t_crit = float(stats.t.ppf(0.975, df=n - 1))
+                ci_low = mean - t_crit * se
+                ci_high = mean + t_crit * se
+            out.append(
+                {
+                    "dataset_id": dataset_id,
+                    "estimand": estimand,
+                    "band": PRIMARY_BAND,
+                    "endpoint_name": ENDPOINT_ZLPI,
+                    "estimate": mean,
+                    "ci_low": ci_low,
+                    "ci_high": ci_high,
+                    "inferential_n": n,
+                    "biological_participant_n": len(
+                        {
+                            _as_str(row.get("biological_participant_id")).casefold()
+                            for row in ds_participants
+                        }
+                    ),
+                    "session_unit_n": len(
+                        {
+                            (
+                                _as_str(row.get("biological_participant_id")).casefold(),
+                                _as_str(row.get("session_id"), "single").casefold() or "single",
+                            )
+                            for row in ds_observations
+                        }
+                    ),
+                    "method": "student_t_participant_means_dataset_stratified",
+                }
+            )
     return out
 
 
@@ -3035,15 +2978,15 @@ def _plot_panel_b_cross_subject_innovations(
             ax_top,
             MSG_NOT_INCLUDED,
             xlabel="Pairing condition",
-            ylabel="Null-normalized endpoint effect",
+            ylabel="Null-relative Z (Z_null)",
         )
         _mark_empty_panel(
             ax_bottom,
             MSG_NOT_INCLUDED,
             xlabel="Control type",
-            ylabel="Null-normalized endpoint effect",
+            ylabel="Null-relative Z (Z_null)",
         )
-        _set_panel_title(ax_top, "Cross-subject specificity and innovations", fontsize=FS_PANEL_TITLE - 2, pad=10)
+        _set_panel_title(ax_top, "Pairing specificity and AR(1) control", fontsize=FS_PANEL_TITLE - 2, pad=10)
         _add_panel_label(ax_top, "B")
         return
 
@@ -3062,8 +3005,8 @@ def _plot_panel_b_cross_subject_innovations(
                 [x_cross, x_correct],
                 [y_cross, y_corr],
                 color=PALETTE["light_gray"],
-                lw=0.8,
-                alpha=0.65,
+                lw=0.45,
+                alpha=0.16,
                 zorder=2,
             )
         if math.isfinite(y_cross):
@@ -3071,48 +3014,72 @@ def _plot_panel_b_cross_subject_innovations(
         if math.isfinite(y_corr):
             ax_top.scatter([x_correct], [y_corr], s=20, color=PALETTE["blue"], alpha=0.85, zorder=3)
 
-    group_by_est = { _as_str(r.get("estimand")): r for r in group_rows }
-    for x_pos, estimand, color in (
+    dataset_ids = sorted(
+        {
+            _as_str(row.get("dataset_id")).casefold()
+            for row in by_part
+            if _as_str(row.get("dataset_id"))
+        }
+    )
+    cmap = plt.get_cmap("tab10")
+    dataset_colors = {ds: cmap(i % 10) for i, ds in enumerate(dataset_ids)}
+    group_by_key = {
+        (
+            _as_str(r.get("dataset_id")).casefold(),
+            _as_str(r.get("estimand")),
+        ): r
+        for r in group_rows
+    }
+    x_offsets = {ds: 0.0 for ds in dataset_ids}
+    if len(dataset_ids) > 1:
+        span = 0.30
+        x_offsets = {
+            ds: -0.5 * span + i * (span / (len(dataset_ids) - 1))
+            for i, ds in enumerate(dataset_ids)
+        }
+    for x_pos, estimand, _color in (
         (x_cross, "cross_subject_null_normalized_effect", PALETTE["dark_gray"]),
         (x_correct, "correct_null_normalized_effect", PALETTE["blue"]),
         (x_diff, "paired_specificity_contrast_delta_z", PALETTE["vermillion"]),
     ):
-        row = group_by_est.get(estimand)
-        if row is None:
-            continue
-        est = _as_float(row.get("estimate"))
-        lo = _as_float(row.get("ci_low"))
-        hi = _as_float(row.get("ci_high"))
-        if math.isfinite(est) and math.isfinite(lo) and math.isfinite(hi):
-            ax_top.errorbar(
-                x_pos,
-                est,
-                yerr=[[est - lo], [hi - est]],
-                fmt="D",
-                color=color,
-                markersize=6.5,
-                markeredgecolor=PALETTE["dark_gray"],
-                markeredgewidth=0.4,
-                capsize=2.5,
-                lw=1.1,
-                zorder=4,
-            )
+        for ds in dataset_ids:
+            row = group_by_key.get((ds, estimand))
+            if row is None:
+                continue
+            est = _as_float(row.get("estimate"))
+            lo = _as_float(row.get("ci_low"))
+            hi = _as_float(row.get("ci_high"))
+            if math.isfinite(est) and math.isfinite(lo) and math.isfinite(hi):
+                ax_top.errorbar(
+                    x_pos + x_offsets.get(ds, 0.0),
+                    est,
+                    yerr=[[est - lo], [hi - est]],
+                    fmt="D",
+                    color=dataset_colors.get(ds, PALETTE["dark_gray"]),
+                    markersize=6.2,
+                    markeredgecolor=PALETTE["dark_gray"],
+                    markeredgewidth=0.4,
+                    capsize=2.5,
+                    lw=1.1,
+                    zorder=4,
+                )
 
     _ref_hline(ax_top, 0.0)
+    ax_top.axhline(0.0, color=PALETTE["dark_gray"], lw=1.25, ls="-", alpha=0.82, zorder=1)
     ax_top.set_xticks([x_cross, x_correct, x_diff])
     ax_top.set_xticklabels(
-        ["Cross-subject HR", "Correct simultaneous", "Correct − Cross"],
-        fontsize=FS_TICK - 4,
+        ["Cross-subject", "Correct", "Correct − cross"],
+        fontsize=FS_TICK - 1,
     )
     # Single shared y-label on the lower axes avoids mid-panel collision.
     ax_top.set_ylabel("")
     _style_axes(ax_top)
-    _set_panel_title(ax_top, "Cross-subject specificity and innovations", fontsize=FS_PANEL_TITLE - 2, pad=10)
+    _set_panel_title(ax_top, "Pairing specificity and AR(1) control", fontsize=FS_PANEL_TITLE - 2, pad=10)
     _add_panel_label(ax_top, "B")
 
     ctrl_order = [
         ("correct_null_normalized_effect", "Correct simultaneous", PALETTE["blue"], "o"),
-        ("cross_subject_null_normalized_effect", "Cross-subject HR", PALETTE["dark_gray"], "s"),
+        ("cross_subject_null_normalized_effect", "Cross-subject EEG", PALETTE["dark_gray"], "s"),
         ("innovation_null_normalized_effect", "AR(1) innovations", PALETTE["purple"], "D"),
     ]
     for idx, (metric, label, color, marker) in enumerate(ctrl_order):
@@ -3123,20 +3090,22 @@ def _plot_panel_b_cross_subject_innovations(
         if vals.size:
             jitter_rng = np.random.default_rng(42 + idx)
             x_vals = idx + jitter_rng.uniform(-0.10, 0.10, size=vals.size)
-            ax_bottom.scatter(x_vals, vals, s=18, color=color, alpha=0.65, zorder=3)
-        g = group_by_est.get(metric)
-        if g:
+            ax_bottom.scatter(x_vals, vals, s=14, color=color, alpha=0.55, zorder=3)
+        for ds in dataset_ids:
+            g = group_by_key.get((ds, metric))
+            if g is None:
+                continue
             est = _as_float(g.get("estimate"))
             lo = _as_float(g.get("ci_low"))
             hi = _as_float(g.get("ci_high"))
             if math.isfinite(est) and math.isfinite(lo) and math.isfinite(hi):
                 ax_bottom.errorbar(
-                    idx,
+                    idx + x_offsets.get(ds, 0.0),
                     est,
                     yerr=[[est - lo], [hi - est]],
                     fmt=marker,
-                    color=color,
-                    markersize=7,
+                    color=dataset_colors.get(ds, color),
+                    markersize=6.8,
                     markeredgecolor=PALETTE["dark_gray"],
                     markeredgewidth=0.4,
                     capsize=3,
@@ -3144,18 +3113,42 @@ def _plot_panel_b_cross_subject_innovations(
                     zorder=4,
                 )
     _ref_hline(ax_bottom, 0.0)
+    ax_bottom.axhline(0.0, color=PALETTE["dark_gray"], lw=1.25, ls="-", alpha=0.82, zorder=1)
     ax_bottom.set_xticks([0, 1, 2])
     ax_bottom.set_xticklabels(
-        ["Correct", "Cross-subject", "AR(1) innovations"],
-        fontsize=FS_TICK - 4,
+        ["Correct", "Cross-subject", "AR(1)"],
+        fontsize=FS_TICK - 1,
     )
     ax_bottom.set_ylabel(
-        "Null-normalized\nendpoint effect (Znull)",
-        fontsize=FS_AXIS - 5,
+        "Null-relative Z (Z_null)",
+        fontsize=FS_AXIS - 3,
         labelpad=6,
     )
     _style_axes(ax_bottom)
-    ax_bottom.set_xlabel("Control type", fontsize=FS_AXIS - 4)
+    ax_bottom.set_xlabel("Control type", fontsize=FS_AXIS - 3)
+    if len(dataset_ids) > 1:
+        from matplotlib.lines import Line2D
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="w",
+                markerfacecolor=dataset_colors.get(ds, PALETTE["dark_gray"]),
+                markeredgecolor=PALETTE["dark_gray"],
+                markersize=5.5,
+                label=_dataset_display(ds),
+            )
+            for ds in dataset_ids
+        ]
+        ax_top.legend(
+            handles=handles,
+            loc="upper right",
+            fontsize=FS_LEGEND - 1,
+            frameon=False,
+            title="Dataset",
+            title_fontsize=FS_LEGEND - 1,
+        )
 
 
 def _panel_c_dataset_role(dataset_id: str, dataset_roles: Mapping[str, str]) -> str:
@@ -3596,6 +3589,7 @@ def _panel_c_summary_rows(
         first = rows[0]
         by_bio: dict[str, list[float]] = defaultdict(list)
         session_units: set[str] = set()
+        contrast_ids: set[str] = set()
         all_obs: set[str] = set()
         for row in rows:
             bio = _as_str(row.get("biological_participant_id")).casefold()
@@ -3605,6 +3599,9 @@ def _panel_c_summary_rows(
             if bio and math.isfinite(delta):
                 by_bio[bio].append(delta)
             session_units.add(_as_str(row.get("session_unit_id")).casefold())
+            contrast_id = _as_str(row.get("contrast_id")).casefold()
+            if contrast_id:
+                contrast_ids.add(contrast_id)
             all_obs.update(_split_observation_ids(row.get("low_observation_ids")))
             all_obs.update(_split_observation_ids(row.get("effort_observation_ids")))
         participant_means = np.asarray(
@@ -3677,8 +3674,10 @@ def _panel_c_summary_rows(
                 "ci_high": ci_high,
                 "n_observations": len(all_obs),
                 "n_pairs": len(rows),
+                "n_paired_contrast_observations": len(rows),
                 "n_session_units": len({s for s in session_units if s}),
                 "n_biological_participants": int(participant_means.size),
+                "contrast_scope": " + ".join(sorted(contrast_ids)),
                 "estimand": "mean_effort_minus_low_demand_proximal_endpoint",
                 "contrast_direction": "effort_endpoint-low_demand_endpoint",
                 "endpoint_formula": _as_str(
@@ -3782,20 +3781,13 @@ def _plot_panel_c_dataset_trajectories(
         for band in BAND_ORDER
         if any(_as_str(r.get("band")).casefold() == band for r in plot_rows)
     ]
-    panel_title = "Duration-specific proximal coupling sensitivity"
-    y_label = "Mean effort − low-demand\nproximal coupling effect"
+    panel_title = "Duration sensitivity"
+    y_label = "Mean effort − low-demand\nendpoint effect"
     endpoint_styles = {
         ENDPOINT_ZLPI: ("o", "-"),
         ENDPOINT_MID_WINDOW_PROXIMAL_INDEX: ("s", "--"),
         ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX: ("^", "-."),
     }
-    duration_endpoint_key = (
-        (60, "SWPI"),
-        (120, "MWPI"),
-        (180, "ZLPI"),
-        (240, "ZLPI"),
-    )
-
     if not bands:
         ax = fig.add_subplot(gs_cell)
         _mark_empty_panel(
@@ -3804,7 +3796,7 @@ def _plot_panel_c_dataset_trajectories(
             xlabel="Duration (s)",
             ylabel=y_label,
         )
-        _set_panel_title(ax, panel_title, fontsize=FS_PANEL_TITLE - 5, pad=8)
+        _set_panel_title(ax, panel_title, fontsize=FS_PANEL_TITLE - 4, pad=8)
         _add_panel_label(ax, "C")
         return [ax]
 
@@ -3845,9 +3837,9 @@ def _plot_panel_c_dataset_trajectories(
     gs_wrap = gs_cell.subgridspec(
         4,
         2,
-        height_ratios=[0.20, 1.0, 0.28, 0.30],
+        height_ratios=[0.12, 1.0, 0.34, 0.40],
         width_ratios=[0.16, 1.0],
-        hspace=0.28,
+        hspace=0.34,
         wspace=0.06,
     )
 
@@ -3872,7 +3864,7 @@ def _plot_panel_c_dataset_trajectories(
         0.35,
         panel_title,
         transform=ax_header.transAxes,
-        fontsize=FS_PANEL_TITLE - 4,
+        fontsize=FS_PANEL_TITLE - 3,
         fontweight="normal",
         va="center",
         ha="left",
@@ -3891,7 +3883,7 @@ def _plot_panel_c_dataset_trajectories(
         rotation=90,
         va="center",
         ha="center",
-        fontsize=FS_AXIS - 5,
+        fontsize=FS_AXIS - 3,
         color=PALETTE["dark_gray"],
         clip_on=False,
     )
@@ -3952,29 +3944,58 @@ def _plot_panel_c_dataset_trajectories(
         ax.set_xticks([60, 120, 180, 240])
         ax.set_xlim(*FIGURE3_DURATION_XLIM)
         ax.set_ylim(*shared_ylim)
-        ax.set_title(_band_display(band), fontsize=FS_PANEL_TITLE - 7, pad=8)
-        ax.tick_params(axis="both", labelsize=FS_TICK - 3, pad=2)
+        ax.set_title(_band_display(band), fontsize=FS_TICK, pad=6)
+        ax.tick_params(axis="both", labelsize=FS_TICK - 1, pad=2)
         # Shared scales: y ticks only on left column; x ticks only on bottom row.
         if idx % 2 == 1:
             ax.tick_params(labelleft=False)
         if idx // 2 == 0:
             ax.tick_params(labelbottom=False)
         else:
-            ax.set_xticklabels(["60", "120", "180", "240"], fontsize=FS_TICK - 3)
+            ax.set_xticklabels(["60", "120", "180", "240"], fontsize=FS_TICK - 1)
         _style_axes(ax)
 
-    # Shared duration × endpoint key (once below the full facet grid).
-    ax_key = fig.add_subplot(gs_wrap[2, 1])
+    # Shared x-label + endpoint mapping + scope (separated from dataset legend).
+    ax_key = fig.add_subplot(gs_wrap[2, :])
     ax_key.set_axis_off()
-    ax_key.set_xlim(0.0, 1.0)
-    ax_key.set_ylim(0.0, 1.0)
-    # Align key columns with the four duration ticks conceptually.
-    key_xs = (0.125, 0.375, 0.625, 0.875)
-    for x_frac, (dur, alias) in zip(key_xs, duration_endpoint_key):
+    ax_key.text(
+        0.5,
+        0.88,
+        "Duration (s)",
+        transform=ax_key.transAxes,
+        ha="center",
+        va="center",
+        fontsize=FS_AXIS - 2,
+        color=PALETTE["dark_gray"],
+        clip_on=False,
+    )
+    ax_key.text(
+        0.5,
+        0.48,
+        "60 = SWPI   |   120 = MWPI   |   180/240 = ZLPI",
+        transform=ax_key.transAxes,
+        ha="center",
+        va="center",
+        fontsize=FS_TICK,
+        color=PALETTE["dark_gray"],
+        clip_on=False,
+    )
+    ds003690_scope = next(
+        (
+            _as_str(r.get("contrast_scope"))
+            for r in summary_rows
+            if _as_str(r.get("dataset_id")).casefold() == "ds003690"
+            and _as_int(r.get("duration_s")) == 240
+            and _as_str(r.get("band")).casefold() == "alpha"
+            and _as_str(r.get("eligibility_status")).casefold() == "eligible"
+        ),
+        "",
+    )
+    if ds003690_scope:
         ax_key.text(
-            x_frac,
-            0.72,
-            str(dur),
+            0.5,
+            0.12,
+            "ds003690: passive→gonogo + passive→simplert",
             transform=ax_key.transAxes,
             ha="center",
             va="center",
@@ -3982,19 +4003,8 @@ def _plot_panel_c_dataset_trajectories(
             color=PALETTE["dark_gray"],
             clip_on=False,
         )
-        ax_key.text(
-            x_frac,
-            0.28,
-            alias,
-            transform=ax_key.transAxes,
-            ha="center",
-            va="center",
-            fontsize=FS_TICK - 4,
-            color=PALETTE["dark_gray"],
-            clip_on=False,
-        )
 
-    # Dataset legend (left) + shared x-axis label (centered).
+    # Dataset legend only (clear of endpoint mapping / scope note).
     ax_footer = fig.add_subplot(gs_wrap[3, :])
     ax_footer.set_axis_off()
     dataset_handles = []
@@ -4027,29 +4037,18 @@ def _plot_panel_c_dataset_trajectories(
             dataset_handles,
             dataset_labels,
             title="Dataset",
-            loc="upper left",
-            bbox_to_anchor=(0.02, 1.05),
-            fontsize=FS_LEGEND - 5,
-            title_fontsize=FS_LEGEND - 4,
+            loc="center",
+            bbox_to_anchor=(0.5, 0.55),
+            fontsize=FS_LEGEND,
+            title_fontsize=FS_LEGEND,
             frameon=False,
             ncol=ncol,
             handlelength=1.6,
-            labelspacing=0.2,
+            labelspacing=0.25,
             columnspacing=0.9,
             handletextpad=0.35,
             borderaxespad=0.0,
         )
-    ax_footer.text(
-        0.55,
-        0.15,
-        "Duration (s)",
-        transform=ax_footer.transAxes,
-        fontsize=FS_AXIS - 4,
-        color=PALETTE["dark_gray"],
-        va="center",
-        ha="center",
-        clip_on=False,
-    )
     return axes
 
 
@@ -4062,6 +4061,8 @@ def _plot_participant_null_forest(
     panel_label: str | None = "A",
     ylabel: str = "Participant",
     show_run_badge: bool = True,
+    y_label_mode: str = "full",
+    xlim_override: tuple[float, float] | None = None,
 ) -> None:
     """Supplemental horizontal forest of biological-participant Δ_p ± mean CI."""
     rows = list(participant_rows)
@@ -4077,7 +4078,7 @@ def _plot_participant_null_forest(
         _set_panel_title(ax, title, fontsize=FS_PANEL_TITLE - 3, pad=8)
         return
 
-    y_labels = _participant_forest_labels(rows)
+    full_labels = _participant_forest_labels(rows)
     y_pos = np.arange(len(rows), dtype=float)
     deltas = np.asarray([float(r.delta_p) for r in rows], dtype=float)  # type: ignore[attr-defined]
     ax.scatter(
@@ -4129,12 +4130,17 @@ def _plot_participant_null_forest(
         # Prefer compact n_participants; avoid mangled "12 6 part." strings.
         mean_ytick = f"Mean (n={n_part})" if n_part else "Mean"
     ax.set_yticks(list(y_pos) + [summary_y])
-    ax.set_yticklabels(
-        y_labels + [mean_ytick],
-        fontsize=FS_TICK - 2,
-    )
+    if y_label_mode == "none":
+        yticks = [""] * len(full_labels) + [mean_ytick]
+    elif y_label_mode == "index":
+        yticks = [str(i + 1) for i in range(len(full_labels))] + [mean_ytick]
+    else:
+        yticks = full_labels + [mean_ytick]
+    ax.set_yticklabels(yticks, fontsize=FS_TICK - 2)
     ax.set_xlabel(f"Participant Δ ({ZLPI_METRIC})", fontsize=FS_AXIS - 2, labelpad=6)
     ax.set_ylabel(ylabel, fontsize=FS_AXIS - 2, labelpad=4)
+    if xlim_override is not None:
+        ax.set_xlim(*xlim_override)
     if show_run_badge:
         run_class = _as_str(getattr(inference, "run_class", ""))
         interp = _as_str(getattr(inference, "interpretation", ""))
@@ -4391,7 +4397,7 @@ def _render_figure3_null_supplement(
                 null_mean[mask],
                 observed[mask],
                 s=FIGURE3_SCATTER_SIZE,
-                alpha=0.55,
+                alpha=0.42,
                 color=color,
                 marker=marker,
                 edgecolors=PALETTE["dark_gray"],
@@ -4413,13 +4419,13 @@ def _render_figure3_null_supplement(
         )
         ax_scatter.legend(
             loc="lower right",
-            fontsize=FS_LEGEND - 3,
+            fontsize=FS_LEGEND - 4,
             frameon=True,
             fancybox=False,
             edgecolor=PALETTE["light_gray"],
             framealpha=0.92,
             title="Null type",
-            title_fontsize=FS_LEGEND - 2,
+            title_fontsize=FS_LEGEND - 3,
             markerscale=0.9,
             handlelength=1.2,
             labelspacing=0.3,
@@ -4451,17 +4457,34 @@ def _render_figure3_null_supplement(
         "cross_subject_mismatch": "Cross-subject",
         "ar1_innovations": "AR(1) innovations",
     }
-    # Secondary null forests at theta (participant-level), excluding primary.
-    for idx, null_type in enumerate(SECONDARY_NULL_TYPES):
-        row = 1 + idx // 2
-        col = idx % 2
-        ax = fig.add_subplot(gs[row, col])
+    secondary_payloads: list[tuple[str, list[object], object]] = []
+    sec_abs_max = 0.0
+    for null_type in SECONDARY_NULL_TYPES:
         participants, inference, _matched = analyze_null_slice(
             null_rows,
             band=PRIMARY_BAND,
             null_type=null_type,
             is_primary_slice=False,
         )
+        secondary_payloads.append((null_type, participants, inference))
+        for item in participants:
+            val = float(getattr(item, "delta_p"))
+            if math.isfinite(val):
+                sec_abs_max = max(sec_abs_max, abs(val))
+        for val in (
+            float(getattr(inference, "mean_delta")),
+            float(getattr(inference, "ci_low")),
+            float(getattr(inference, "ci_high")),
+        ):
+            if math.isfinite(val):
+                sec_abs_max = max(sec_abs_max, abs(val))
+    sec_lim = max(0.05, math.ceil(sec_abs_max * 20.0) / 20.0 + 0.02)
+    sec_xlim = (-sec_lim, sec_lim)
+    # Secondary null forests at theta (participant-level), excluding primary.
+    for idx, (null_type, participants, inference) in enumerate(secondary_payloads):
+        row = 1 + idx // 2
+        col = idx % 2
+        ax = fig.add_subplot(gs[row, col])
         short = null_display.get(null_type, null_type.replace("_", " "))
         _plot_participant_null_forest(
             ax,
@@ -4470,6 +4493,9 @@ def _render_figure3_null_supplement(
             title=f"{short} (θ)",
             panel_label=f"S{idx + 2}",
             show_run_badge=False,
+            ylabel="Participant-run unit",
+            y_label_mode="none",
+            xlim_override=sec_xlim,
         )
 
     fig.suptitle(
@@ -4487,7 +4513,7 @@ def _render_figure3_null_supplement(
         ),
         ha="center",
         va="bottom",
-        fontsize=FS_TICK - 5,
+        fontsize=FS_TICK - 3,
         color=PALETTE["dark_gray"],
     )
     fig.subplots_adjust(**FIGURE3_SUPPLEMENT_SUBPLOT_ADJUST)
@@ -4583,6 +4609,7 @@ def render_figure3(
     output_dir: Path,
     *,
     include_internal_qc: bool = True,
+    require_full_surrogate_distributions: bool = False,
 ) -> Figure3RenderResult:
     """Figure 3: nulls, cross-subject checks, duration, and cardiac controls."""
     null_rows = read_csv_rows(inputs.get("null_subject"))
@@ -4637,18 +4664,72 @@ def render_figure3(
         else primary_analysis.pooled_inference
     )
     primary_matched = primary_analysis.matched
-    panel_a_layer_rows = _plot_panel_a_empirical_nulls(
-        ax_a,
-        surrogate_rows,
-        dataset_roles=dataset_roles,
-        panel_label="A",
-        full_surrogate_distributions=full_surrogate_distributions,
-    )
+    panel_a_incomplete = bool(require_full_surrogate_distributions and not full_surrogate_distributions)
+    if panel_a_incomplete:
+        _mark_empty_panel(
+            ax_a,
+            "Panel A incomplete: full C4 surrogate distributions are required for merged manuscript rendering.",
+            xlabel=PANEL_A_XLABEL,
+            ylabel="",
+        )
+        _add_panel_label(ax_a, "A")
+        ax_a.text(
+            0.0,
+            1.06,
+            PANEL_A_TITLE,
+            transform=ax_a.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=FS_PANEL_TITLE - 4,
+            color=PALETTE["dark_gray"],
+            clip_on=False,
+        )
+        panel_a_layer_rows = []
+    else:
+        panel_a_layer_rows = _plot_panel_a_empirical_nulls(
+            ax_a,
+            surrogate_rows,
+            dataset_roles=dataset_roles,
+            panel_label="A",
+            full_surrogate_distributions=full_surrogate_distributions,
+        )
+
+    panel_a_required_nulls = set(PANEL_A_REQUIRED_NULL_TYPES)
+    panel_a_analysis_ids_by_dataset: dict[str, set[str]] = defaultdict(set)
+    for participant in primary_participants:
+        ds = _as_str(participant.dataset_id).casefold()
+        unit = _as_str(participant.participant_unit_id).casefold()
+        if ds and unit:
+            panel_a_analysis_ids_by_dataset[ds].add(unit)
+    panel_a_bio_ids_by_dataset: dict[str, set[str]] = defaultdict(set)
+    for row in surrogate_rows:
+        if not _panel_a_slice_surrogate_row(row):
+            continue
+        if _as_str(row.get("null_type")).casefold() not in panel_a_required_nulls:
+            continue
+        ds = _as_str(row.get("dataset_id")).casefold()
+        bio = _as_str(row.get("biological_participant_id")).casefold()
+        if ds and bio:
+            panel_a_bio_ids_by_dataset[ds].add(bio)
+    panel_a_unit_definition_by_dataset = {
+        ds: _panel_a_analysis_unit_definition(ds, ids)
+        for ds, ids in panel_a_analysis_ids_by_dataset.items()
+    }
 
     delta_rows = [
         {
             "dataset_id": p.dataset_id,
             "participant_id": p.participant_id,
+            "analysis_unit_id": p.participant_unit_id,
+            "analysis_unit_definition": _as_str(
+                panel_a_unit_definition_by_dataset.get(
+                    _as_str(p.dataset_id).casefold(), "biological_participant_id"
+                )
+            ),
+            "biological_participant_id": _panel_a_biological_id_from_analysis_unit(
+                _as_str(p.dataset_id),
+                _as_str(p.participant_unit_id),
+            ),
             "subject_id": p.participant_id,
             "participant_unit_id": p.participant_unit_id,
             "display_label": p.display_label,
@@ -4675,6 +4756,9 @@ def render_figure3(
         (
             "dataset_id",
             "participant_id",
+            "analysis_unit_id",
+            "analysis_unit_definition",
+            "biological_participant_id",
             "subject_id",
             "participant_unit_id",
             "display_label",
@@ -4737,7 +4821,20 @@ def render_figure3(
     )
     source_paths.append(condition_csv)
 
-    dataset_inference_rows = [inf.as_dict() for inf in primary_analysis.dataset_inferences]
+    dataset_inference_rows: list[dict[str, object]] = []
+    for inf in primary_analysis.dataset_inferences:
+        ds = _as_str(inf.dataset_id).casefold()
+        n_analysis_units = _as_int(inf.n_participants)
+        n_biological_participants = len(panel_a_bio_ids_by_dataset.get(ds, set()))
+        if n_biological_participants <= 0:
+            n_biological_participants = n_analysis_units
+        row = dict(inf.as_dict())
+        row["n_analysis_units"] = n_analysis_units
+        row["n_biological_participants"] = n_biological_participants
+        row["analysis_unit_definition"] = _as_str(
+            panel_a_unit_definition_by_dataset.get(ds, "biological_participant_id")
+        )
+        dataset_inference_rows.append(row)
     dataset_csv = source_dir / "figure3_panel_a_dataset_inference.csv"
     write_source_csv(
         dataset_csv,
@@ -4750,10 +4847,19 @@ def render_figure3(
 
     count_rows = []
     for inf in primary_analysis.dataset_inferences:
+        ds = _as_str(inf.dataset_id).casefold()
+        n_analysis_units = _as_int(inf.n_participants)
+        n_bio = len(panel_a_bio_ids_by_dataset.get(ds, set()))
+        if n_bio <= 0:
+            n_bio = n_analysis_units
         count_rows.append(
             {
                 "dataset_id": inf.dataset_id,
-                "n_biological_participants": inf.n_participants,
+                "n_biological_participants": n_bio,
+                "n_analysis_units": n_analysis_units,
+                "analysis_unit_definition": _as_str(
+                    panel_a_unit_definition_by_dataset.get(ds, "biological_participant_id")
+                ),
                 "n_participant_conditions": inf.n_participant_conditions,
                 "n_observations": inf.n_observations,
                 "sample_size_label": inf.sample_size_label,
@@ -4768,6 +4874,12 @@ def render_figure3(
                 "participant_unit_id": p.participant_unit_id,
                 "display_label": p.display_label,
                 "n_biological_participants": 1,
+                "n_analysis_units": 1,
+                "analysis_unit_definition": _as_str(
+                    panel_a_unit_definition_by_dataset.get(
+                        _as_str(p.dataset_id).casefold(), "biological_participant_id"
+                    )
+                ),
                 "n_participant_conditions": p.n_conditions,
                 "n_observations": p.n_observations,
                 "n_sessions": p.n_sessions,
@@ -4785,6 +4897,8 @@ def render_figure3(
             "participant_unit_id",
             "display_label",
             "n_biological_participants",
+            "n_analysis_units",
+            "analysis_unit_definition",
             "n_participant_conditions",
             "n_observations",
             "n_sessions",
@@ -4795,19 +4909,44 @@ def render_figure3(
     source_paths.append(counts_csv)
 
     unit_verdict_csv = source_dir / "figure3_panel_a_independent_unit_verdict.csv"
+    panel_a_dataset_ids = sorted(
+        {
+            _as_str(inf.dataset_id).casefold()
+            for inf in primary_analysis.dataset_inferences
+            if _as_str(inf.dataset_id)
+        }
+    )
     write_source_csv(
         unit_verdict_csv,
-        independent_unit_verdict_rows(),
+        independent_unit_verdict_rows(dataset_ids=panel_a_dataset_ids),
         ("dataset_id", "independent_unit", "example_raw_subject_ids", "verdict"),
     )
     source_paths.append(unit_verdict_csv)
 
     inference_row = {
         **primary_inference.as_dict(),
+        "n_analysis_units": _as_int(primary_inference.n_participants),
+        "n_biological_participants": int(
+            sum(
+                len(panel_a_bio_ids_by_dataset.get(ds, set()))
+                for ds in panel_a_analysis_ids_by_dataset
+            )
+        ),
+        "analysis_unit_definition": (
+            "pooled_across_dataset_specific_units"
+            if len(panel_a_analysis_ids_by_dataset) > 1
+            else _as_str(
+                panel_a_unit_definition_by_dataset.get(
+                    _as_str(primary_inference.dataset_id).casefold(),
+                    "biological_participant_id",
+                )
+            )
+        ),
         "pooled_estimate_plotted": False,
         "alternative_claim": (
             "Does observed theta ZLPI systematically exceed the circular-shift "
-            "null at the biological-participant level within each dataset?"
+            "null at the declared analysis-unit level within each dataset "
+            "(with biological participant counts reported separately)?"
         ),
     }
     inference_csv = source_dir / "figure3_panel_a_inference.csv"
@@ -4999,6 +5138,10 @@ def render_figure3(
                 "dataset_role": ds_role,
                 "n_biological_participants": len(bio_ids),
                 "n_analysis_units": len(analysis_ids),
+                "analysis_unit_definition": _panel_a_analysis_unit_definition(
+                    dataset_id,
+                    {unit for unit in analysis_ids if unit},
+                ),
                 "n_sessions": len(session_ids),
                 "n_observations": len(obs_ids),
                 "n_eligible_observations": len(obs_intersection),
@@ -5181,7 +5324,7 @@ def render_figure3(
     )
     source_paths.append(null_dist_csv)
 
-    # Preferred parquet; always keep CSV as fallback.
+    # Optional parquet sidecar; manuscript/source manifests reference CSV.
     null_dist_parquet = source_dir / "figure3_panel_a_null_distributions.parquet"
     global_parquet = output_dir.parent / "null_surrogate_values.parquet"
     try:
@@ -5190,8 +5333,6 @@ def render_figure3(
         frame = pd.DataFrame(panel_a_surrogates)
         frame.to_parquet(null_dist_parquet, index=False)
         frame.to_parquet(global_parquet, index=False)
-        source_paths.append(null_dist_parquet)
-        source_paths.append(global_parquet)
     except Exception:
         pass
 
@@ -5280,6 +5421,7 @@ def render_figure3(
             "dataset_role",
             "n_biological_participants",
             "n_analysis_units",
+            "analysis_unit_definition",
             "n_sessions",
             "n_observations",
             "n_eligible_observations",
@@ -5409,7 +5551,9 @@ def render_figure3(
                 f"representation={PRIMARY_REPRESENTATION}",
                 f"band={PRIMARY_BAND}",
                 "null_types=circular_shift;phase_randomization;block_shuffle",
-                "display_scale=standardized_observation_specific_null",
+                "display_scale=null_relative_z",
+                f"display_term={NULL_RELATIVE_Z_TERM}",
+                f"display_formula={NULL_RELATIVE_Z_FORMULA}",
                 "null_geometry=standardized_surrogate_value_violin",
                 "observed_overlay=biological_participant_means",
                 "dataset_mean=equal_weight_biological_participants",
@@ -5417,13 +5561,15 @@ def render_figure3(
                 "dataset_roles=primary_and_sensitivity",
             ],
             notes=(
-                "Panel A: gray/colored violin = pooled standardized_surrogate_value "
+                f"Panel A displays {NULL_RELATIVE_Z_TERM} where {NULL_RELATIVE_Z_FORMULA}. "
+                "Gray/colored violin = pooled standardized_surrogate_value (= Z_null) "
                 "(descriptive pooled observation-specific nulls, not a dataset-level "
                 "sampling distribution); gray points = biological-participant means of "
-                "standardized_observed_value "
+                "standardized_observed_value (= Z_null) "
                 "(observation→condition→session→biological participant); orange diamond "
                 "= equal-weight dataset mean across biological participants; dashed "
-                "zero = observation-specific null center. All three nulls use the "
+                "zero = observation-specific null center. Distinct inference/QC estimand: "
+                "ΔZLPI = observed − null_mean (Fisher-z units). All three nulls use the "
                 "configured surrogate count per observation when the C4 surrogate "
                 "export is complete."
             ),
@@ -5431,10 +5577,9 @@ def render_figure3(
     )
 
     # Panel B: cross-subject specificity + innovations (two stacked subpanels).
-    gs_b = gs[0, 1].subgridspec(2, 1, hspace=0.48, height_ratios=[1.05, 1.0])
+    gs_b = gs[0, 1].subgridspec(2, 1, hspace=0.66, height_ratios=[1.0, 1.05])
     ax_b1 = fig.add_subplot(gs_b[0, 0])
     ax_b2 = fig.add_subplot(gs_b[1, 0])
-    panel_b_units = _panel_b_series_units(inputs.get("aligned_d240"), band=PRIMARY_BAND)
     n_panel_b_draws = DEFAULT_N_SURROGATES
     if null_rows:
         req = {
@@ -5447,21 +5592,27 @@ def render_figure3(
         if req:
             n_panel_b_draws = int(min(req))
     b_obs_rows, b_draw_rows, b_diag_rows = _panel_b_cross_subject_and_innovation(
-        panel_b_units,
+        null_rows,
+        surrogate_rows,
         n_null_draws=n_panel_b_draws,
     )
     b_participant_rows = _panel_b_participant_aggregate(b_obs_rows)
+    for row in b_obs_rows:
+        ds = _as_str(row.get("dataset_id")).casefold()
+        row["dataset_role"] = _as_str(dataset_roles.get(ds), _panel_c_dataset_role(ds, dataset_roles))
+    for row in b_participant_rows:
+        ds = _as_str(row.get("dataset_id")).casefold()
+        row["dataset_role"] = _as_str(dataset_roles.get(ds), _panel_c_dataset_role(ds, dataset_roles))
     b_group_rows = _panel_b_group_summaries(b_participant_rows, b_obs_rows)
+    for row in b_group_rows:
+        ds = _as_str(row.get("dataset_id")).casefold()
+        row["dataset_role"] = _as_str(dataset_roles.get(ds), _panel_c_dataset_role(ds, dataset_roles))
     _plot_panel_b_cross_subject_innovations(ax_b1, ax_b2, b_participant_rows, b_group_rows)
 
     panel_b_footnote = ""
     if b_group_rows:
-        first = b_group_rows[0]
         panel_b_footnote = (
-            f"B: paired participant-level cross-subject specificity and AR(1) innovations; "
-            f"n_bio={_as_int(first.get('biological_participant_n'))}, "
-            f"n_session={_as_int(first.get('session_unit_n'))}, "
-            f"draws/obs={n_panel_b_draws}"
+            "B: correct/cross share mismatch-null reference; AR(1) uses innovation-null reference"
         )
 
     panel_b_obs_csv = source_dir / "figure3_panel_b_observation_estimates.csv"
@@ -5470,6 +5621,7 @@ def render_figure3(
         b_obs_rows,
         (
             "dataset_id",
+            "dataset_role",
             "biological_participant_id",
             "session_id",
             "condition",
@@ -5505,6 +5657,7 @@ def render_figure3(
         b_participant_rows,
         (
             "dataset_id",
+            "dataset_role",
             "biological_participant_id",
             "band",
             "endpoint_name",
@@ -5544,41 +5697,14 @@ def render_figure3(
         ),
     )
     source_paths.append(panel_b_draw_csv)
-    panel_b_diag_csv = source_dir / "figure3_panel_b_innovation_diagnostics.csv"
-    write_source_csv(
-        panel_b_diag_csv,
-        b_diag_rows,
-        (
-            "dataset_id",
-            "observation_id",
-            "biological_participant_id",
-            "session_id",
-            "condition",
-            "state",
-            "period",
-            "session_type",
-            "band",
-            "duration_s",
-            "endpoint_name",
-            "lag1_hr_before",
-            "lag1_eeg_before",
-            "lag1_hr_after",
-            "lag1_eeg_after",
-            "ar1_phi_hr",
-            "ar1_phi_eeg",
-            "innovation_effective_length",
-            "innovation_null_finite_draws",
-            "innovation_null_nonfinite_draws",
-            "model_failure_flag",
-            "model_failure_reason",
-        ),
-    )
-    source_paths.append(panel_b_diag_csv)
+    _ = b_diag_rows  # Detailed AR(1) fit diagnostics are not in locked C4 outputs.
     panel_b_group_csv = source_dir / "figure3_panel_b_group_summaries.csv"
     write_source_csv(
         panel_b_group_csv,
         b_group_rows,
         (
+            "dataset_id",
+            "dataset_role",
             "estimand",
             "band",
             "endpoint_name",
@@ -5600,24 +5726,31 @@ def render_figure3(
             endpoint_name=ENDPOINT_ZLPI,
             duration_s=PRIMARY_DURATION_S,
             input_tables=[
-                str(inputs.get("aligned_d240") or ""),
                 str(inputs.get("null_subject") or ""),
+                str(inputs.get("null_surrogate_values") or ""),
             ],
             source_data_csv=str(panel_b_group_csv),
             analysis_keys=[
                 "panel_b_primary_band=theta",
-                "cross_subject=donor_hr_to_focal_eeg",
+                "cross_subject=focal_hr_to_partner_eeg",
                 f"n_cross_subject_draws={n_panel_b_draws}",
-                "innovation_observed=endpoint_on_hr_and_eeg_innovations",
-                "innovation_null=circular_shift_eeg_innovations",
-                "display_scale=null_normalized_z",
+                "controls_source=c4_locked_outputs",
+                "innovation_observed=trimmed_ar1_innovation_endpoint",
+                "innovation_null=circular_shift_trimmed_eeg_innovations",
+                "display_scale=null_relative_z",
+                f"display_term={NULL_RELATIVE_Z_TERM}",
+                f"display_formula={NULL_RELATIVE_Z_FORMULA}",
                 "unit=biological_participant",
             ],
             notes=(
-                "B1 paired plot: participant-level correct simultaneous vs cross-subject HR "
-                "mismatch (same dataset/condition/session-type/period/duration/band; donor "
-                "must be different biological participant). B2: null-normalized participant "
-                "effects for correct simultaneous, cross-subject HR, and AR(1) innovations."
+                "B1 paired plot: participant-level correct simultaneous (HR_i + EEG_i) vs "
+                "cross-subject EEG mismatch (HR_i + EEG_j; same "
+                "dataset/condition/session-type/period/duration/band; donor j must be a "
+                "different biological participant). Correct and cross-subject columns share "
+                "the cross-subject mismatch null reference. B2 shows participant-level "
+                f"{NULL_RELATIVE_Z_TERM} for correct simultaneous, cross-subject EEG, and "
+                "AR(1) innovations; AR(1) uses a separate innovation circular-shift null "
+                "reference and is not on the same null family as correct/cross."
             ),
         )
     )
@@ -5653,8 +5786,10 @@ def render_figure3(
         "ci_high",
         "n_observations",
         "n_pairs",
+        "n_paired_contrast_observations",
         "n_session_units",
         "n_biological_participants",
+        "contrast_scope",
         "estimand",
         "contrast_direction",
         "endpoint_formula",
@@ -5678,13 +5813,13 @@ def render_figure3(
         panel_c_summary_fields,
     )
     source_paths.append(legacy_duration_csv)
-    legacy_panel_b_duration_csv = source_dir / "figure3_panel_b_duration.csv"
+    legacy_panel_c_duration_csv = source_dir / "figure3_panel_c_duration_legacy_alias.csv"
     write_source_csv(
-        legacy_panel_b_duration_csv,
+        legacy_panel_c_duration_csv,
         panel_c_summary_rows,
         panel_c_summary_fields,
     )
-    source_paths.append(legacy_panel_b_duration_csv)
+    source_paths.append(legacy_panel_c_duration_csv)
     panel_c_observation_csv = source_dir / "figure3_panel_c_duration_observation_level.csv"
     write_source_csv(
         panel_c_observation_csv,
@@ -5878,11 +6013,60 @@ def render_figure3(
             precomputed_metadata = {}
 
     if precomputed_obs:
-        cardiac_panel = compute_panel_d_from_observation_controls(
-            precomputed_obs,
-            dataset_qc_rows=precomputed_dataset_qc,
-            metadata=precomputed_metadata,
+        obs_dataset_ids = sorted(
+            {
+                _as_str(row.get("dataset_id")).casefold()
+                for row in precomputed_obs
+                if _as_str(row.get("dataset_id"))
+            },
+            key=lambda ds: (_panel_c_dataset_role(ds, dataset_roles) != "primary", ds),
         )
+        if len(obs_dataset_ids) > 1:
+            merged_obs: list[dict[str, object]] = []
+            merged_summaries: list[dict[str, object]] = []
+            merged_qc: list[dict[str, object]] = []
+            for dataset_id in obs_dataset_ids:
+                ds_obs = [
+                    row
+                    for row in precomputed_obs
+                    if _as_str(row.get("dataset_id")).casefold() == dataset_id
+                ]
+                ds_qc = [
+                    row
+                    for row in precomputed_dataset_qc
+                    if _as_str(row.get("dataset_id")).casefold() == dataset_id
+                ]
+                ds_panel = compute_panel_d_from_observation_controls(
+                    ds_obs,
+                    dataset_qc_rows=ds_qc,
+                    metadata=precomputed_metadata,
+                )
+                for row in ds_panel.observations:
+                    item = dict(row)
+                    item["dataset_id"] = dataset_id
+                    item["dataset_role"] = _panel_c_dataset_role(dataset_id, dataset_roles)
+                    merged_obs.append(item)
+                for row in ds_panel.summaries:
+                    item = dict(row)
+                    item["dataset_id"] = dataset_id
+                    item["dataset_role"] = _panel_c_dataset_role(dataset_id, dataset_roles)
+                    merged_summaries.append(item)
+                for row in ds_panel.dataset_qc:
+                    item = dict(row)
+                    item["dataset_id"] = _as_str(item.get("dataset_id"), dataset_id).casefold()
+                    merged_qc.append(item)
+            cardiac_panel = PanelDCardiacControlsResult(
+                observations=tuple(merged_obs),
+                summaries=tuple(merged_summaries),
+                dataset_qc=tuple(merged_qc),
+                metadata=dict(precomputed_metadata),
+            )
+        else:
+            cardiac_panel = compute_panel_d_from_observation_controls(
+                precomputed_obs,
+                dataset_qc_rows=precomputed_dataset_qc,
+                metadata=precomputed_metadata,
+            )
     else:
         cardiac_panel = compute_panel_d_cardiac_controls(
             paired_rows,
@@ -5890,6 +6074,33 @@ def render_figure3(
             protocol_rows=protocol_rows,
             cardiac_qc_rows=cardiac_qc_rows,
         )
+        inferred_ds = sorted(
+            {
+                _as_str(row.get("dataset_id")).casefold()
+                for row in cardiac_panel.observations
+                if _as_str(row.get("dataset_id"))
+            }
+        )
+        if len(inferred_ds) == 1:
+            dataset_id = inferred_ds[0]
+            card_obs = []
+            card_sum = []
+            for row in cardiac_panel.observations:
+                item = dict(row)
+                item["dataset_id"] = _as_str(item.get("dataset_id"), dataset_id).casefold()
+                item["dataset_role"] = _panel_c_dataset_role(dataset_id, dataset_roles)
+                card_obs.append(item)
+            for row in cardiac_panel.summaries:
+                item = dict(row)
+                item["dataset_id"] = _as_str(item.get("dataset_id"), dataset_id).casefold()
+                item["dataset_role"] = _panel_c_dataset_role(dataset_id, dataset_roles)
+                card_sum.append(item)
+            cardiac_panel = PanelDCardiacControlsResult(
+                observations=tuple(card_obs),
+                summaries=tuple(card_sum),
+                dataset_qc=cardiac_panel.dataset_qc,
+                metadata=cardiac_panel.metadata,
+            )
     cardiac_paths = write_panel_d_cardiac_control_exports(cardiac_panel, source_dir)
     source_paths.extend(
         [
@@ -5899,11 +6110,77 @@ def render_figure3(
             cardiac_paths["metadata"],
         ]
     )
-    _ax_coef, _ax_delta, _ax_status, _plot_controls = _render_figure3_panel_d_paired_axes(
-        fig,
-        gs[1, 1],
-        summaries=cardiac_panel.summaries,
+    summary_dataset_ids = sorted(
+        {
+            _as_str(row.get("dataset_id")).casefold()
+            for row in cardiac_panel.summaries
+            if _as_str(row.get("dataset_id"))
+        },
+        key=lambda ds: (_panel_c_dataset_role(ds, dataset_roles) != "primary", ds),
     )
+    if len(summary_dataset_ids) > 1:
+        gs_datasets = gs[1, 1].subgridspec(len(summary_dataset_ids), 1, hspace=0.58)
+        _plot_controls = []
+        for idx, dataset_id in enumerate(summary_dataset_ids):
+            ds_summaries = [
+                row
+                for row in cardiac_panel.summaries
+                if _as_str(row.get("dataset_id")).casefold() == dataset_id
+            ]
+            ax_coef, _ax_delta, _ax_status, _plot_controls = _render_figure3_panel_d_paired_axes(
+                fig,
+                gs_datasets[idx, 0],
+                summaries=ds_summaries,
+                show_headers=(idx == 0),
+                show_xlabels=(idx == len(summary_dataset_ids) - 1),
+                show_panel_label=(idx == 0),
+            )
+            # Dataset title sits above column headers (first block) or above axes.
+            ds_title_y = 1.16 if idx == 0 else 1.06
+            ax_coef.text(
+                0.0,
+                ds_title_y,
+                f"{dataset_id}",
+                transform=ax_coef.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=FS_TICK,
+                fontweight="bold",
+                color=PALETTE["dark_gray"],
+                clip_on=False,
+            )
+            if idx == 0:
+                ax_coef.text(
+                    0.0,
+                    1.32,
+                    FIGURE3_PANEL_D_TITLE,
+                    transform=ax_coef.transAxes,
+                    ha="left",
+                    va="bottom",
+                    fontsize=FS_PANEL_TITLE - 2,
+                    color=PALETTE["dark_gray"],
+                    clip_on=False,
+                )
+                ax_coef.text(
+                    0.0,
+                    1.24,
+                    FIGURE3_PANEL_D_SUBTITLE,
+                    transform=ax_coef.transAxes,
+                    ha="left",
+                    va="bottom",
+                    fontsize=FS_TICK - 2,
+                    color=PALETTE["dark_gray"],
+                    clip_on=False,
+                )
+    else:
+        _ax_coef, _ax_delta, _ax_status, _plot_controls = _render_figure3_panel_d_paired_axes(
+            fig,
+            gs[1, 1],
+            summaries=cardiac_panel.summaries,
+            show_headers=True,
+            show_xlabels=True,
+            show_panel_label=True,
+        )
     panel_sources.append(
         FigurePanelSource(
             figure_id="figure3",
@@ -5931,13 +6208,50 @@ def render_figure3(
                 "(left) and paired Δ = control − baseline (right) with participant-"
                 "clustered bootstrap CIs. Beat-count adjustment is statistical "
                 "sensitivity only. PPG controls assess pulse-synchronous contamination "
-                "and do not directly test ECG electrical-field leakage. NC rows leave "
-                "the plotting area empty and are not treated as zero."
+                "and do not directly test ECG electrical-field leakage. NC rows are "
+                "typed as template-unavailable, 1 Hz mask-incompatible, channel-"
+                "reaggregation-unavailable, or modality/source-unavailable; NC rows "
+                "leave the plotting area empty and are not treated as zero. "
+                "Interpret controls with composition_differs_from_baseline=true using "
+                "their reported denominators (e.g., ds003838 PPG template 12/448)."
             ),
         )
     )
 
-    fig.suptitle(FIGURE3_TITLE, fontsize=FS_SUPTITLE - 1, fontweight="bold", y=0.978)
+    panel_a_ds003690_units = len(panel_a_analysis_ids_by_dataset.get("ds003690", set()))
+    panel_a_ds003690_bio = len(panel_a_bio_ids_by_dataset.get("ds003690", set()))
+    panel_a_ds003690_caption_note = ""
+    if panel_a_ds003690_units > 0 and panel_a_ds003690_bio > 0:
+        panel_a_ds003690_caption_note = (
+            "  - ds003690 inference exports use participant_run_unit analysis units "
+            f"(n_analysis_units={panel_a_ds003690_units}) nested within "
+            f"n_biological_participants={panel_a_ds003690_bio}; these run-level units "
+            "must not be interpreted as independent biological participants.\n"
+        )
+
+    panel_c_ds003690_caption_note = ""
+    panel_c_ds003690_d240_alpha = [
+        row
+        for row in panel_c_summary_rows
+        if _as_str(row.get("dataset_id")).casefold() == "ds003690"
+        and _as_int(row.get("duration_s")) == 240
+        and _as_str(row.get("band")).casefold() == "alpha"
+        and _as_str(row.get("eligibility_status")).casefold() == "eligible"
+    ]
+    if panel_c_ds003690_d240_alpha:
+        row = panel_c_ds003690_d240_alpha[0]
+        scope = _as_str(row.get("contrast_scope"))
+        n_bio = _as_int(row.get("n_biological_participants"))
+        n_pairs = _as_int(row.get("n_paired_contrast_observations") or row.get("n_pairs"))
+        panel_c_ds003690_caption_note = (
+            "For ds003690, this panel uses a broader contrast scope "
+            f"({scope}; n_biological_participants={n_bio}; "
+            f"n_paired_contrast_observations={n_pairs}) and is therefore not the "
+            "same primary contrast estimand as Figure 2C "
+            "(passive__gonogo only; n_pairs=70). "
+        )
+
+    fig.suptitle(FIGURE3_TITLE, fontsize=FS_SUPTITLE, fontweight="bold", y=0.980)
     fig.subplots_adjust(**FIGURE3_SUBPLOT_ADJUST)
     if panel_b_footnote:
         # Anchor under Panel B so it does not collide with Panel D annotations.
@@ -5947,77 +6261,26 @@ def render_figure3(
             panel_b_footnote,
             ha="center",
             va="bottom",
-            fontsize=FS_TICK - 5,
+            fontsize=FS_TICK + 1,
             color=PALETTE["dark_gray"],
         )
     caption_path = output_dir / "figure3_caption.txt"
     caption_path.write_text(
         (
             f"{FIGURE3_TITLE}\n\n"
-            "A: Observed theta ZLPI relative to autocorrelation-preserving nulls "
-            "(circular shift, phase randomized, block shuffled) at D240 absolute-log10.\n"
-            "  - Violin/density = pooled standardized_surrogate_value across eligible "
-            "observations (descriptive pooled observation-specific nulls; not a "
-            "dataset-level sampling distribution).\n"
-            "  - Gray points = biological-participant summaries of "
-            "standardized_observed_value (observation→condition→session→biological "
-            "participant); not participant-session units.\n"
-            "  - Orange diamond = equal-weight mean across biological participants.\n"
-            "  - Dashed zero = center of each observation-specific null.\n"
-            "  - When the C4 surrogate export is complete, each null uses the "
-            "prespecified number of surrogates per eligible observation "
-            "(observation count × draws per null method).\n"
-            "B: Cross-subject specificity and AR(1) innovations (D240/theta/ZLPI, "
-            "absolute-log10). Correct pairing uses simultaneous HR_i with EEG_i. "
-            "Cross-subject mismatch substitutes another participant's HR_j (same "
-            "dataset/condition/period/session-type/duration; j != i) against EEG_i; "
-            "null-normalized effects use observation-specific mismatch draws. "
-            "Innovations fit AR(1) separately to HR and EEG and compute endpoint on "
-            "aligned residual series; innovation null uses circular shifts of EEG "
-            "innovations. Participant aggregation: observation→condition→session→"
-            "biological participant; CIs are Student-t on participant means.\n"
-            "C: Duration-specific proximal coupling sensitivity by dataset. SWPI was "
-            "recomputed from 60-second segments, MWPI from 120-second segments, and "
-            "standard ZLPI from 180- and 240-second segments under their "
-            "prespecified lag-support and reference-flank contracts. Points show "
-            "dataset-specific effort-minus-low-demand endpoint estimates with 95% "
-            "biological-participant-clustered bootstrap confidence intervals, and "
-            "lines connect supported durations within the same dataset only. "
-            "Endpoint identity is shown beneath the duration axis: D60 = SWPI, "
-            "D120 = MWPI, and D180/D240 = ZLPI. "
-            "Supported durations follow each dataset's YAML capabilities and "
-            "observation-level eligibility; datasets without a low/high contrast "
-            "remain empty for this panel. Because the "
-            "endpoint lag support and reference windows differ across durations, "
-            "changes across the trajectory reflect both analysis duration and "
-            "endpoint definition and should not be interpreted as a pure duration "
-            "effect.\n"
-            "D: Cardiac-field and pulse-synchronous controls. The left axis shows "
-            "controlled D240 absolute_log10 ZLPI coefficients on the Fisher-z scale "
-            "with 95% biological-participant-clustered bootstrap confidence intervals; "
-            "baseline is marked by an orange diamond on computable rows and a shared "
-            "vertical reference. The right axis shows paired changes "
-            "Δ = controlled − baseline with the same clustering procedure and a zero "
-            "reference. Beat-count adjustment is a statistical sensitivity analysis "
-            "and does not remove cardiac artifact. PPG controls assess pulse-synchronous "
-            "contamination and do not directly test ECG electrical-field leakage. "
-            "The PPG template-subtraction Δ confidence interval includes zero, so "
-            "there is no clear evidence that it differs from baseline. ECG-specific "
-            "controls are marked NC when no usable ECG signal is available or when "
-            "channel reaggregation is unavailable. NC values are missing and are not "
-            "represented as zero. Denominators are observation-band rows "
-            "(computable / baseline-eligible), not biological participants "
-            "(for example 612/628). All values, confidence intervals, and "
-            "computability decisions are unchanged for this visualization-only "
-            "revision. Similarity across tested controls indicates robustness to "
-            "those procedures only and does not establish neural origin or eliminate "
-            "all cardiac contamination.\n"
-            "Legacy participant-mean observed-minus-null forest is retained as internal "
-            "QC and supplementary diagnostics only.\n"
-            "Source data: figures/source_data/figure3_panel_*.csv, "
-            "figure3_panel_a_plot_layers.csv, "
-            "figure3_panel_a_distribution_validation.csv, and "
-            "figure3_panel_a_null_distributions.parquet.\n"
+            f"A: Theta ZLPI relative to autocorrelation-preserving nulls ({NULL_RELATIVE_Z_TERM}); "
+            "rows are dataset × null method (circular, phase, block), with no cross-dataset pooling.\n"
+            "B: Pairing specificity controls (Correct simultaneous, Cross-subject EEG, AR(1) innovations, Correct − Cross); "
+            "AR(1) uses a separate null reference.\n"
+            "C: Duration sensitivity by dataset with endpoint identity preserved: D60=SWPI, D120=MWPI, D180=ZLPI, D240=ZLPI. "
+            "Trajectories are not a single-endpoint duration effect. "
+            f"{panel_c_ds003690_caption_note}\n"
+            "D: Cardiac controls show controlled coefficients and Δ(controlled − baseline). NC rows are not plotted as zero. "
+            "Interpret controls with changed composition using their own denominators (e.g., ds003838 PPG template 12/448).\n"
+            "E (standalone): Nuisance robustness in alpha paired contrasts; low-demand/high-demand nuisance adjustments do not establish a positive effect.\n"
+            "F (standalone): Topography and low-γ sensitivity before/after ECG-prone-channel exclusion; low-γ remains artifact-indeterminate.\n"
+            "Cautious interpretation: null exceedance not established; pairing specificity directional/inconclusive; "
+            "cardiac controls limited by NC; nuisance adjustment does not establish a positive effect; gamma remains artifact-indeterminate.\n"
         ),
         encoding="utf-8",
     )
@@ -6049,6 +6312,18 @@ def render_figure3(
     for trio in _part_trios:
         qc_paths.extend(trio)
 
+    panel_a_unit_lines: list[str] = []
+    for dataset_id in sorted(panel_a_analysis_ids_by_dataset):
+        analysis_units = len(panel_a_analysis_ids_by_dataset.get(dataset_id, set()))
+        biological_units = len(panel_a_bio_ids_by_dataset.get(dataset_id, set()))
+        if biological_units <= 0:
+            biological_units = analysis_units
+        panel_a_unit_lines.append(
+            f"- `{dataset_id}`: n_biological_participants={biological_units}, "
+            f"n_analysis_units={analysis_units}, analysis_unit_definition="
+            f"`{_as_str(panel_a_unit_definition_by_dataset.get(dataset_id, 'unknown'))}`"
+        )
+
     audit_note = source_dir / "figure3_panel_a_AUDIT_NOTE.md"
     audit_note.write_text(
         "\n".join(
@@ -6059,12 +6334,17 @@ def render_figure3(
                 "Main Figure 3 Panel A displays pooled observation-specific empirical null",
                 "distributions (standardized_surrogate_value) for circular_shift,",
                 "phase_randomization, and block_shuffle (D240/theta/absolute_log10/ZLPI).",
+                f"Displayed statistic is {NULL_RELATIVE_Z_FORMULA}.",
                 "Observed overlays are biological-participant means of",
                 "standardized_observed_value; the orange diamond is the equal-weight",
                 "mean across biological participants. Pooled surrogate densities are",
                 "descriptive and are not dataset-level sampling distributions.",
                 "See `figure3_panel_a_plot_layers.csv` and",
                 "`figure3_panel_a_distribution_validation.csv`.",
+                "",
+                "## Distinct inference/QC statistic",
+                "Panel A inference and QC forests use ΔZLPI = observed_endpoint_index − null_mean",
+                "(Fisher-z units), which is distinct from displayed Z_null.",
                 "",
                 "## Retained contrast forest (not main Panel A)",
                 "The prior observed-minus-null participant-mean contrast forest is retained in",
@@ -6082,8 +6362,13 @@ def render_figure3(
                 "contributes δ = observed_endpoint_index − null_mean.",
                 "Condition-level Δ_{p,c} = mean(δ) within biological participant × condition.",
                 "Biological participant Δ_p = unweighted mean of that participant's Δ_{p,c}.",
-                "Main Panel A: one row per dataset = unweighted mean of Δ_p with "
+                "Inference companion table: one row per dataset = unweighted mean of Δ_p with "
                 "Student-t 95% CI (df = n_participants − 1).",
+                "",
+                "## Analysis-unit definitions for manuscript exports",
+                *panel_a_unit_lines,
+                "- ds003690 uses repeated participant_run_unit rows nested within biological participants; "
+                "run-level units are reported explicitly and must not be read as independent biological participants.",
                 "",
                 "## Sample size wording",
                 f"- This render: **{primary_inference.sample_size_label}**",
@@ -6117,23 +6402,45 @@ def render_figure3(
     )
     manuscript_source_paths.append(audit_note)
 
+    if used_surrogate_fallback or panel_a_incomplete:
+        fallback_flag = source_dir / "figure3_panel_a_incomplete_surrogate_export.flag"
+        reason = (
+            "Panel A used summary-only fallback because full C4 surrogate draws were unavailable.\n"
+            if used_surrogate_fallback
+            else "Panel A marked incomplete because full surrogate distributions are required in merged manuscript mode.\n"
+        )
+        fallback_flag.write_text(reason, encoding="utf-8")
+        manuscript_source_paths.append(fallback_flag)
+        qc_paths.append(fallback_flag)
+
     # Tag / order panels by export category.
+    figure3_export_category = (
+        EXPORT_CATEGORY_INTERNAL_QC
+        if _as_str(primary_inference.run_class) == "smoke_diagnostic"
+        else EXPORT_CATEGORY_MANUSCRIPT
+    )
     ordered_panels: list[FigurePanelSource] = []
     for panel in panel_sources:
         if panel.figure_id == "figure3":
             keys = list(panel.analysis_keys)
-            flag = f"export_category={EXPORT_CATEGORY_MANUSCRIPT}"
+            flag = f"export_category={figure3_export_category}"
             if flag not in keys:
                 keys.append(flag)
+            if figure3_export_category == EXPORT_CATEGORY_INTERNAL_QC:
+                keys.append("smoke_guard=excluded_from_manuscript_bundle")
             ordered_panels.append(
                 replace(
                     panel,
-                    export_category=EXPORT_CATEGORY_MANUSCRIPT,
+                    export_category=figure3_export_category,
                     analysis_keys=keys,
                 )
             )
         else:
             ordered_panels.append(panel)
+
+    if figure3_export_category != EXPORT_CATEGORY_MANUSCRIPT:
+        qc_paths.extend(manuscript_source_paths)
+        manuscript_source_paths = []
 
     manuscript = FigureArtifacts(
         figure_id="figure3",
@@ -6255,23 +6562,18 @@ def render_figure3_panel_e(
     *,
     include_internal_qc: bool = True,
 ) -> dict[str, object]:
-    """Render standalone Figure 3 Panel E nuisance/modality robustness sheet."""
+    """Render standalone Figure 3 Panel E from canonical C6 upstream exports."""
     out = Path(output_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
-    paired_rows = read_csv_rows(inputs.get("paired_contrasts"))
-    aligned_rows = read_csv_rows(inputs.get("aligned_d240"))
-    data_audit_rows = read_csv_rows(inputs.get("data_audit"))
-    peak_qc_rows = read_csv_rows(inputs.get("cardiac_peak_qc"))
-    protocol_rows = read_csv_rows(inputs.get("protocol_audit"))
-    endpoint_rows = read_csv_rows(inputs.get("endpoints_d240"))
-    result = compute_panel_e_nuisance_modality(
-        paired_rows=paired_rows,
-        aligned_rows=aligned_rows,
-        data_audit_rows=data_audit_rows,
-        peak_qc_rows=peak_qc_rows,
-        protocol_rows=protocol_rows,
-        endpoint_rows=endpoint_rows,
-    )
+    spec_path = inputs.get("panel_e_specifications")
+    meta_path = inputs.get("panel_e_metadata")
+    if spec_path is None or not Path(spec_path).is_file():
+        raise FileNotFoundError(
+            "Figure 3 Panel E requires C6 upstream exports "
+            f"({PANEL_E_STEM}_specifications.csv). Re-run stage C6."
+        )
+    upstream_dir = Path(spec_path).parent
+    result = load_panel_e_result_from_upstream(upstream_dir)
     paths = render_panel_e_figure(
         result,
         out,
@@ -6284,18 +6586,17 @@ def render_figure3_panel_e(
         title="Figure 3E | Nuisance and modality robustness",
         endpoint_name="zlpi",
         duration_s=240,
-        source_data_csv=str(paths.get("specifications") or ""),
+        source_data_csv=str(paths.get("specifications") or spec_path),
         input_tables=[
-            str(inputs.get("paired_contrasts") or ""),
-            str(inputs.get("aligned_d240") or ""),
-            str(inputs.get("data_audit") or ""),
-            str(inputs.get("cardiac_peak_qc") or ""),
-            str(inputs.get("protocol_audit") or ""),
-            str(inputs.get("endpoints_d240") or ""),
+            str(spec_path or ""),
+            str(inputs.get("panel_e_common_sample") or ""),
+            str(meta_path or ""),
+            str(inputs.get("panel_e_availability") or ""),
         ],
         notes=(
             f"export_category={EXPORT_CATEGORY_MANUSCRIPT}; "
-            "standalone sheet; within-pair Δ-nuisance primary display"
+            "C7 plot-only consumption of C6 Panel E upstream exports; "
+            "within-pair Δ-nuisance primary display"
         ),
         export_category=EXPORT_CATEGORY_MANUSCRIPT,
     )
@@ -6311,24 +6612,26 @@ def render_figure3_panel_f(
     confirmatory_root: str | Path | None = None,
     include_internal_qc: bool = True,
     force_recompute_channel_zlpi: bool = False,
+    component_mode: bool = False,
 ) -> dict[str, object]:
-    """Render standalone Figure 3 Panel F topography / gamma specificity sheet."""
+    """Render standalone Figure 3 Panel F from canonical C6 upstream exports."""
     out = Path(output_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
-    paired_rows = read_csv_rows(inputs.get("paired_contrasts"))
-    root = Path(confirmatory_root).expanduser().resolve() if confirmatory_root else out.parent
-    # Prefer C7 root when output is .../C7/figures
-    if root.name == "figures":
-        root = root.parent
-    result = compute_panel_f_topography(
-        confirmatory_root=root,
-        paired_rows=paired_rows,
-        force_recompute_channel_zlpi=force_recompute_channel_zlpi,
-    )
+    if force_recompute_channel_zlpi:
+        raise ValueError("C7 must not recompute Panel F; regenerate C6 upstream exports.")
+    summary_path = inputs.get("panel_f_summary")
+    if summary_path is None or not Path(summary_path).is_file():
+        raise FileNotFoundError(
+            "Figure 3 Panel F requires C6 upstream exports "
+            f"({PANEL_F_STEM}_summary.csv). Re-run stage C6."
+        )
+    upstream_dir = Path(summary_path).parent
+    result = load_panel_f_result_from_upstream(upstream_dir)
     paths = render_panel_f_figure(
         result,
         out,
         include_internal_qc=include_internal_qc,
+        component_mode=component_mode,
     )
     panel_source = FigurePanelSource(
         figure_id="figure3_panel_f",
@@ -6336,13 +6639,17 @@ def render_figure3_panel_f(
         title="Figure 3F | Topography and gamma specificity",
         endpoint_name="zlpi",
         duration_s=240,
-        source_data_csv=str(paths.get("summary") or ""),
+        source_data_csv=str(paths.get("summary") or summary_path),
         input_tables=[
-            str(inputs.get("paired_contrasts") or ""),
+            str(summary_path),
+            str(inputs.get("panel_f_observations") or ""),
+            str(inputs.get("panel_f_montage") or ""),
+            str(inputs.get("panel_f_metadata") or ""),
         ],
         notes=(
             f"export_category={EXPORT_CATEGORY_MANUSCRIPT}; "
-            "standalone sheet; channel-level ZLPI topography from C1a+C1b"
+            "C7 plot-only consumption of C6 Panel F upstream exports; "
+            "gamma montage-composition sensitivity only"
         ),
         export_category=EXPORT_CATEGORY_MANUSCRIPT,
     )

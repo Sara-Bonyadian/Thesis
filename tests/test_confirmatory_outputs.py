@@ -782,6 +782,23 @@ class TestFigures(unittest.TestCase):
                 forest_rows = list(csv.DictReader(handle))
             self.assertTrue(any(row.get("band") == "alpha" for row in forest_rows))
             self.assertTrue(any(row.get("dataset_id") == "POOLED" for row in forest_rows))
+            self.assertTrue(
+                all(
+                    str(row.get("power_representation", "")).casefold() == "absolute_log10"
+                    for row in forest_rows
+                )
+            )
+            with (out / "source_data" / "figure1_panel_f_mu_tost.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                f1_mu_rows = list(csv.DictReader(handle))
+            self.assertTrue(f1_mu_rows)
+            self.assertTrue(
+                all(
+                    str(row.get("power_representation", "")).casefold() == "absolute_log10"
+                    for row in f1_mu_rows
+                )
+            )
             # Figure 2 six-panel sources.
             for name in (
                 "figure2_panel_a_matched_lag_curves.csv",
@@ -842,12 +859,19 @@ class TestFigures(unittest.TestCase):
             self.assertIsNotNone(resolved["mixed_model"])
 
             # Panel C mixed duration-specific endpoints; no false ZLPI relabel.
-            duration_csv = out / "source_data" / "figure3_panel_b_duration.csv"
+            duration_csv = out / "source_data" / "figure3_panel_c_duration_legacy_alias.csv"
             with duration_csv.open(encoding="utf-8", newline="") as handle:
                 duration_rows = list(csv.DictReader(handle))
+            self.assertFalse((out / "source_data" / "figure3_panel_b_duration.csv").exists())
             for row in duration_rows:
                 duration = int(float(row["duration_s"]))
                 endpoint = row["endpoint_name"]
+                if row.get("eligibility_status") == "eligible":
+                    self.assertTrue(str(row.get("contrast_scope", "")).strip())
+                    self.assertGreaterEqual(
+                        int(float(row.get("n_paired_contrast_observations", 0))),
+                        1,
+                    )
                 if duration == 60:
                     self.assertEqual(endpoint, ENDPOINT_SHORT_WINDOW_PROXIMAL_INDEX)
                 elif duration == 120:
@@ -867,6 +891,9 @@ class TestFigures(unittest.TestCase):
             self.assertTrue((out / "source_data" / "figure3_panel_d_cardiac_controls_dataset_qc.csv").is_file())
             self.assertTrue((out / "source_data" / "figure3_panel_d_cardiac_controls_metadata.json").is_file())
             self.assertFalse((out / "source_data" / "figure3_panel_c_modality.csv").exists())
+            caption3 = (out / "figure3_caption.txt").read_text(encoding="utf-8")
+            self.assertIn("figure3_panel_a_null_distributions.csv", caption3)
+            self.assertNotIn("figure3_panel_a_null_distributions.parquet", caption3)
             self.assertEqual(FIGURE_DPI, 300)
 
             meta_panel = next(

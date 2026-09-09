@@ -174,6 +174,27 @@ def build_methods_summary(inputs: Mapping[str, Path | None]) -> list[dict[str, o
         },
         {
             "section": "robustness_default",
+            "item": "null_relative_z_definition",
+            "value": "Z_null=(observed-null_mean)/null_sd",
+            "source": "nulls",
+            "notes": (
+                "Panels 3A/3B use Null-relative Z (Z_null) for standardized display. "
+                "Distinct inference/QC estimand: ΔZLPI = observed - null_mean "
+                "(Fisher-z units)."
+            ),
+        },
+        {
+            "section": "robustness_default",
+            "item": "cross_subject_pairing",
+            "value": "HR_i+EEG_j;j!=i",
+            "source": "nulls",
+            "notes": (
+                "Cross-subject mismatch keeps focal HR_i and swaps donor EEG_j "
+                "within matched dataset/condition/period/session-type/duration pools."
+            ),
+        },
+        {
+            "section": "robustness_default",
             "item": "broadband_residualization",
             "value": "broadband_residualized",
             "source": "artifact_controls",

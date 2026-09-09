@@ -6,6 +6,7 @@ import math
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from ppg_eeg.confirmatory.panel_f_topography_gamma import (
     ECG_PRONE_SET_ID,
@@ -24,6 +25,10 @@ from ppg_eeg.confirmatory.panel_f_topography_gamma import (
     panel_f_caption,
     render_panel_f_figure,
     verify_panel_f_integrity,
+    write_panel_f_exports,
+)
+from ppg_eeg.confirmatory.panel_f_topography_upstream import (
+    load_panel_f_result_from_upstream,
 )
 
 
@@ -190,6 +195,117 @@ class TestFigure3PanelFContracts(unittest.TestCase):
         self.assertNotIn("available channel-level artifact controls", caption)
         self.assertNotIn("before and after available", caption)
 
+    def test_c6_upstream_roundtrip_preserves_summary_values(self) -> None:
+        retained = ["Cz", "Pz"]
+        full = ["Cz", "Pz", "T7"]
+        summary = []
+        for map_id in MAP_ORDER:
+            scale = "alpha_shared" if "alpha" in map_id else "gamma_shared"
+            L = 0.1 if scale == "alpha_shared" else 0.2
+            channels = full if map_id == MAP_GAMMA_BEFORE else retained
+            for ch in channels:
+                summary.append(_summary_row(map_id, ch, 0.01 if ch == "Cz" else -0.02, scale=scale, L=L))
+        result = PanelFResult(
+            observation_rows=(),
+            summary_rows=tuple(summary),
+            montage_rows=tuple(
+                {
+                    "channel": ch,
+                    "in_alpha_common_montage": ch in retained,
+                    "in_gamma_restricted_montage": ch in retained,
+                    "in_gamma_full_montage": ch in full,
+                    "ecg_prone_default_v1": ch == "T7",
+                    "channel_x": 0.0,
+                    "channel_y": 0.0,
+                    "channel_z": 0.0,
+                }
+                for ch in full
+            ),
+            gamma_comparison_rows=(),
+            diagnostic_rows=(),
+            metadata={"color_scales": {"alpha_shared": {"min": -0.1, "max": 0.1}, "gamma_shared": {"min": -0.2, "max": 0.2}}},
+        )
+        with TemporaryDirectory() as tmp:
+            c6 = Path(tmp) / "C6"
+            write_panel_f_exports(result, c6, stage="C6")
+            loaded = load_panel_f_result_from_upstream(c6)
+        before = {(r["panel_map"], r["channel"]): float(r["estimate"]) for r in result.summary_rows}
+        after = {(r["panel_map"], r["channel"]): float(r["estimate"]) for r in loaded.summary_rows}
+        self.assertEqual(before, after)
+
+    def test_c7_render_does_not_recompute_panel_f(self) -> None:
+        retained = ["Cz", "Pz"]
+        full = ["Cz", "Pz", "T7"]
+        summary = []
+        for map_id in MAP_ORDER:
+            scale = "alpha_shared" if "alpha" in map_id else "gamma_shared"
+            L = 0.1 if scale == "alpha_shared" else 0.2
+            channels = full if map_id == MAP_GAMMA_BEFORE else retained
+            for ch in channels:
+                summary.append(_summary_row(map_id, ch, 0.01 if ch == "Cz" else -0.02, scale=scale, L=L))
+        result = PanelFResult(
+            observation_rows=(),
+            summary_rows=tuple(summary),
+            montage_rows=tuple(
+                {
+                    "channel": ch,
+                    "in_alpha_common_montage": ch in retained,
+                    "in_gamma_restricted_montage": ch in retained,
+                    "in_gamma_full_montage": ch in full,
+                    "ecg_prone_default_v1": ch == "T7",
+                    "channel_x": 0.0,
+                    "channel_y": 0.0,
+                    "channel_z": 0.0,
+                }
+                for ch in full
+            ),
+            gamma_comparison_rows=(
+                {
+                    "metric": "retained_channel_value_identity",
+                    "value": 0.0,
+                    "max_abs_after_minus_before": 0.0,
+                    "is_deterministic_identity": True,
+                    "bootstrap_used": False,
+                },
+            ),
+            diagnostic_rows=(),
+            metadata={
+                "analysis_framing": "gamma_sensitivity_to_ecg_prone_channel_exclusion",
+                "locked_estimand": {
+                    "duration_s": PANEL_F_DURATION_S,
+                    "endpoint_name": PANEL_F_ENDPOINT,
+                    "power_representation": PANEL_F_REPRESENTATION,
+                    "task_attenuation_definition": "ZLPI_task - ZLPI_rest (negative = attenuation)",
+                },
+                "color_scales": {
+                    "alpha_shared": {"min": -0.1, "max": 0.1},
+                    "gamma_shared": {"min": -0.2, "max": 0.2},
+                },
+                "n_alpha_common_channels": len(retained),
+                "n_gamma_full_channels": len(full),
+                "n_retained_channels": len(retained),
+                "n_gamma_paired_observations": 2,
+            },
+        )
+        with TemporaryDirectory() as tmp:
+            c6 = Path(tmp) / "C6"
+            out = Path(tmp) / "figures"
+            write_panel_f_exports(result, c6, stage="C6")
+            inputs = {
+                "panel_f_summary": c6 / f"{PANEL_F_STEM}_summary.csv",
+                "panel_f_observations": c6 / f"{PANEL_F_STEM}_observation_level.csv",
+                "panel_f_montage": c6 / f"{PANEL_F_STEM}_montage_membership.csv",
+                "panel_f_metadata": c6 / f"{PANEL_F_STEM}_metadata.json",
+            }
+            with mock.patch(
+                "ppg_eeg.confirmatory.panel_f_topography_gamma.compute_panel_f_topography",
+                side_effect=AssertionError("C7 must not recompute Panel F"),
+            ):
+                from ppg_eeg.confirmatory.figures import render_figure3_panel_f
+
+                paths = render_figure3_panel_f(inputs, out, include_internal_qc=False)
+                self.assertTrue(Path(paths["svg"]).is_file())
+
 
 @unittest.skipUnless(
     Path(
@@ -197,10 +313,10 @@ class TestFigure3PanelFContracts(unittest.TestCase):
         "paired_contrasts.csv"
     ).is_file()
     and Path(
-        "derivatives/confirmatory_temporal_coupling/sensitivity/hiit/C7/figures/source_data/"
+        "derivatives/confirmatory_temporal_coupling/sensitivity/hiit/C6/"
         f"{PANEL_F_STEM}_channel_zlpi_cache.csv"
     ).is_file(),
-    "HIIT C7 Panel F cache not present",
+    "HIIT C6 Panel F cache not present",
 )
 class TestFigure3PanelFHIITCached(unittest.TestCase):
     def test_hiit_montage_sensitivity_contracts(self) -> None:

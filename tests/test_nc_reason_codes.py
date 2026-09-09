@@ -23,6 +23,7 @@ from ppg_eeg.confirmatory.reason_codes import (
     MISSING_REQUIRED_MODALITY,
     MISSING_SENSOR_LOCATIONS,
     NO_CHANNEL_LEVEL_ENDPOINT_VALUES,
+    OPTION_C_PEAK_NOT_APPLICABLE,
     REASON_CODES,
     STANDARD_ZLPI_NOT_APPLICABLE,
     STRUCTURED_NC_FIELDS,
@@ -72,6 +73,7 @@ class TestNcReasonCodes(unittest.TestCase):
             CONFIGURATION_VALIDATION_FAILED,
             STANDARD_ZLPI_NOT_APPLICABLE,
             ENDPOINT_CONTRACT_NON_ZLPI,
+            OPTION_C_PEAK_NOT_APPLICABLE,
         }
         self.assertTrue(required.issubset(set(REASON_CODES)))
 
@@ -118,8 +120,12 @@ class TestNcReasonCodes(unittest.TestCase):
             INSUFFICIENT_LAG_SUPPORT,
         )
         self.assertEqual(
-            map_exclusion_to_reason_code("control_unavailable"),
-            ARTIFACT_CONTROL_NOT_AVAILABLE,
+            map_exclusion_to_reason_code("option_c_peak_requires_d180_d240"),
+            OPTION_C_PEAK_NOT_APPLICABLE,
+        )
+        self.assertEqual(
+            map_exclusion_to_reason_code("insufficient_option_c_flank_support"),
+            INSUFFICIENT_LAG_SUPPORT,
         )
 
     def test_stale_c4_cache_rejects_smoke_surrogate_count(self) -> None:

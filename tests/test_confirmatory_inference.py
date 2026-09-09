@@ -374,6 +374,31 @@ class TestEquivalence(unittest.TestCase):
         alpha = next(r for r in eq if r["band"] == "alpha")
         self.assertEqual(int(alpha["n_participants"]), 20)
 
+    def test_peak_center_inference_is_gated_to_d180_d240(self) -> None:
+        from ppg_eeg.confirmatory.inference import hierarchical_peak_parameter_summaries
+
+        rows: list[dict[str, object]] = []
+        for duration_s in (60, 120, 180, 240):
+            for i in range(6):
+                rows.append(
+                    _subject_row(
+                        dataset_id="ds003838",
+                        participant_id=f"p{duration_s}_{i}",
+                        condition="rest",
+                        state="low_demand",
+                        band="theta",
+                        endpoint_index=0.25,
+                        duration_s=duration_s,
+                        endpoint_name=ENDPOINT_ZLPI,
+                        peak_center_mu_s=0.05 * i,
+                        has_identifiable_peak=True,
+                    )
+                )
+        hier = hierarchical_peak_parameter_summaries(rows)
+        eq = tost_peak_center_equivalence(rows)
+        self.assertEqual({int(r["duration_s"]) for r in hier}, {180, 240})
+        self.assertEqual({int(r["duration_s"]) for r in eq}, {180, 240})
+
 
 class TestLeaveOneOut(unittest.TestCase):
     def test_loo_stable_under_homogeneous_effects(self) -> None:
@@ -740,6 +765,38 @@ class TestPrimaryMetaMembership(unittest.TestCase):
         contrast_ids = {str(r["contrast_id"]) for r in atten}
         self.assertIn("passive__simplert", contrast_ids)
         self.assertIn("passive__gonogo", contrast_ids)
+
+    def test_contrast_eligible_false_rows_never_enter_dataset_effects(self) -> None:
+        paired = [
+            _paired_row(
+                dataset_id="ds003838",
+                contrast_id="rest__memory",
+                participant_id="p01",
+                band="alpha",
+                delta=-0.2,
+            ),
+            _paired_row(
+                dataset_id="ds003838",
+                contrast_id="rest__memory",
+                participant_id="p02",
+                band="alpha",
+                delta=-0.1,
+            ),
+            _paired_row(
+                dataset_id="ds003838",
+                contrast_id="rest__memory",
+                participant_id="p03",
+                band="alpha",
+                delta=0.9,
+            ),
+        ]
+        paired[2]["contrast_eligible"] = False
+        effects = estimate_dataset_effects(paired)
+        self.assertEqual(len(effects), 1)
+        row = effects[0]
+        # Mean must reflect only the two eligible rows.
+        self.assertAlmostEqual(float(row["effect_mean"]), -0.15, places=12)
+        self.assertEqual(int(row["n_pairs"]), 2)
 
 
 class TestWriteOutputs(unittest.TestCase):

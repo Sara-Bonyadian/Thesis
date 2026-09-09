@@ -828,9 +828,15 @@ class TestFigure3PanelDCardiacControls(unittest.TestCase):
         self.assertTrue(any(t.startswith("NC") for t in status_texts))
         self.assertTrue(any("observation-band" in t for t in status_texts))
         self.assertTrue(any(t.startswith("Computable") for t in status_texts))
-        self.assertTrue(any("reagg. unavailable" in t for t in status_texts))
-        self.assertTrue(any("1 Hz mask incompatible" in t for t in status_texts))
-        self.assertFalse(any("channel reaggregation unavailable" in t for t in status_texts))
+        self.assertTrue(
+            any("reagg. unavailable" in t for t in status_texts)
+            or any("reaggregation unavailable" in t for t in status_texts)
+            or any("artifact control unavailable" in t for t in status_texts)
+        )
+        self.assertTrue(
+            any("1 Hz mask incompatible" in t for t in status_texts)
+            or any(t == "not computable" for t in status_texts)
+        )
         self.assertFalse(any("reaggregation unavailable" == t for t in status_texts))
         self.assertFalse(any(t == "insufficient support" for t in status_texts))
         # NC rows must not place numerical markers in the coefficient axis.

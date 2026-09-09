@@ -107,8 +107,10 @@ SMOKE_N_SURROGATES = 20
 DEFAULT_N_SURROGATES = 500
 MIN_CIRCULAR_SHIFT_S = 60
 BLOCK_LENGTH_S = 30
+NULL_STD_ABS_FLOOR = 1e-3
+MAX_ABS_NULL_NORMALIZED_EFFECT = 50.0
 
-CHECKPOINT_SCHEMA_VERSION = "c4_checkpoint_v2"
+CHECKPOINT_SCHEMA_VERSION = "c4_checkpoint_v3"
 CHECKPOINT_DIRNAME = "_unit_checkpoints"
 RUN_MANIFEST_FILENAME = "run_manifest.json"
 COMPLETE_MARKER_FILENAME = "C4_COMPLETE.json"
@@ -163,6 +165,11 @@ SUBJECT_RESULT_FIELDS = tuple(
             "null_median",
             "empirical_p",
             "effect_size_surrogate_z",
+            "cross_observed_endpoint_index",
+            "cross_subject_null_normalized_effect",
+            "cross_partner_observation_id",
+            "cross_partner_participant_id",
+            "cross_partner_session_id",
             "rng_seed_u64",
             "analysis_key",
             *STRUCTURED_NC_FIELDS,
@@ -217,6 +224,10 @@ SURROGATE_VALUE_FIELDS = (
     "empirical_p",
     "rng_seed_u64",
     "n_surrogates",
+    "partner_observation_id",
+    "partner_participant_id",
+    "partner_session_id",
+    "is_cross_observed_draw",
     "eligibility_status",
     "qc_status",
 )
@@ -371,6 +382,43 @@ def surrogate_effect_size(
     if not math.isfinite(center) or not math.isfinite(scale) or scale <= 0:
         return float("nan")
     return float((observed - center) / scale)
+
+
+def null_standardize_effect(
+    observed: float,
+    null_values: Sequence[float],
+    *,
+    required_draws: int,
+) -> tuple[float, float, float, float, str]:
+    """Numerically robust null standardization with finite-draw requirements."""
+    finite = [float(v) for v in null_values if math.isfinite(float(v))]
+    if len(finite) < int(required_draws):
+        return (
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            "insufficient_finite_null_draws",
+        )
+    null_mean = float(np.mean(finite))
+    null_sd = float(np.std(np.asarray(finite, dtype=float), ddof=1)) if len(finite) > 1 else float("nan")
+    null_span = float(np.max(finite) - np.min(finite))
+    scale_ref = max(
+        1.0,
+        abs(null_mean),
+        abs(float(observed)) if math.isfinite(float(observed)) else 1.0,
+    )
+    denom_floor = max(float(np.spacing(scale_ref)), float(NULL_STD_ABS_FLOOR))
+    if (not math.isfinite(null_sd)) or null_sd <= denom_floor:
+        return float("nan"), null_mean, null_sd, denom_floor, "degenerate_null_distribution"
+    if null_span <= denom_floor:
+        return float("nan"), null_mean, null_sd, denom_floor, "degenerate_null_distribution"
+    z_val = surrogate_effect_size(float(observed), finite)
+    if not math.isfinite(z_val):
+        return float("nan"), null_mean, null_sd, denom_floor, "degenerate_null_distribution"
+    if abs(float(z_val)) > float(MAX_ABS_NULL_NORMALIZED_EFFECT):
+        return float("nan"), null_mean, null_sd, denom_floor, "degenerate_null_distribution"
+    return float(z_val), null_mean, null_sd, denom_floor, ""
 
 
 def valid_circular_shifts(
@@ -667,9 +715,13 @@ def _null_statistics_for_unit(
     null_type: str,
     n_surrogates: int,
     partner_eeg_by_surrogate: Sequence[np.ndarray] | None = None,
+    partner_obs_ids_by_surrogate: Sequence[str] | None = None,
+    cross_partner_obs_id: str = "",
+    cross_partner_eeg: np.ndarray | None = None,
+    observation_identity: Mapping[str, Mapping[str, str]] | None = None,
     observed_stat: float | None = None,
     observed_eligible: bool | None = None,
-) -> tuple[dict[str, object], dict[str, object], list[float]]:
+) -> tuple[dict[str, object], dict[str, object], list[float], list[str]]:
     contract = contract_for_duration(unit.duration_s)
     key = analysis_key(
         duration_s=unit.duration_s,
@@ -707,8 +759,12 @@ def _null_statistics_for_unit(
         observed_eligible = bool(observed_eligible)
 
     null_vals: list[float] = []
+    partner_obs_ids_for_nulls: list[str] = []
     notes = ""
     status = "ok"
+    cross_observed: float | str = ""
+    cross_observed_z: float | str = ""
+    cross_metrics: Mapping[str, object] | None = None
 
     if null_type == NULL_TYPE_CIRCULAR_SHIFT:
         if valid_circular_shifts(int(unit.eeg_z.size)).size == 0:
@@ -728,31 +784,91 @@ def _null_statistics_for_unit(
             notes = "Cross-subject pool unavailable."
         elif len(partner_eeg_by_surrogate) == 0:
             status = "derangement_impossible"
-            notes = "Need ≥2 observations in dataset×state×modality×duration pool."
+            notes = "Need ≥2 biological participants in dataset×condition×session×modality×duration pool."
         elif len(partner_eeg_by_surrogate) != int(n_surrogates):
             status = "mismatch_surrogate_count"
             notes = "Partner EEG list length must equal n_surrogates."
+        elif partner_obs_ids_by_surrogate is None or len(partner_obs_ids_by_surrogate) != int(n_surrogates):
+            status = "mismatch_surrogate_count"
+            notes = "Partner observation IDs must align to surrogate count."
+        elif not _as_str(cross_partner_obs_id):
+            status = "missing_cross_observed_partner"
+            notes = "Cross-observed partner assignment missing."
+        elif cross_partner_eeg is None:
+            status = "missing_partner_series"
+            notes = "Cross-observed partner EEG series missing."
 
     if status == "ok":
         hr_inn: np.ndarray | None = None
         eeg_inn: np.ndarray | None = None
         if null_type == NULL_TYPE_AR1_INNOVATIONS:
-            hr_inn = ar1_innovations(unit.hr_z)
-            eeg_inn = ar1_innovations(unit.eeg_z)
+            hr_inn = np.asarray(ar1_innovations(unit.hr_z)[1:], dtype=float)
+            eeg_inn = np.asarray(ar1_innovations(unit.eeg_z)[1:], dtype=float)
+            shifts = valid_circular_shifts(int(eeg_inn.size))
+            if shifts.size == 0:
+                status = "no_valid_innovation_circular_shift"
+                notes = "No valid circular shifts after trimming AR(1) innovations."
+            else:
+                observed_metrics = compute_endpoint_index_from_series(
+                    hr_inn,
+                    eeg_inn,
+                    duration_s=unit.duration_s,
+                    identity=identity,
+                    band=unit.band,
+                    power_representation=unit.power_representation,
+                    duration_role=unit.duration_role,
+                    is_primary_representation=unit.is_primary_representation,
+                    pair=unit.pair,
+                )
+                observed_stat = _as_float(observed_metrics.get("endpoint_index"))
+                observed_eligible = bool(observed_metrics.get("eligible"))
+
+        if status == "ok" and null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH:
+            cross_metrics = compute_endpoint_index_from_series(
+                unit.hr_z,
+                np.asarray(cross_partner_eeg, dtype=float),
+                duration_s=unit.duration_s,
+                identity=identity,
+                band=unit.band,
+                power_representation=unit.power_representation,
+                duration_role=unit.duration_role,
+                is_primary_representation=unit.is_primary_representation,
+                pair=unit.pair,
+            )
+            cross_observed = _as_float(cross_metrics.get("endpoint_index"))
+            cross_eligible = bool(cross_metrics.get("eligible"))
+            if not math.isfinite(_as_float(cross_observed)) or not cross_eligible:
+                status = _as_str(
+                    cross_metrics.get("reason_code")
+                    or cross_metrics.get("status")
+                    or "insufficient_common_support"
+                )
+                notes = _as_str(
+                    cross_metrics.get("reason")
+                    or cross_metrics.get("exclusion_reason")
+                    or "Cross-observed HR_i + EEG_j endpoint is not computable."
+                )
 
         for surrogate_i in range(int(n_surrogates)):
+            if status != "ok":
+                break
             if null_type == NULL_TYPE_AR1_INNOVATIONS:
                 assert hr_inn is not None and eeg_inn is not None
-                # Whitened series; destroy residual contemporaneous coupling by
-                # independently permuting EEG innovations each surrogate.
+                shifts = valid_circular_shifts(int(eeg_inn.size))
+                if shifts.size == 0:
+                    status = "no_valid_innovation_circular_shift"
+                    notes = "No valid circular shifts after trimming AR(1) innovations."
+                    break
                 hr_surr = hr_inn
-                eeg_surr = _permute_finite(eeg_inn, rng)
+                eeg_surr = circular_shift_series(eeg_inn, int(rng.choice(shifts)))
             elif null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH:
                 assert partner_eeg_by_surrogate is not None
                 hr_surr = unit.hr_z
                 eeg_surr = np.asarray(
                     partner_eeg_by_surrogate[surrogate_i], dtype=float
                 )
+                assert partner_obs_ids_by_surrogate is not None
+                partner_obs_ids_for_nulls.append(_as_str(partner_obs_ids_by_surrogate[surrogate_i]))
             else:
                 hr_surr = unit.hr_z
                 eeg_surr = _surrogate_eeg(null_type, unit.eeg_z, rng)
@@ -776,17 +892,64 @@ def _null_statistics_for_unit(
         notes = "All surrogate endpoint statistics were non-finite."
 
     p_value = empirical_p_value(observed_stat, null_vals, alternative="greater")
-    effect = surrogate_effect_size(observed_stat, null_vals)
-    null_std = _std(null_vals)
+    effect, null_mean, null_std, denom_floor, null_reason = null_standardize_effect(
+        observed_stat,
+        null_vals,
+        required_draws=int(n_surrogates),
+    )
+    null_median = _median(null_vals)
     reason_status = status
     reason_code = ""
     reason_text = notes
-    if status == "ok" and n_finite > 0 and (not math.isfinite(null_std) or null_std <= 0):
+    if status == "ok" and null_reason:
         reason_status = UNDEFINED_NULL_VARIANCE
         reason_code = UNDEFINED_NULL_VARIANCE
-        reason_text = "Null surrogate variance is undefined or zero; standardized effect not computable."
+        reason_text = (
+            "Null surrogate distribution is numerically degenerate for normalization "
+            f"({null_reason}; denom_floor={denom_floor})."
+        )
     elif status != "ok":
         reason_code = map_exclusion_to_reason_code(status)
+
+    if (
+        null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH
+        and status == "ok"
+        and math.isfinite(_as_float(cross_observed))
+    ):
+        cross_observed_z, _cm, _csd, _cfloor, cross_reason = null_standardize_effect(
+            _as_float(cross_observed),
+            null_vals,
+            required_draws=int(n_surrogates),
+        )
+        if cross_reason and reason_status == "ok":
+            reason_status = UNDEFINED_NULL_VARIANCE
+            reason_code = UNDEFINED_NULL_VARIANCE
+            reason_text = (
+                "Cross-observed null standardization failed "
+                f"({cross_reason}; denom_floor={_cfloor})."
+            )
+    elif null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH and status == "ok":
+        reason_status = "insufficient_common_support"
+        reason_code = map_exclusion_to_reason_code(reason_status)
+        reason_text = _as_str(
+            (cross_metrics or {}).get("reason")
+            or (cross_metrics or {}).get("exclusion_reason")
+            or "Cross-observed HR_i + EEG_j endpoint is non-finite."
+        )
+
+    if (
+        null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH
+        and reason_status == "ok"
+        and not math.isfinite(_as_float(cross_observed_z))
+    ):
+        reason_status = UNDEFINED_NULL_VARIANCE
+        reason_code = UNDEFINED_NULL_VARIANCE
+        reason_text = (
+            "Cross-subject null-normalized effect is non-finite despite "
+            "computed mismatch null distribution."
+        )
+
+    effect_export: float | str = effect if math.isfinite(effect) else ""
 
     subject_row = attach_structured_reason(
         {
@@ -806,11 +969,20 @@ def _null_statistics_for_unit(
             "n_surrogates_finite": int(n_finite),
             "observed_endpoint_index": observed_stat,
             "observed_eligible": observed_eligible,
-            "null_mean": _mean(null_vals),
+            "null_mean": null_mean,
             "null_std": null_std,
-            "null_median": _median(null_vals),
+            "null_median": null_median,
             "empirical_p": p_value,
-            "effect_size_surrogate_z": effect,
+            "effect_size_surrogate_z": effect_export,
+            "cross_observed_endpoint_index": cross_observed,
+            "cross_subject_null_normalized_effect": cross_observed_z,
+            "cross_partner_observation_id": _as_str(cross_partner_obs_id),
+            "cross_partner_participant_id": _as_str(
+                (observation_identity or {}).get(_as_str(cross_partner_obs_id), {}).get("participant_id")
+            ),
+            "cross_partner_session_id": _as_str(
+                (observation_identity or {}).get(_as_str(cross_partner_obs_id), {}).get("session_id")
+            ),
             "rng_seed_u64": int(seed),
             "analysis_key": key,
             "notes": reason_text,
@@ -825,12 +997,25 @@ def _null_statistics_for_unit(
             else ""
         ),
         observed_evidence=(
-            f"status={status}; n_surrogates_finite={n_finite}; null_std={null_std}"
+            f"status={status}; n_surrogates_finite={n_finite}; null_std={null_std}; "
+            f"denom_floor={denom_floor}; null_reason={null_reason}"
             if reason_status != "ok"
             else ""
         ),
         specification_id=f"{null_type}:{contract.endpoint_name}",
     )
+    if (
+        null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH
+        and _as_str(subject_row.get("status")).casefold() == "computed"
+        and (
+            not math.isfinite(_as_float(subject_row.get("cross_observed_endpoint_index")))
+            or not math.isfinite(_as_float(subject_row.get("cross_subject_null_normalized_effect")))
+        )
+    ):
+        raise ValueError(
+            "cross_subject_mismatch row marked computed without finite "
+            "cross_observed_endpoint_index and cross_subject_null_normalized_effect."
+        )
     qc_row = attach_structured_reason(
         {
             "dataset_id": unit.dataset_id,
@@ -858,7 +1043,8 @@ def _null_statistics_for_unit(
             else ""
         ),
         observed_evidence=(
-            f"status={status}; n_surrogates_finite={n_finite}; null_std={null_std}"
+            f"status={status}; n_surrogates_finite={n_finite}; null_std={null_std}; "
+            f"denom_floor={denom_floor}; null_reason={null_reason}"
             if reason_status != "ok"
             else ""
         ),
@@ -866,7 +1052,7 @@ def _null_statistics_for_unit(
     )
     # Preserve legacy null-QC status vocabulary for downstream filters.
     qc_row["status"] = status if reason_status == "ok" else reason_status
-    return subject_row, qc_row, list(null_vals)
+    return subject_row, qc_row, list(null_vals), partner_obs_ids_for_nulls
 
 
 def series_units_from_aligned_rows(
@@ -936,9 +1122,11 @@ def series_units_from_aligned_rows(
 
 
 def _pool_key(unit: SeriesUnit) -> tuple[str, ...]:
+    ids = _surrogate_identity_fields(unit)
     return (
         unit.dataset_id.casefold(),
         unit.condition.casefold(),
+        ids["session_id"].casefold(),
         unit.modality.casefold(),
         str(int(unit.duration_s)),
     )
@@ -946,6 +1134,25 @@ def _pool_key(unit: SeriesUnit) -> tuple[str, ...]:
 
 def _observation_key(unit: SeriesUnit) -> str:
     return unit.observation_id
+
+
+def _observation_identity(unit: SeriesUnit) -> dict[str, str]:
+    from .group_tables import normalize_keys
+
+    keys = normalize_keys(
+        {
+            "dataset_id": unit.dataset_id,
+            "subject_id": unit.subject_id,
+            "observation_id": unit.observation_id,
+            "condition": unit.condition,
+            "task": unit.task,
+        }
+    )
+    return {
+        "observation_id": _as_str(unit.observation_id),
+        "participant_id": _as_str(keys.get("participant_id")).casefold(),
+        "session_id": _as_str(keys.get("session_id"), "single").casefold() or "single",
+    }
 
 
 def unit_analysis_key(unit: SeriesUnit) -> str:
@@ -988,9 +1195,24 @@ def _build_pool_derangements(
         pools.setdefault(_pool_key(unit), []).append(unit)
 
     pool_derangements: dict[tuple[str, ...], list[dict[str, str]]] = {}
+    obs_to_identity = {_observation_key(unit): _observation_identity(unit) for unit in units}
+
     for pool, pool_units in pools.items():
         obs_ids = sorted({_observation_key(unit) for unit in pool_units})
-        if len(obs_ids) < 2:
+        participant_by_obs = {
+            obs_id: _as_str(obs_to_identity.get(obs_id, {}).get("participant_id")).casefold()
+            for obs_id in obs_ids
+        }
+        participants = sorted({pid for pid in participant_by_obs.values() if pid})
+        if len(participants) < 2:
+            pool_derangements[pool] = []
+            continue
+        obs_by_participant: dict[str, list[str]] = {pid: [] for pid in participants}
+        for obs_id in obs_ids:
+            pid = participant_by_obs.get(obs_id, "")
+            if pid in obs_by_participant:
+                obs_by_participant[pid].append(obs_id)
+        if any(not obs_by_participant[pid] for pid in participants):
             pool_derangements[pool] = []
             continue
         pool_seed = deterministic_seed(
@@ -1000,11 +1222,26 @@ def _build_pool_derangements(
         )
         pool_rng = np.random.default_rng(pool_seed)
         mappings: list[dict[str, str]] = []
-        for _ in range(int(n_surrogates)):
-            perm = seeded_derangement(len(obs_ids), pool_rng)
-            mappings.append(
-                {obs_ids[i]: obs_ids[int(perm[i])] for i in range(len(obs_ids))}
-            )
+        # Draw one extra derangement: draw 0 is reserved for cross-observed export.
+        for _ in range(int(n_surrogates) + 1):
+            perm = seeded_derangement(len(participants), pool_rng)
+            donor_by_participant = {
+                participants[i]: participants[int(perm[i])]
+                for i in range(len(participants))
+            }
+            mapping: dict[str, str] = {}
+            for obs_id in obs_ids:
+                focal_pid = participant_by_obs.get(obs_id, "")
+                donor_pid = donor_by_participant.get(focal_pid, "")
+                candidates = obs_by_participant.get(donor_pid, [])
+                if not donor_pid or not candidates:
+                    mapping = {}
+                    break
+                mapping[obs_id] = _as_str(pool_rng.choice(candidates))
+            if not mapping:
+                mappings = []
+                break
+            mappings.append(mapping)
         pool_derangements[pool] = mappings
     return pool_derangements
 
@@ -1030,7 +1267,7 @@ def _resolve_cross_subject_partners(
     *,
     pool_derangements: Mapping[tuple[str, ...], list[dict[str, str]]],
     by_obs_band: Mapping[tuple[str, str, str, int], SeriesUnit],
-) -> tuple[list[np.ndarray], bool]:
+) -> tuple[list[np.ndarray], list[str], str, np.ndarray | None, bool]:
     """Return ``(partners, missing_partner)``.
 
     Empty ``partners`` with ``missing_partner=False`` means derangement impossible
@@ -1039,9 +1276,26 @@ def _resolve_cross_subject_partners(
     """
     mappings = pool_derangements.get(_pool_key(unit), [])
     if not mappings:
-        return [], False
+        return [], [], "", None, False
+    if len(mappings) < 2:
+        return [], [], "", None, False
+    cross_mapping = mappings[0]
+    cross_partner_id = _as_str(cross_mapping.get(unit.observation_id))
+    if not cross_partner_id:
+        return [], [], "", None, True
+    cross_partner = by_obs_band.get(
+        (
+            cross_partner_id,
+            unit.band,
+            unit.power_representation,
+            int(unit.duration_s),
+        )
+    )
+    if cross_partner is None:
+        return [], [], "", None, True
     partners: list[np.ndarray] = []
-    for mapping in mappings:
+    partner_ids: list[str] = []
+    for mapping in mappings[1:]:
         partner_id = mapping[unit.observation_id]
         partner_unit = by_obs_band.get(
             (
@@ -1052,9 +1306,10 @@ def _resolve_cross_subject_partners(
             )
         )
         if partner_unit is None:
-            return [], True
+            return [], [], "", None, True
         partners.append(partner_unit.eeg_z)
-    return partners, False
+        partner_ids.append(partner_id)
+    return partners, partner_ids, cross_partner_id, np.asarray(cross_partner.eeg_z, dtype=float), False
 
 
 def _compute_observed_for_unit(unit: SeriesUnit) -> tuple[float, bool]:
@@ -1121,6 +1376,8 @@ def _surrogate_rows_for_unit(
     n_surrogates: int,
     observed_eligible: bool,
     qc_status: str,
+    partner_obs_ids_by_surrogate: Sequence[str] | None = None,
+    observation_identity: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[dict[str, object]]:
     """Expand one unit's surrogate vector into row-wise long-form records."""
     ids = _surrogate_identity_fields(unit)
@@ -1136,6 +1393,17 @@ def _surrogate_rows_for_unit(
 
     rows: list[dict[str, object]] = []
     for surrogate_i, surrogate_value in enumerate(null_values):
+        partner_obs_id = ""
+        partner_participant_id = ""
+        partner_session_id = ""
+        if partner_obs_ids_by_surrogate is not None and surrogate_i < len(partner_obs_ids_by_surrogate):
+            partner_obs_id = _as_str(partner_obs_ids_by_surrogate[surrogate_i])
+            partner_participant_id = _as_str(
+                (observation_identity or {}).get(partner_obs_id, {}).get("participant_id")
+            )
+            partner_session_id = _as_str(
+                (observation_identity or {}).get(partner_obs_id, {}).get("session_id")
+            )
         surrogate_z = float("nan")
         if math.isfinite(null_std) and null_std > 0 and math.isfinite(float(surrogate_value)):
             surrogate_z = float((float(surrogate_value) - null_mean) / null_std)
@@ -1168,6 +1436,10 @@ def _surrogate_rows_for_unit(
                 "empirical_p": empirical_p,
                 "rng_seed_u64": _as_str(rng_seed_u64),
                 "n_surrogates": int(n_surrogates),
+                "partner_observation_id": partner_obs_id,
+                "partner_participant_id": partner_participant_id,
+                "partner_session_id": partner_session_id,
+                "is_cross_observed_draw": False,
                 "eligibility_status": "eligible" if observed_eligible else "ineligible",
                 "qc_status": qc_status,
             }
@@ -1182,6 +1454,7 @@ def process_one_unit(
     n_surrogates: int,
     pool_derangements: Mapping[tuple[str, ...], list[dict[str, str]]],
     by_obs_band: Mapping[tuple[str, str, str, int], SeriesUnit],
+    observation_identity: Mapping[str, Mapping[str, str]],
     cache_observed: bool = True,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     """Run all null types for one analysis unit (observed optionally cached)."""
@@ -1195,19 +1468,32 @@ def process_one_unit(
     surrogate_rows: list[dict[str, object]] = []
     for null_type in null_types:
         partner_eeg_by_surrogate: list[np.ndarray] | None = None
+        partner_obs_ids_by_surrogate: list[str] | None = None
+        cross_partner_obs_id = ""
+        cross_partner_eeg: np.ndarray | None = None
         missing_partner = False
         if null_type == NULL_TYPE_CROSS_SUBJECT_MISMATCH:
-            partner_eeg_by_surrogate, missing_partner = _resolve_cross_subject_partners(
+            (
+                partner_eeg_by_surrogate,
+                partner_obs_ids_by_surrogate,
+                cross_partner_obs_id,
+                cross_partner_eeg,
+                missing_partner,
+            ) = _resolve_cross_subject_partners(
                 unit,
                 pool_derangements=pool_derangements,
                 by_obs_band=by_obs_band,
             )
 
-        subject_row, qc_row, null_values = _null_statistics_for_unit(
+        subject_row, qc_row, null_values, null_partner_obs_ids = _null_statistics_for_unit(
             unit,
             null_type=null_type,
             n_surrogates=n_surrogates,
             partner_eeg_by_surrogate=partner_eeg_by_surrogate,
+            partner_obs_ids_by_surrogate=partner_obs_ids_by_surrogate,
+            cross_partner_obs_id=cross_partner_obs_id,
+            cross_partner_eeg=cross_partner_eeg,
+            observation_identity=observation_identity,
             observed_stat=observed_stat,
             observed_eligible=observed_eligible,
         )
@@ -1233,6 +1519,8 @@ def process_one_unit(
                 n_surrogates=int(subject_row.get("n_surrogates_requested", n_surrogates)),
                 observed_eligible=bool(subject_row.get("observed_eligible")),
                 qc_status=_as_str(qc_row.get("status"), "unknown"),
+                partner_obs_ids_by_surrogate=null_partner_obs_ids,
+                observation_identity=observation_identity,
             )
         )
     return subject_rows, qc_rows, surrogate_rows
@@ -1246,6 +1534,7 @@ def _worker_process_unit(
         int,
         dict[tuple[str, ...], list[dict[str, str]]],
         dict[tuple[str, str, str, int], SeriesUnit],
+        dict[str, dict[str, str]],
         bool,
     ],
 ) -> tuple[int, list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
@@ -1256,6 +1545,7 @@ def _worker_process_unit(
         n_surrogates,
         pool_derangements,
         by_obs_band,
+        observation_identity,
         cache_observed,
     ) = payload
     subject_rows, qc_rows, surrogate_rows = process_one_unit(
@@ -1264,6 +1554,7 @@ def _worker_process_unit(
         n_surrogates=n_surrogates,
         pool_derangements=pool_derangements,
         by_obs_band=by_obs_band,
+        observation_identity=observation_identity,
         cache_observed=cache_observed,
     )
     return unit_index, subject_rows, qc_rows, surrogate_rows
@@ -1322,10 +1613,27 @@ def _validate_checkpoint_payload(
             return None
         if int(row.get("n_surrogates_requested", -1)) != int(n_surrogates):
             return None
+        # Cross-subject rows must never be marked computed with missing
+        # cross-observed endpoint fields.
+        if (
+            _as_str(row.get("null_type")).casefold() == NULL_TYPE_CROSS_SUBJECT_MISMATCH
+            and _as_str(row.get("status")).casefold() == "computed"
+            and (
+                not math.isfinite(_as_float(row.get("cross_observed_endpoint_index")))
+                or not math.isfinite(_as_float(row.get("cross_subject_null_normalized_effect")))
+            )
+        ):
+            return None
     if surrogate_rows:
         expected_rows = len(null_types) * int(n_surrogates)
         if len(surrogate_rows) != expected_rows:
             return None
+        for row in surrogate_rows:
+            if _as_str(row.get("null_type")).casefold() != NULL_TYPE_CROSS_SUBJECT_MISMATCH:
+                continue
+            # Upgraded schema requires partner provenance and explicit marker.
+            if "partner_observation_id" not in row or "is_cross_observed_draw" not in row:
+                return None
     return subject_rows, qc_rows, surrogate_rows
 
 
@@ -1492,6 +1800,9 @@ def run_null_battery(
 
     pool_derangements = _build_pool_derangements(unit_list, n_surrogates=n_surrogates)
     by_obs_band = _by_obs_band_index(unit_list)
+    observation_identity = {
+        _observation_key(unit): _observation_identity(unit) for unit in unit_list
+    }
 
     results_by_index: dict[
         int,
@@ -1561,6 +1872,7 @@ def run_null_battery(
                 n_surrogates=n_surrogates,
                 pool_derangements=pool_derangements,
                 by_obs_band=by_obs_band,
+                observation_identity=observation_identity,
                 cache_observed=cache_observed,
             )
             _store_result(index, subject_rows, qc_rows, surrogate_rows)
@@ -1574,6 +1886,7 @@ def run_null_battery(
                 int(n_surrogates),
                 pool_derangements,
                 by_obs_band,
+                observation_identity,
                 bool(cache_observed),
             )
             for index in pending_indices
@@ -1597,6 +1910,7 @@ def run_null_battery(
                     n_surrogates=n_surrogates,
                     pool_derangements=pool_derangements,
                     by_obs_band=by_obs_band,
+                    observation_identity=observation_identity,
                     cache_observed=cache_observed,
                 )
                 _store_result(index, subject_rows, qc_rows, surrogate_rows)

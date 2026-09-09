@@ -8,11 +8,14 @@ import numpy as np
 from ppg_eeg.confirmatory.duration_contracts import ENDPOINT_ZLPI
 from ppg_eeg.confirmatory.figures import _panel_b_cross_subject_and_innovation
 from ppg_eeg.confirmatory.nulls import (
+    NULL_TYPE_AR1_INNOVATIONS,
+    NULL_TYPE_CROSS_SUBJECT_MISMATCH,
     SeriesUnit,
     ar1_innovations,
     circular_shift_series,
     compute_endpoint_index_from_series,
     deterministic_seed,
+    run_null_battery,
     valid_circular_shifts,
 )
 
@@ -66,8 +69,14 @@ def _make_units() -> list[SeriesUnit]:
 class TestFigure3PanelBInnovations(unittest.TestCase):
     def test_controls_share_estimand_scale_and_units(self) -> None:
         units = _make_units()
-        obs_rows, _draw_rows, _diag_rows = _panel_b_cross_subject_and_innovation(
+        c4 = run_null_battery(
             units,
+            n_surrogates=60,
+            null_types=(NULL_TYPE_CROSS_SUBJECT_MISMATCH, NULL_TYPE_AR1_INNOVATIONS),
+        )
+        obs_rows, _draw_rows, _diag_rows = _panel_b_cross_subject_and_innovation(
+            c4.subject_rows,
+            c4.surrogate_rows,
             n_null_draws=60,
         )
         self.assertEqual(len(obs_rows), len(units))

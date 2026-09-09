@@ -26,6 +26,7 @@ UNDEFINED_NULL_VARIANCE = "undefined_null_variance"
 CONFIGURATION_VALIDATION_FAILED = "configuration_validation_failed"
 STANDARD_ZLPI_NOT_APPLICABLE = "standard_zlpi_not_applicable"
 ENDPOINT_CONTRACT_NON_ZLPI = "endpoint_contract_non_zlpi"
+OPTION_C_PEAK_NOT_APPLICABLE = "option_c_peak_not_applicable"
 EXCLUDED_BY_MANUSCRIPT_DESIGN = "excluded_by_manuscript_design"
 
 REASON_CODES: tuple[str, ...] = (
@@ -49,6 +50,7 @@ REASON_CODES: tuple[str, ...] = (
     CONFIGURATION_VALIDATION_FAILED,
     STANDARD_ZLPI_NOT_APPLICABLE,
     ENDPOINT_CONTRACT_NON_ZLPI,
+    OPTION_C_PEAK_NOT_APPLICABLE,
     EXCLUDED_BY_MANUSCRIPT_DESIGN,
 )
 
@@ -113,6 +115,9 @@ _EXCLUSION_ALIASES: dict[str, str] = {
     "configuration_validation_failed": CONFIGURATION_VALIDATION_FAILED,
     "standard_zlpi_not_applicable": STANDARD_ZLPI_NOT_APPLICABLE,
     "endpoint_contract_non_zlpi": ENDPOINT_CONTRACT_NON_ZLPI,
+    "option_c_peak_not_applicable": OPTION_C_PEAK_NOT_APPLICABLE,
+    "option_c_peak_requires_d180_d240": OPTION_C_PEAK_NOT_APPLICABLE,
+    "insufficient_option_c_flank_support": INSUFFICIENT_LAG_SUPPORT,
 }
 
 
