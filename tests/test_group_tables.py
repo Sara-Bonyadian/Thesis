@@ -198,7 +198,7 @@ class TestNormalizeKeys(unittest.TestCase):
         self.assertEqual(keys["session_id"], "ph")
         self.assertEqual(keys["condition"], "ph_post_rest")
 
-    def test_mindfulness_keeps_multitoken_subject_as_participant(self) -> None:
+    def test_mindfulness_recovers_biological_participant_and_part_session(self) -> None:
         keys = normalize_keys(
             {
                 "dataset_id": "mindfulness",
@@ -209,8 +209,37 @@ class TestNormalizeKeys(unittest.TestCase):
                 "session_id": "",
             }
         )
-        self.assertEqual(keys["participant_id"], "mbd-01_part1_step1")
-        self.assertEqual(keys["session_id"], "step1")
+        self.assertEqual(keys["participant_id"], "mbd-01")
+        self.assertEqual(keys["session_id"], "part1")
+        self.assertEqual(keys["condition"], "step1")
+
+    def test_mindfulness_ignores_nan_session_and_parses_observation_id(self) -> None:
+        keys = normalize_keys(
+            {
+                "dataset_id": "mindfulness",
+                "subject_id": "mbd-01",
+                "observation_id": "mindfulness-mbd-01-part2-task-step3",
+                "condition": "step3",
+                "participant_id": float("nan"),
+                "session_id": float("nan"),
+            }
+        )
+        self.assertEqual(keys["participant_id"], "mbd-01")
+        self.assertEqual(keys["session_id"], "part2")
+        self.assertEqual(keys["condition"], "step3")
+
+    def test_mindfulness_does_not_infer_session_from_condition(self) -> None:
+        keys = normalize_keys(
+            {
+                "dataset_id": "mindfulness",
+                "subject_id": "mbd-01",
+                "observation_id": "mindfulness-mbd-01-part1-task-step2",
+                "condition": "step2",
+                "session_id": "step2",
+            }
+        )
+        self.assertEqual(keys["session_id"], "part1")
+        self.assertEqual(keys["condition"], "step2")
 
 
 class TestExactPairing(unittest.TestCase):
@@ -825,6 +854,113 @@ class TestWriteOutputs(unittest.TestCase):
                 SUBJECT_LEVEL_FIELDS.index("negative_flank_mean_z")
                 > SUBJECT_LEVEL_FIELDS.index("z0")
             )
+
+
+def _mindfulness_step(
+    participant: str,
+    session: str,
+    step: str,
+    *,
+    endpoint_index: float,
+    observation_id: str | None = None,
+    subject_id: str | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    oid = observation_id or f"mindfulness-{participant}-{session}-task-{step}"
+    sid = subject_id or participant
+    return (
+        [
+            _endpoint_row(
+                dataset_id="mindfulness",
+                observation_id=oid,
+                subject_id=sid,
+                condition=step,
+                endpoint_index=endpoint_index,
+            )
+        ],
+        [
+            _peak_row(
+                dataset_id="mindfulness",
+                observation_id=oid,
+                subject_id=sid,
+                condition=step,
+                peak_height_A=0.2,
+                peak_center_mu_s=0.0,
+            )
+        ],
+    )
+
+
+class TestMindfulnessSessionPairing(unittest.TestCase):
+    def test_pairs_within_participant_session_not_across_parts(self) -> None:
+        endpoints: list[dict[str, object]] = []
+        peaks: list[dict[str, object]] = []
+        for session, step1, step2 in (("part1", 0.50, 0.20), ("part2", 0.40, 0.10)):
+            e1, p1 = _mindfulness_step("mbd-01", session, "step1", endpoint_index=step1)
+            e2, p2 = _mindfulness_step("mbd-01", session, "step2", endpoint_index=step2)
+            endpoints.extend(e1 + e2)
+            peaks.extend(p1 + p2)
+        result = build_group_tables(endpoints, peaks)
+        pairs = [
+            r
+            for r in result.paired_contrast_rows
+            if r["contrast_id"] == "step1__step2"
+            and r["band"] == "theta"
+            and int(r["duration_s"]) == 240
+        ]
+        self.assertEqual(len(pairs), 2)
+        sessions = {r["session_id"] for r in pairs}
+        self.assertEqual(sessions, {"part1", "part2"})
+        self.assertTrue(all(r["participant_id"] == "mbd-01" for r in pairs))
+        qc = [
+            q
+            for q in result.pairing_qc_rows
+            if q["contrast_id"] == "step1__step2" and q["pairing_status"] == "paired"
+        ]
+        self.assertEqual({q["session_id"] for q in qc}, {"part1", "part2"})
+        self.assertEqual(int(qc[0]["n_paired_keys"]), 2)
+
+    def test_aggregates_duplicate_runs_within_same_part_and_drops_legacy(self) -> None:
+        endpoints: list[dict[str, object]] = []
+        peaks: list[dict[str, object]] = []
+        for oid, index in (
+            ("mindfulness-mbd-15-part1-task-step1", 0.10),
+            ("mindfulness-mbd-15-part1-task-step1-run-01", 0.30),
+            ("mindfulness-mbd-15-part1-task-step1-run-02", 0.50),
+        ):
+            e, p = _mindfulness_step(
+                "mbd-15",
+                "part1",
+                "step1",
+                endpoint_index=index,
+                observation_id=oid,
+                subject_id="mbd-15_part1_step1" if "run" not in oid else "mbd-15",
+            )
+            endpoints.extend(e)
+            peaks.extend(p)
+        e2, p2 = _mindfulness_step("mbd-15", "part1", "step2", endpoint_index=0.20)
+        endpoints.extend(e2)
+        peaks.extend(p2)
+        result = build_group_tables(endpoints, peaks)
+        step1 = [
+            r
+            for r in result.subject_level_rows
+            if r["condition"] == "step1"
+            and r["band"] == "theta"
+            and int(r["duration_s"]) == 240
+        ]
+        self.assertEqual(len(step1), 1)
+        self.assertEqual(int(step1[0]["n_runs"]), 2)
+        self.assertEqual(step1[0]["participant_id"], "mbd-15")
+        self.assertEqual(step1[0]["session_id"], "part1")
+        obs_ids = set(str(step1[0]["observation_ids"]).split(";"))
+        self.assertEqual(
+            obs_ids,
+            {
+                "mindfulness-mbd-15-part1-task-step1-run-01",
+                "mindfulness-mbd-15-part1-task-step1-run-02",
+            },
+        )
+        self.assertAlmostEqual(float(step1[0]["endpoint_index"]), 0.40, places=12)
 
 
 if __name__ == "__main__":

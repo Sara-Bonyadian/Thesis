@@ -143,6 +143,7 @@ class StageContext:
     n_jobs: int = -1
     force: bool = False
     enable_optional_artifact_controls: bool = False
+    c1a_laptop: bool = False
     repo_root: Path | None = None
     logs: list[dict[str, object]] = field(default_factory=list)
 
@@ -453,8 +454,9 @@ def run_c1a(ctx: StageContext) -> dict[str, object]:
         observations,
         out_root,
         line_frequency_hz=ctx.dataset.eeg.line_frequency_hz,
-        n_jobs=ctx.n_jobs,
+        n_jobs=1 if ctx.c1a_laptop else ctx.n_jobs,
         progress=True,
+        laptop=bool(ctx.c1a_laptop),
     )
     if int(result.get("n_ok", 0)) <= 0:
         raise StageError(
@@ -876,6 +878,11 @@ def run_c7(ctx: StageContext) -> dict[str, object]:
             "n_surrogates": ctx.n_surrogates,
         },
     )
+    if str(ctx.dataset.dataset_id).casefold() == "ds003816":
+        from .ds003816_descriptive_figures import render_ds003816_descriptive_qc
+
+        descriptive = render_ds003816_descriptive_qc(ctx.root, report_dir)
+        paths["ds003816_descriptive_qc"] = {key: str(value) for key, value in descriptive.items()}
     return {key: str(value) for key, value in paths.items() if value is not None}
 
 
@@ -1008,7 +1015,16 @@ def build_stage_parser() -> argparse.ArgumentParser:
         help=(
             "Process-pool workers for C1a, C1b, and C4. "
             "-1 uses all CPUs; 1 forces serial execution. "
-            "C1a also applies a RAM-aware cap (~1.5 GB/worker)."
+            "C1a applies a RAM-aware cap and streams large EEG via memmap."
+        ),
+    )
+    parser.add_argument(
+        "--c1a-laptop",
+        action="store_true",
+        help=(
+            "Memory-safe C1a mode for 16 GB hosts: n_jobs=1, one spawned "
+            "process per observation, disk-memmap preprocess, peak RAM target "
+            "<12 GB. Resume/checkpoints are preserved."
         ),
     )
     parser.add_argument(
@@ -1120,6 +1136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             n_jobs=int(args.n_jobs),
             force=bool(args.force),
             enable_optional_artifact_controls=bool(args.optional_artifact_controls),
+            c1a_laptop=bool(getattr(args, "c1a_laptop", False)),
             repo_root=repo_root,
         )
         print(f"[confirmatory] dataset={dataset.dataset_id}")

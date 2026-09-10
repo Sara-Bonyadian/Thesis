@@ -14,15 +14,15 @@ selection:
   sessions: []
 
 protocol:
-  participant_id_from: observation_id
+  participant_id_from: subject_id
   session_id_from: session_label
   cardiac_event_type: systolic_peak
 
 normalization:
   condition_semantics:
-    step1: { state: state_low, time: time_na, session: part1 }
-    step2: { state: state_high, time: time_na, session: part1 }
-    step3: { state: state_high, time: time_na, session: part1 }
+    step1: { state: state_low, time: time_na }
+    step2: { state: state_high, time: time_na }
+    step3: { state: state_high, time: time_na }
 
 capabilities:
   has_eeg: true

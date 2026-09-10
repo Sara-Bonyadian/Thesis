@@ -59,6 +59,11 @@ PAIRING_QC_FILENAME = "pairing_qc.csv"
 AGGREGATION_MANIFEST_FILENAME = "aggregation_manifest.csv"
 
 _SES_RE = re.compile(r"(?:^|[-_])ses[-_]?([a-zA-Z0-9]+)(?:$|[-_])", re.IGNORECASE)
+_PART_RE = re.compile(r"(?:^|[-_])part([12])(?:$|[-_])", re.IGNORECASE)
+_RUN_RE = re.compile(r"(?:^|[-_])run[-_]?([a-zA-Z0-9]+)(?:$|[-_])", re.IGNORECASE)
+_MBD_RE = re.compile(r"(mbd-\d+)", re.IGNORECASE)
+_STEP_TOKENS = frozenset({"step1", "step2", "step3"})
+_MISSING_SESSION_TOKENS = frozenset({"", "nan", "none", "null", "single"})
 
 JOIN_FIELDS = (
     "dataset_id",
@@ -194,8 +199,17 @@ class GroupTableResult:
 def _as_str(value: object, default: str = "") -> str:
     if value is None:
         return default
+    if isinstance(value, float) and not math.isfinite(value):
+        return default
     text = str(value).strip()
     return text if text else default
+
+
+def _present_id(value: object) -> str:
+    text = _as_str(value)
+    if text.casefold() in _MISSING_SESSION_TOKENS:
+        return ""
+    return text
 
 
 def _as_bool(value: object) -> bool:
@@ -254,23 +268,86 @@ def _semicolon_join(values: Sequence[str]) -> str:
 def infer_session_label(row: Mapping[str, object]) -> str:
     """Best-effort generic session label when M6/M7 rows omit it."""
     for key in ("session_id", "session_label"):
-        if key in row and _as_str(row.get(key)):
-            return _as_str(row.get(key)).casefold()
+        value = _as_str(row.get(key)).casefold()
+        if value in _MISSING_SESSION_TOKENS or value in _STEP_TOKENS:
+            continue
+        if value:
+            return value
 
     observation_id = _as_str(row.get("observation_id")).casefold()
+    part_match = _PART_RE.search(observation_id)
+    if part_match:
+        return f"part{part_match.group(1)}"
     match = _SES_RE.search(observation_id)
     if match:
         return match.group(1).casefold()
 
     # Session-qualified subject IDs (e.g. ``01_ph`` / ``01_ps``) encode the
     # protocol session as a suffix. Prefer that over inventing ``single``.
+    # Never treat a mindfulness step token as a session.
     subject_id = _as_str(row.get("subject_id")).casefold()
+    part_match = _PART_RE.search(subject_id)
+    if part_match:
+        return f"part{part_match.group(1)}"
     if "_" in subject_id:
         stem, suffix = subject_id.rsplit("_", 1)
-        if stem and suffix and not suffix.isdigit():
+        if stem and suffix and not suffix.isdigit() and suffix not in _STEP_TOKENS:
             return suffix
 
     return "single"
+
+
+def infer_run_id(row: Mapping[str, object]) -> str:
+    run_id = _present_id(row.get("run_id")).casefold()
+    if run_id:
+        return run_id
+    match = _RUN_RE.search(_as_str(row.get("observation_id")).casefold())
+    if match:
+        return match.group(1).casefold()
+    return "single"
+
+
+def _biological_participant_id(dataset_id: str, raw_id: str) -> str:
+    """Strip session/step suffixes from a participant-like token."""
+    text = raw_id.strip().casefold()
+    if not text:
+        return ""
+    if dataset_id.casefold() == "mindfulness":
+        match = _MBD_RE.search(text)
+        if match:
+            return match.group(1).casefold()
+    return text
+
+
+def _drop_superseded_legacy_observations(
+    rows: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    """Drop unsuffixed IDs when explicit ``-run-`` siblings exist.
+
+    Mindfulness ``mbd-15`` part1 left both legacy
+    ``...-task-step1`` rows and ``...-task-step1-run-01/02`` rows. Keep the
+    run-qualified recordings and aggregate only those.
+    """
+    observation_ids = {
+        _as_str(row.get("observation_id")).casefold()
+        for row in rows
+        if _as_str(row.get("observation_id"))
+    }
+    superseded = {
+        oid
+        for oid in observation_ids
+        if any(
+            other != oid and other.startswith(f"{oid}-run-")
+            for other in observation_ids
+        )
+    }
+    if not superseded:
+        return list(rows)
+    return [
+        row
+        for row in rows
+        if _as_str(row.get("observation_id")).casefold() not in superseded
+    ]
 
 
 def _participant_from_observation_id(dataset_id: str, observation_id: str) -> str:
@@ -280,7 +357,8 @@ def _participant_from_observation_id(dataset_id: str, observation_id: str) -> st
     if "-ses-" in remainder:
         return remainder.split("-ses-", 1)[0]
     if "-task-" in remainder:
-        return remainder.split("-task-", 1)[0]
+        token = remainder.split("-task-", 1)[0]
+        return re.sub(r"-(part[12])$", "", token)
     return remainder.split("-", 1)[0]
 
 
@@ -292,18 +370,14 @@ def normalize_keys(row: Mapping[str, object]) -> dict[str, str]:
     condition = _as_str(row.get("condition") or row.get("task")).casefold()
     session_label = infer_session_label(row)
 
-    if _as_str(row.get("participant_id")):
-        participant_id = _as_str(row.get("participant_id")).casefold()
-        run_id = _as_str(row.get("run_id"), "single").casefold()
-        session_id = (
-            _as_str(row.get("session_id") or row.get("session_label"), session_label)
-            .casefold()
-        )
+    participant_hint_raw = _present_id(row.get("participant_id"))
+    if participant_hint_raw:
+        participant_id = _biological_participant_id(dataset_id, participant_hint_raw)
         return {
             "dataset_id": dataset_id,
-            "participant_id": participant_id,
-            "session_id": session_id,
-            "run_id": run_id or "single",
+            "participant_id": participant_id or participant_hint_raw.casefold(),
+            "session_id": session_label,
+            "run_id": infer_run_id(row),
             "condition": condition,
             "observation_id": observation_id,
             "subject_id": subject_id,
@@ -329,9 +403,9 @@ def normalize_keys(row: Mapping[str, object]) -> dict[str, str]:
         and subject_id.endswith("_" + session_label)
     ):
         stem = subject_id[: -(len(session_label) + 1)]
-        # HIIT ``01_ph``: one token plus session suffix. Multi-token subjects
-        # such as mindfulness ``mbd-01_part1_step1`` stay as the analysis
-        # identity until the pending pairing-id fix lands.
+        # HIIT ``01_ph``: one token plus session suffix. Mindfulness
+        # ``mbd-01_part1_step1`` is a contaminated identity; biological id
+        # is recovered below rather than kept as the pairing key.
         session_qualified_subject = bool(stem) and "_" not in stem
     if subject_embeds_bids:
         participant_hint = _participant_from_observation_id(
@@ -357,10 +431,11 @@ def normalize_keys(row: Mapping[str, object]) -> dict[str, str]:
         session_label=session_label,
         participant_id=participant_hint or None,
     )
+    participant_id = _biological_participant_id(dataset_id, _participant_id(obs))
     return {
         "dataset_id": dataset_id,
-        "participant_id": _participant_id(obs),
-        "session_id": _session_id(obs),
+        "participant_id": participant_id or _participant_id(obs),
+        "session_id": session_label or _session_id(obs),
         "run_id": _run_id(obs),
         "condition": condition,
         "observation_id": observation_id,
@@ -510,7 +585,10 @@ def build_subject_level_metrics(
     peak_rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
     """One canonical row per dataset×participant×session×condition×duration×band×repr×endpoint."""
-    combined = combine_endpoint_and_peak_rows(endpoint_rows, peak_rows)
+    combined = combine_endpoint_and_peak_rows(
+        _drop_superseded_legacy_observations(endpoint_rows),
+        _drop_superseded_legacy_observations(peak_rows),
+    )
     buckets: dict[tuple[str, ...], list[dict[str, object]]] = {}
     order: list[tuple[str, ...]] = []
     for row in combined:

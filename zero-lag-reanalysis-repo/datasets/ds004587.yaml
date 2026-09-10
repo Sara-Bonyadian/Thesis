@@ -7,7 +7,9 @@ dataset_id: ds004587
 role: sensitivity
 
 paths:
-  raw_root: ../../data/raw/ds004587
+  # Wrapper clone is data/raw/ds004587/; BIDS subjects live in the nested
+  # dataset folder (symlink to the external OpenNeuro annex checkout).
+  raw_root: ../../data/raw/ds004587/ds004587
   output_subdir: sensitivity/ds004587
 
 selection:

@@ -204,19 +204,19 @@ def _read_raw_eeglab_v73(path: Path) -> mne.io.BaseRaw:
     return mne.io.RawArray(data, info, verbose=False)
 
 
-def _read_raw(path: Path, data_format: str) -> mne.io.BaseRaw:
+def _read_raw(path: Path, data_format: str, *, preload: bool = True) -> mne.io.BaseRaw:
     fmt = data_format.casefold()
     if fmt == "brainvision":
-        return mne.io.read_raw_brainvision(str(path), preload=True, verbose=False)
+        return mne.io.read_raw_brainvision(str(path), preload=preload, verbose=False)
     if fmt == "eeglab":
         try:
-            return mne.io.read_raw_eeglab(str(path), preload=True, verbose=False)
+            return mne.io.read_raw_eeglab(str(path), preload=preload, verbose=False)
         except NotImplementedError as exc:
             if "matlab v7.3" in str(exc).lower() or "hdf reader" in str(exc).lower():
                 return _read_raw_eeglab_v73(path)
             raise
     if fmt == "edf":
-        return mne.io.read_raw_edf(str(path), preload=True, verbose=False)
+        return mne.io.read_raw_edf(str(path), preload=preload, verbose=False)
     if fmt == "bids_physio":
         from .bids_physio import read_physio_raw
 

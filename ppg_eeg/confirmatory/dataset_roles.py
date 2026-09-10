@@ -270,16 +270,6 @@ DATASET_SCIENTIFIC_PROFILES: dict[str, DatasetScientificProfile] = {
         supports_graded_demand=True,
         supports_duration_analysis=True,
         supports_topography=True,
-        # BLOCKED: current derivatives embed the step token in the pairing
-        # identity (participant_id / subject_id derived from observation_id or
-        # subject_id that includes step1/2/3), so C5 yields n_paired_keys=0.
-        # Requires a separate participant-ID correction and full C0–C7 rerun.
-        runtime_status="blocked",
-        block_reason=(
-            "Step token embedded in participant pairing identity "
-            "(participant_id/subject_id); zero paired contrasts in current "
-            "derivatives. Separate participant-ID fix + full C0–C7 rerun required."
-        ),
     ),
     "ds003816": DatasetScientificProfile(
         dataset_id="ds003816",

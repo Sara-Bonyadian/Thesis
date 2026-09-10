@@ -246,5 +246,97 @@ class TestMultitaperOutputs(unittest.TestCase):
             self.assertEqual(qc[0]["step_s"], "1.0")
 
 
+class TestC1aMemorySafePreprocess(unittest.TestCase):
+    def test_memmap_preprocess_matches_in_memory(self) -> None:
+        import mne
+
+        from ppg_eeg.confirmatory.multitaper_power import preprocess_eeg_memmap
+        from ppg_eeg.core_eeg_ppg.eeg import preprocess_eeg
+
+        sfreq = 200.0
+        duration_s = 6.0
+        n_times = int(round(sfreq * duration_s))
+        time = np.arange(n_times, dtype=float) / sfreq
+        rng = np.random.default_rng(0)
+        data = np.vstack(
+            [
+                1e-6 * np.sin(2 * np.pi * 10.0 * time) + 1e-7 * rng.standard_normal(n_times),
+                1e-6 * np.sin(2 * np.pi * 20.0 * time) + 1e-7 * rng.standard_normal(n_times),
+                1e-6 * np.sin(2 * np.pi * 6.0 * time) + 1e-7 * rng.standard_normal(n_times),
+            ]
+        )
+        info = mne.create_info(["Cz", "Pz", "Fz"], sfreq=sfreq, ch_types="eeg")
+        raw = mne.io.RawArray(data, info, verbose=False)
+        prepared = preprocess_eeg(raw, l_freq=1.0, h_freq=60.0, drop_bad_channels=True)
+        with TemporaryDirectory() as tmp:
+            mmap, names, mm_sfreq, bads, path = preprocess_eeg_memmap(
+                raw, Path(tmp) / "work.mmap", l_freq=1.0, h_freq=60.0
+            )
+            try:
+                self.assertEqual(names, prepared.raw.ch_names)
+                self.assertEqual(mm_sfreq, float(prepared.raw.info["sfreq"]))
+                self.assertEqual(bads, prepared.bad_channels)
+                np.testing.assert_allclose(
+                    np.asarray(mmap),
+                    prepared.raw.get_data(),
+                    rtol=1e-7,
+                    atol=1e-14,
+                )
+            finally:
+                mmap._mmap.close()
+                Path(path).unlink(missing_ok=True)
+
+    def test_memmap_extract_matches_in_memory_features(self) -> None:
+        import mne
+
+        from ppg_eeg.confirmatory.multitaper_power import extract_multitaper_from_raw
+
+        sfreq = 200.0
+        duration_s = 5.0
+        n_times = int(round(sfreq * duration_s))
+        time = np.arange(n_times, dtype=float) / sfreq
+        data = np.vstack(
+            [
+                1e-6 * np.sin(2 * np.pi * 10.0 * time),
+                1e-6 * np.sin(2 * np.pi * 20.0 * time),
+            ]
+        )
+        info = mne.create_info(["Cz", "Pz"], sfreq=sfreq, ch_types="eeg")
+        raw = mne.io.RawArray(data.copy(), info, verbose=False)
+        in_memory = extract_multitaper_from_raw(
+            raw, identity={"observation_id": "mem-id"}, cache_dpss=False
+        )
+        with TemporaryDirectory() as tmp:
+            from ppg_eeg.confirmatory.multitaper_power import (
+                compute_multitaper_power,
+                preprocess_eeg_memmap,
+            )
+
+            mmap, names, mm_sfreq, bads, path = preprocess_eeg_memmap(
+                mne.io.RawArray(data.copy(), info, verbose=False),
+                Path(tmp) / "work.mmap",
+            )
+            try:
+                memmap_result = compute_multitaper_power(
+                    mmap,
+                    sfreq=mm_sfreq,
+                    ch_names=names,
+                    rejected_channels=bads,
+                    identity={"observation_id": "mem-id"},
+                    cache_dpss=False,
+                )
+            finally:
+                mmap._mmap.close()
+                Path(path).unlink(missing_ok=True)
+        self.assertEqual(len(in_memory.features), len(memmap_result.features))
+        for left, right in zip(in_memory.features, memmap_result.features, strict=True):
+            self.assertEqual(left.channel, right.channel)
+            self.assertEqual(left.band, right.band)
+            self.assertAlmostEqual(left.absolute_power, right.absolute_power, places=10)
+            self.assertAlmostEqual(
+                left.absolute_log10_power, right.absolute_log10_power, places=10
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Sequence
 
@@ -56,7 +57,7 @@ class MindfulnessAdapter(DatasetAdapter):
         condition_filter = normalized_set(conditions)
         session_filter = normalized_set(sessions)
 
-        rows: list[CanonicalObservation] = []
+        candidates: list[tuple[Path, str, str, str]] = []
         vhdr_files = unique_sorted_paths(dataset_root.glob("mbd-*/**/*.vhdr"))
         for vhdr in vhdr_files:
             mbd = _mbd_folder(vhdr)
@@ -81,15 +82,30 @@ class MindfulnessAdapter(DatasetAdapter):
             if not eeg_bin.is_file() or not marker.is_file():
                 continue
 
-            subject_instance = f"{mbd.casefold()}_{session_label}_{task_label}"
-            obs_id = f"{self.dataset_id}-{mbd.casefold()}-{session_label}-task-{task_label}"
+            candidates.append((vhdr, mbd.casefold(), session_label, task_label))
+
+        multiplicity = Counter((mbd, session_label, task_label) for _, mbd, session_label, task_label in candidates)
+        seen_by_key: dict[tuple[str, str, str], int] = defaultdict(int)
+
+        rows: list[CanonicalObservation] = []
+        for vhdr, mbd, session_label, task_label in candidates:
+            key = (mbd, session_label, task_label)
+            seen_by_key[key] += 1
+            run_index = seen_by_key[key]
+            run_id = f"{run_index:02d}" if multiplicity[key] > 1 else "single"
+            run_suffix = f"-run-{run_id}" if multiplicity[key] > 1 else ""
+            obs_id = f"{self.dataset_id}-{mbd}-{session_label}-task-{task_label}{run_suffix}"
             rows.append(
                 CanonicalObservation(
                     dataset_id=self.dataset_id,
                     observation_id=obs_id,
-                    subject_id=subject_instance,
+                    subject_id=mbd,
+                    participant_id=mbd,
+                    session_id=session_label,
+                    run_id=run_id,
+                    condition_id=task_label,
                     task_label=task_label,
-                    condition_label=condition_label,
+                    condition_label=task_label,
                     eeg_path=vhdr,
                     eeg_format="brainvision",
                     ppg_source="embedded_eeg",

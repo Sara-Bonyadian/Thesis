@@ -262,21 +262,14 @@ class TestMindfulnessSteps(unittest.TestCase):
             {"step1__step2", "step1__step3"},
         )
 
-    def test_mindfulness_is_blocked_pending_participant_id_fix(self) -> None:
-        from ppg_eeg.confirmatory.dataset_roles import (
-            is_runtime_blocked,
-            runtime_block_reason,
-        )
-
-        self.assertTrue(is_runtime_blocked("mindfulness"))
-        reason = runtime_block_reason("mindfulness")
-        self.assertIn("participant", reason.casefold())
-        self.assertIn("C0", reason)
+    def test_mindfulness_stays_out_of_primary_meta_pool(self) -> None:
         self.assertFalse(eligible_for_primary_meta_pooling("mindfulness", "step1__step2"))
+        self.assertFalse(eligible_for_primary_meta_pooling("mindfulness", "step1__step3"))
 
-    def test_current_derivatives_have_zero_paired_contrasts(self) -> None:
+    def test_current_derivatives_preserve_session_pairing(self) -> None:
         from pathlib import Path
         import csv
+        import re
 
         paired = Path(
             "derivatives/confirmatory_temporal_coupling/sensitivity/mindfulness/"
@@ -286,22 +279,41 @@ class TestMindfulnessSteps(unittest.TestCase):
             "derivatives/confirmatory_temporal_coupling/sensitivity/mindfulness/"
             "C5/pairing_qc.csv"
         )
-        if not paired.is_file() or not qc.is_file():
+        subject = Path(
+            "derivatives/confirmatory_temporal_coupling/sensitivity/mindfulness/"
+            "C5/subject_level_metrics.csv"
+        )
+        if not paired.is_file() or not qc.is_file() or not subject.is_file():
             self.skipTest("mindfulness C5 derivatives absent")
         with paired.open(encoding="utf-8") as handle:
             paired_rows = list(csv.DictReader(handle))
-        self.assertEqual(paired_rows, [])
         with qc.open(encoding="utf-8") as handle:
             qc_rows = list(csv.DictReader(handle))
-        self.assertTrue(qc_rows)
-        self.assertTrue(all(int(float(r.get("n_paired_keys") or 0)) == 0 for r in qc_rows))
-        # Diagnostic: pairing identity embeds the step token.
-        sample = qc_rows[0]
-        pid = str(sample.get("participant_id") or "")
-        self.assertTrue(
-            any(tok in pid for tok in ("step1", "step2", "step3", "_step")),
-            msg=f"expected step token in pairing participant_id, got {pid!r}",
-        )
+        with subject.open(encoding="utf-8") as handle:
+            subject_rows = list(csv.DictReader(handle))
+        self.assertTrue(paired_rows)
+        pid_re = re.compile(r"^mbd-\d+$")
+        for row in (*subject_rows, *qc_rows, *paired_rows):
+            pid = str(row.get("participant_id") or "")
+            session = str(row.get("session_id") or "").casefold()
+            if pid:
+                self.assertRegex(pid, pid_re)
+                self.assertNotIn("step", pid)
+                self.assertNotIn("part", pid)
+            if session:
+                self.assertIn(session, {"part1", "part2"})
+        for contrast_id in ("step1__step2", "step1__step3"):
+            qc_paired = [
+                r
+                for r in qc_rows
+                if r.get("contrast_id") == contrast_id
+                and r.get("pairing_status") == "paired"
+            ]
+            self.assertTrue(qc_paired, msg=f"{contrast_id} has no paired QC rows")
+            n_paired = int(float(qc_paired[0].get("n_paired_keys") or 0))
+            self.assertGreater(n_paired, 0)
+            self.assertGreaterEqual(n_paired, 45)
+            self.assertLessEqual(n_paired, 58)
 
 
 class TestDs003816Duration(unittest.TestCase):

@@ -394,6 +394,8 @@ PROTOCOL_SPECS: dict[str, ProtocolSpec] = {
 }
 
 _RUN_RE = re.compile(r"(?:^|[-_])run[-_]?([a-zA-Z0-9]+)(?:$|[-_])", re.IGNORECASE)
+_SES_RE = re.compile(r"(?:^|[-_])ses[-_]?([a-zA-Z0-9]+)(?:$|[-_])", re.IGNORECASE)
+_PART_RE = re.compile(r"(?:^|[-_])part([12])(?:$|[-_])", re.IGNORECASE)
 
 
 def protocol_spec(dataset_id: str) -> ProtocolSpec:
@@ -444,7 +446,8 @@ def _protocol_participant_id(
         if "-ses-" in remainder:
             return remainder.split("-ses-", 1)[0]
         if "-task-" in remainder:
-            return remainder.split("-task-", 1)[0]
+            token = remainder.split("-task-", 1)[0]
+            return re.sub(r"-(part[12])$", "", token)
         token = remainder.split("-", 1)[0]
         if token:
             return token
@@ -468,6 +471,9 @@ def _protocol_session_id(
         match = _SES_RE.search(observation.observation_id)
         if match:
             return match.group(1).casefold()
+    part_match = _PART_RE.search(observation.observation_id or "")
+    if part_match:
+        return f"part{part_match.group(1)}"
     return "single"
 
 
@@ -497,8 +503,11 @@ def _session_id(observation: CanonicalObservation) -> str:
     subject = str(observation.subject_id or "").strip().casefold()
     if "_" in subject:
         suffix = subject.rsplit("_", 1)[-1]
-        if suffix and not suffix.isdigit():
+        if suffix and not suffix.isdigit() and suffix not in {"step1", "step2", "step3"}:
             return suffix
+    part_match = _PART_RE.search(observation.observation_id or "")
+    if part_match:
+        return f"part{part_match.group(1)}"
     return canonical_observation_identity(observation).session_id
 
 

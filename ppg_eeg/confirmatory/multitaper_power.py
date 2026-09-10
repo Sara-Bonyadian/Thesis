@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
+import multiprocessing
+import re
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -33,6 +36,7 @@ from .parallel_util import (
     atomic_write_csv_rows,
     atomic_write_json,
     configure_blas_threads,
+    eeg_payload_bytes,
     estimate_c1a_mem_per_worker_gb,
     file_identity,
     prepare_obs_checkpoint_dir,
@@ -51,6 +55,11 @@ ROBUST_MEDIAN_CHANNEL = "__robust_median__"
 CHECKPOINT_SCHEMA_VERSION = "c1a_checkpoint_v1"
 CHECKPOINT_DIRNAME = "_obs_checkpoints"
 COMPLETE_MARKER_FILENAME = "C1a_COMPLETE.json"
+# Switch to disk memmap when the EEG float64 working set would exceed this.
+C1A_MEMMAP_THRESHOLD_BYTES = 1_073_741_824
+C1A_ISOLATE_MEM_EST_GB = 4.0
+C1A_TIME_CHUNK_SAMPLES = 50_000
+C1A_WORK_MMAP_NAME = "._c1a_eeg_work.f64.mmap"
 
 # Process-local DPSS cache: identical tapers reused across equal window lengths.
 _DPSS_CACHE: dict[tuple[int, float, int], tuple[np.ndarray, np.ndarray]] = {}
@@ -233,15 +242,24 @@ def _line_noise_ratio(
     nyquist = sfreq / 2.0
     if line_frequency_hz >= nyquist or data.shape[1] < 4:
         return None
-    centered = data - np.mean(data, axis=1, keepdims=True)
-    spectrum = np.abs(np.fft.rfft(centered, axis=1)) ** 2
     freqs = np.fft.rfftfreq(data.shape[1], d=1.0 / sfreq)
     line_mask = np.abs(freqs - line_frequency_hz) <= 1.0
     broadband_mask = (freqs >= 1.0) & (freqs <= nyquist)
-    denominator = float(np.sum(spectrum[:, broadband_mask]))
-    if denominator <= 0 or not np.any(line_mask):
+    if not np.any(line_mask):
         return 0.0
-    return float(np.sum(spectrum[:, line_mask]) / denominator)
+    numerator = 0.0
+    denominator = 0.0
+    # Row-wise rfft is algebraically identical to a 2D rfft and avoids
+    # materializing (n_channels, n_freqs) complex spectra for long recordings.
+    for index in range(data.shape[0]):
+        row = np.asarray(data[index], dtype=float)
+        centered = row - float(np.mean(row))
+        spectrum = np.abs(np.fft.rfft(centered)) ** 2
+        numerator += float(np.sum(spectrum[line_mask]))
+        denominator += float(np.sum(spectrum[broadband_mask]))
+    if denominator <= 0:
+        return 0.0
+    return float(numerator / denominator)
 
 
 def _notch_line_noise(
@@ -249,15 +267,187 @@ def _notch_line_noise(
     *,
     sfreq: float,
     line_frequency_hz: float | None,
+    out: np.ndarray | None = None,
 ) -> tuple[np.ndarray, str]:
+    target = data if out is None else out
     if line_frequency_hz is None or line_frequency_hz <= 0:
-        return data.copy(), "not_applied_line_frequency_unknown"
+        if out is None:
+            return data.copy(), "not_applied_line_frequency_unknown"
+        if out is not data:
+            _copy_rows(data, out)
+        return out, "not_applied_line_frequency_unknown"
     if line_frequency_hz >= sfreq / 2.0:
-        return data.copy(), "not_applied_line_frequency_at_or_above_nyquist"
+        if out is None:
+            return data.copy(), "not_applied_line_frequency_at_or_above_nyquist"
+        if out is not data:
+            _copy_rows(data, out)
+        return out, "not_applied_line_frequency_at_or_above_nyquist"
     b, a = iirnotch(line_frequency_hz, Q=30.0, fs=sfreq)
     if data.shape[1] <= 3 * max(len(a), len(b)):
-        return data.copy(), "not_applied_recording_too_short"
-    return filtfilt(b, a, data, axis=1), f"notch_{line_frequency_hz:g}_hz_q30"
+        if out is None:
+            return data.copy(), "not_applied_recording_too_short"
+        if out is not data:
+            _copy_rows(data, out)
+        return out, "not_applied_recording_too_short"
+    if out is None:
+        target = np.empty_like(data, dtype=float)
+    for index in range(data.shape[0]):
+        row = np.asarray(data[index], dtype=float)
+        target[index] = filtfilt(b, a, row)
+    return target, f"notch_{line_frequency_hz:g}_hz_q30"
+
+
+def _copy_rows(source: np.ndarray, dest: np.ndarray) -> None:
+    for index in range(source.shape[0]):
+        dest[index] = np.asarray(source[index], dtype=float)
+
+
+def _all_finite(data: np.ndarray) -> bool:
+    for index in range(data.shape[0]):
+        if not np.all(np.isfinite(np.asarray(data[index], dtype=float))):
+            return False
+    return True
+
+
+def _eeg_float64_nbytes(raw: mne.io.BaseRaw) -> int:
+    picks = mne.pick_types(raw.info, eeg=True, exclude=[])
+    n_ch = int(len(picks)) if len(picks) else int(len(raw.ch_names))
+    return int(n_ch) * int(raw.n_times) * 8
+
+
+def _open_float64_memmap(path: Path, shape: tuple[int, int]) -> np.memmap:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
+    return np.memmap(path, dtype=np.float64, mode="w+", shape=shape)
+
+
+def _fill_memmap_from_raw(raw: mne.io.BaseRaw, dest: np.memmap, *, chunk_samples: int) -> None:
+    n_times = int(raw.n_times)
+    step = max(1, int(chunk_samples))
+    for start in range(0, n_times, step):
+        stop = min(n_times, start + step)
+        dest[:, start:stop] = raw.get_data(start=start, stop=stop)
+
+
+def _filter_memmap(
+    data: np.memmap,
+    *,
+    sfreq: float,
+    l_freq: float,
+    h_freq: float,
+) -> None:
+    for index in range(data.shape[0]):
+        row = np.asarray(data[index], dtype=np.float64)
+        filtered = mne.filter.filter_data(
+            row,
+            sfreq,
+            l_freq,
+            h_freq,
+            copy=False,
+            verbose=False,
+        )
+        data[index] = np.asarray(filtered, dtype=np.float64)
+        del row, filtered
+
+
+def _variance_z_bad_indices(data: np.ndarray, z_thresh: float) -> list[int]:
+    n_ch = int(data.shape[0])
+    if n_ch == 0:
+        return []
+    variances = np.empty(n_ch, dtype=float)
+    for index in range(n_ch):
+        variances[index] = float(np.var(np.asarray(data[index], dtype=float)))
+    if np.allclose(variances, 0):
+        return []
+    z = (variances - np.mean(variances)) / (np.std(variances) + 1e-12)
+    return [index for index, value in enumerate(z) if abs(float(value)) > float(z_thresh)]
+
+
+def _average_reference_memmap(data: np.ndarray, *, chunk_samples: int) -> None:
+    n_ch, n_times = int(data.shape[0]), int(data.shape[1])
+    if n_ch == 0 or n_times == 0:
+        return
+    step = max(1, int(chunk_samples))
+    for start in range(0, n_times, step):
+        stop = min(n_times, start + step)
+        block = np.asarray(data[:, start:stop], dtype=np.float64)
+        block -= np.mean(block, axis=0, keepdims=True)
+        data[:, start:stop] = block
+        del block
+
+
+def _compact_channels(
+    source: np.ndarray,
+    keep: Sequence[int],
+    dest: np.ndarray,
+) -> None:
+    for new_index, old_index in enumerate(keep):
+        dest[new_index] = np.asarray(source[int(old_index)], dtype=np.float64)
+
+
+def preprocess_eeg_memmap(
+    raw: mne.io.BaseRaw,
+    work_path: Path,
+    *,
+    l_freq: float = 1.0,
+    h_freq: float = 60.0,
+    bad_channel_variance_z: float = 3.0,
+    reference: str = "average",
+    drop_bad_channels: bool = True,
+    chunk_samples: int = C1A_TIME_CHUNK_SAMPLES,
+) -> tuple[np.memmap, list[str], float, list[str], Path]:
+    """Same steps as ``preprocess_eeg``, without duplicating the full Raw in RAM."""
+    if reference != "average":
+        raise ValueError(f"Unsupported reference: {reference!r}")
+    nyquist = float(raw.info["sfreq"]) / 2.0
+    effective_h_freq = min(float(h_freq), np.nextafter(nyquist, 0.0))
+    picked = raw.copy().pick("eeg")
+    if not picked.preload:
+        # Pick on an unpreloaded Raw does not load data; fill the memmap in chunks.
+        pass
+    ch_names = list(picked.ch_names)
+    sfreq = float(picked.info["sfreq"])
+    shape = (len(ch_names), int(picked.n_times))
+    work_path = Path(work_path)
+    mmap = _open_float64_memmap(work_path, shape)
+    try:
+        _fill_memmap_from_raw(picked, mmap, chunk_samples=chunk_samples)
+        del picked
+        gc.collect()
+        _filter_memmap(mmap, sfreq=sfreq, l_freq=float(l_freq), h_freq=effective_h_freq)
+        bad_idx = _variance_z_bad_indices(mmap, bad_channel_variance_z)
+        bads = [ch_names[i] for i in bad_idx]
+        keep = [i for i in range(len(ch_names)) if i not in set(bad_idx)] if drop_bad_channels else list(range(len(ch_names)))
+        if drop_bad_channels and bad_idx:
+            keep_names = [ch_names[i] for i in keep]
+            compact_path = work_path.with_name(work_path.name + ".keep")
+            compact = _open_float64_memmap(compact_path, (len(keep), shape[1]))
+            _compact_channels(mmap, keep, compact)
+            compact.flush()
+            compact._mmap.close()
+            del compact
+            mmap._mmap.close()
+            del mmap
+            gc.collect()
+            work_path.unlink(missing_ok=True)
+            compact_path.replace(work_path)
+            mmap = np.memmap(
+                work_path, dtype=np.float64, mode="r+", shape=(len(keep), shape[1])
+            )
+            ch_names = keep_names
+        if reference == "average":
+            _average_reference_memmap(mmap, chunk_samples=chunk_samples)
+        mmap.flush()
+        return mmap, ch_names, sfreq, bads, work_path
+    except Exception:
+        try:
+            mmap._mmap.close()
+        except Exception:
+            pass
+        work_path.unlink(missing_ok=True)
+        work_path.with_name(work_path.name + ".keep").unlink(missing_ok=True)
+        raise
 
 
 def _integrate_band(
@@ -365,7 +555,7 @@ def compute_multitaper_power(
         raise ValueError("window_s and step_s must be positive.")
     if time_bandwidth <= 0 or n_tapers <= 0:
         raise ValueError("time_bandwidth and n_tapers must be positive.")
-    if not np.all(np.isfinite(data)):
+    if not _all_finite(data):
         raise ValueError("EEG data must contain only finite values.")
 
     ids = _identity(identity)
@@ -385,7 +575,13 @@ def compute_multitaper_power(
     if not all_bands_supported:
         warnings.append("nyquist_below_low_gamma_upper_edge")
 
-    selected = data[indices] if indices else np.empty((0, data.shape[1]))
+    if indices == list(range(int(data.shape[0]))):
+        selected = data
+    elif not indices:
+        selected = np.empty((0, data.shape[1]), dtype=float)
+    else:
+        selected = np.empty((len(indices), data.shape[1]), dtype=float)
+        _compact_channels(data, indices, selected)
     line_ratio_before = _line_noise_ratio(
         selected, sfreq=sfreq_hz, line_frequency_hz=line_frequency_hz
     )
@@ -394,9 +590,10 @@ def compute_multitaper_power(
             selected,
             sfreq=sfreq_hz,
             line_frequency_hz=line_frequency_hz,
+            out=selected,
         )
     else:
-        processed = selected.copy()
+        processed = selected
         line_handling = (
             "not_applied_disabled"
             if not apply_line_notch
@@ -443,7 +640,7 @@ def compute_multitaper_power(
     for window_index, start in enumerate(starts):
         stop = start + window_samples
         psd, freqs = _multitaper_psd(
-            processed[:, start:stop],
+            np.asarray(processed[:, start:stop], dtype=float),
             sfreq=sfreq_hz,
             time_bandwidth=time_bandwidth,
             n_tapers=n_tapers,
@@ -578,12 +775,18 @@ def extract_multitaper_from_raw(
         info_line_frequency = raw.info.get("line_freq")
         if info_line_frequency is not None and math.isfinite(float(info_line_frequency)):
             resolved_line_frequency = float(info_line_frequency)
+    data = cleaned.get_data()
+    ch_names = list(cleaned.ch_names)
+    sfreq = float(cleaned.info["sfreq"])
+    rejected = list(prepared.bad_channels)
+    del prepared, cleaned
+    gc.collect()
     return compute_multitaper_power(
-        cleaned.get_data(),
-        sfreq=float(cleaned.info["sfreq"]),
-        ch_names=cleaned.ch_names,
+        data,
+        sfreq=sfreq,
+        ch_names=ch_names,
         clean_channels=clean_channels,
-        rejected_channels=prepared.bad_channels,
+        rejected_channels=rejected,
         line_frequency_hz=resolved_line_frequency,
         apply_line_notch=True,
         identity=identity,
@@ -595,6 +798,7 @@ def extract_multitaper_from_raw(
 def write_multitaper_outputs(
     result: MultitaperResult,
     output_dir: str | Path,
+    identity: Mapping[str, object] | None = None,
 ) -> tuple[Path, Path]:
     output_path = Path(output_dir).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
@@ -625,7 +829,7 @@ def write_multitaper_outputs(
         feature_fields,
     )
     qc_path = output_path / QC_FILENAME
-    qc_row = _enrich_c1a_qc_row(result.qc.to_row())
+    qc_row = _enrich_c1a_qc_row(result.qc.to_row(), identity=identity)
     atomic_write_csv_rows(
         qc_path,
         [qc_row],
@@ -634,7 +838,67 @@ def write_multitaper_outputs(
     return features_path, qc_path
 
 
-def _enrich_c1a_qc_row(row: Mapping[str, object]) -> dict[str, object]:
+_C1A_PART_RE = re.compile(r"(?:^|[-_])part([12])(?:$|[-_])", re.IGNORECASE)
+_C1A_RUN_RE = re.compile(r"(?:^|[-_])run[-_]?([a-zA-Z0-9]+)(?:$|[-_])", re.IGNORECASE)
+_C1A_MBD_RE = re.compile(r"(mbd-\d+)", re.IGNORECASE)
+_C1A_MISSING = frozenset({"", "nan", "none", "null", "single"})
+
+
+def _c1a_token(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and not math.isfinite(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.casefold() in _C1A_MISSING else text
+
+
+def _c1a_session_id(row: Mapping[str, object], identity: Mapping[str, object] | None) -> str:
+    for source in (identity or {}, row):
+        session = _c1a_token(source.get("session_id") or source.get("session_label"))
+        if session and session.casefold() not in {"step1", "step2", "step3"}:
+            return session.casefold()
+    observation_id = str(
+        (identity or {}).get("observation_id") or row.get("observation_id") or ""
+    )
+    match = _C1A_PART_RE.search(observation_id)
+    if match:
+        return f"part{match.group(1)}"
+    return ""
+
+
+def _c1a_participant_id(
+    row: Mapping[str, object], identity: Mapping[str, object] | None
+) -> str:
+    for source in (identity or {}, row):
+        for key in ("participant_id", "subject_id"):
+            value = _c1a_token(source.get(key))
+            if value:
+                match = _C1A_MBD_RE.search(value)
+                return (match.group(1) if match else value).casefold()
+    observation_id = str(
+        (identity or {}).get("observation_id") or row.get("observation_id") or ""
+    )
+    match = _C1A_MBD_RE.search(observation_id)
+    return match.group(1).casefold() if match else ""
+
+
+def _c1a_run_id(row: Mapping[str, object], identity: Mapping[str, object] | None) -> str:
+    for source in (identity or {}, row):
+        run_id = _c1a_token(source.get("run_id"))
+        if run_id:
+            return run_id.casefold()
+    observation_id = str(
+        (identity or {}).get("observation_id") or row.get("observation_id") or ""
+    )
+    match = _C1A_RUN_RE.search(observation_id)
+    return match.group(1).casefold() if match else "single"
+
+
+def _enrich_c1a_qc_row(
+    row: Mapping[str, object],
+    identity: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     """Attach StructuredReason fields at the C1a QC decision site."""
     status = str(row.get("status") or "").strip().casefold()
     warning = str(row.get("warning") or "").strip()
@@ -660,8 +924,9 @@ def _enrich_c1a_qc_row(row: Mapping[str, object]) -> dict[str, object]:
     return attach_structured_reason(
         {
             **dict(row),
-            "participant_id": str(row.get("subject_id") or row.get("participant_id") or ""),
-            "session_id": str(row.get("session_id") or ""),
+            "participant_id": _c1a_participant_id(row, identity),
+            "session_id": _c1a_session_id(row, identity),
+            "run_id": _c1a_run_id(row, identity),
             "exclusion_reason": exclusion,
             "reason_code": code,
         },
@@ -696,6 +961,7 @@ def extract_multitaper_file(
     bad_channel_variance_z: float = 3.0,
     reference: str = "average",
     cache_dpss: bool = True,
+    use_memmap: bool | None = None,
 ) -> tuple[Path, Path]:
     """Read EEG through the existing loader and write M3 outputs.
 
@@ -703,23 +969,75 @@ def extract_multitaper_file(
     (OpenNeuro BrainVision .vhdr/.vmrk/.eeg triples) are not followed. Resolving
     the symlink makes MNE look for companion files beside the content-hashed
     annex object name, which fails even when all three files are present.
+
+    Large recordings are preprocessed via a float64 disk memmap so peak RSS
+    stays near one channel plus one multitaper window, not 2× the full array.
     """
     # absolute() keeps BIDS/annex symlink paths intact; resolve() does not.
     load_path = Path(eeg_path).expanduser().absolute()
-    raw = _read_raw(load_path, eeg_format)
-    result = extract_multitaper_from_raw(
-        raw,
-        clean_channels=clean_channels,
-        identity=identity,
-        eeg_file=str(load_path),
-        line_frequency_hz=line_frequency_hz,
-        l_freq=l_freq,
-        h_freq=h_freq,
-        bad_channel_variance_z=bad_channel_variance_z,
-        reference=reference,
-        cache_dpss=cache_dpss,
+    output_path = Path(output_dir).expanduser().resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    raw: mne.io.BaseRaw | None = _read_raw(load_path, eeg_format, preload=False)
+    nyquist = float(raw.info["sfreq"]) / 2.0
+    effective_h_freq = min(float(h_freq), np.nextafter(nyquist, 0.0))
+    working_bytes = _eeg_float64_nbytes(raw)
+    disk_bytes = eeg_payload_bytes(load_path)
+    should_memmap = (
+        bool(use_memmap)
+        if use_memmap is not None
+        else working_bytes >= C1A_MEMMAP_THRESHOLD_BYTES or disk_bytes >= C1A_MEMMAP_THRESHOLD_BYTES
     )
-    return write_multitaper_outputs(result, output_dir)
+    try:
+        if should_memmap:
+            work_path = output_path / C1A_WORK_MMAP_NAME
+            mmap, ch_names, sfreq, bads, work_path = preprocess_eeg_memmap(
+                raw,
+                work_path,
+                l_freq=l_freq,
+                h_freq=h_freq,
+                bad_channel_variance_z=bad_channel_variance_z,
+                reference=reference,
+                drop_bad_channels=True,
+            )
+            raw = None
+            gc.collect()
+            try:
+                result = compute_multitaper_power(
+                    mmap,
+                    sfreq=sfreq,
+                    ch_names=ch_names,
+                    clean_channels=clean_channels,
+                    rejected_channels=bads,
+                    line_frequency_hz=line_frequency_hz,
+                    apply_line_notch=True,
+                    identity=identity,
+                    eeg_file=str(load_path),
+                    cache_dpss=cache_dpss,
+                )
+            finally:
+                mmap._mmap.close()
+                del mmap
+                gc.collect()
+                Path(work_path).unlink(missing_ok=True)
+            return write_multitaper_outputs(result, output_path, identity=identity)
+
+        raw.load_data()
+        result = extract_multitaper_from_raw(
+            raw,
+            clean_channels=clean_channels,
+            identity=identity,
+            eeg_file=str(load_path),
+            line_frequency_hz=line_frequency_hz,
+            l_freq=l_freq,
+            h_freq=effective_h_freq,
+            bad_channel_variance_z=bad_channel_variance_z,
+            reference=reference,
+            cache_dpss=cache_dpss,
+        )
+        return write_multitaper_outputs(result, output_path, identity=identity)
+    finally:
+        raw = None
+        gc.collect()
 
 
 def _c1a_param_fingerprint(
@@ -853,7 +1171,10 @@ def _process_one_c1a_observation(
         obs_dir,
         identity={
             "dataset_id": obs.dataset_id,
-            "subject_id": obs.subject_id,
+            "subject_id": obs.participant_id or obs.subject_id,
+            "participant_id": obs.participant_id or obs.subject_id,
+            "session_id": obs.session_id or obs.session_label or "",
+            "run_id": obs.run_id or "single",
             "task": obs.task_label,
             "condition": obs.condition_label,
             "observation_id": obs.observation_id,
@@ -865,6 +1186,7 @@ def _process_one_c1a_observation(
         reference=reference,
         cache_dpss=cache_dpss,
     )
+    gc.collect()
     return obs.observation_id
 
 
@@ -920,8 +1242,14 @@ def run_confirmatory_multitaper(
     n_jobs: int | None = -1,
     progress: bool = True,
     cache_dpss: bool = True,
+    isolate_observations: bool | None = None,
+    laptop: bool = False,
 ) -> dict[str, object]:
     """Extract multitaper features for all observations (serial or parallel)."""
+    if laptop:
+        n_jobs = 1
+        if isolate_observations is None:
+            isolate_observations = True
     output_path = Path(stage_root).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
     complete_marker = output_path / COMPLETE_MARKER_FILENAME
@@ -968,6 +1296,10 @@ def run_confirmatory_multitaper(
     )
     mem_est = estimate_c1a_mem_per_worker_gb([obs.eeg_path for obs in obs_list])
     total_ram = total_ram_bytes()
+    if isolate_observations is None:
+        isolate_observations = bool(laptop) or (
+            workers == 1 and mem_est >= C1A_ISOLATE_MEM_EST_GB
+        )
     pending: list[int] = []
     written: list[str] = []
     errors: list[str] = []
@@ -999,8 +1331,15 @@ def run_confirmatory_multitaper(
         if workers == 1 and mem_est >= 4.0:
             print(
                 "[confirmatory] C1a: large EEG payloads detected — forcing serial "
-                "workers to avoid out-of-memory crashes. Use --n-jobs 1 explicitly "
-                "on laptops; raise n_jobs only if you have ample free RAM.",
+                "workers. Streaming memmap preprocess keeps peak RSS to one "
+                "channel/window instead of preload+Raw.copy().",
+                flush=True,
+            )
+        if isolate_observations:
+            print(
+                "[confirmatory] C1a laptop isolation: one observation per spawned "
+                "process (maxtasksperchild=1), memory released after each file. "
+                "Peak-RAM target <12 GB on a 16 GB host.",
                 flush=True,
             )
         if done:
@@ -1035,7 +1374,59 @@ def run_confirmatory_multitaper(
             )
 
     if pending:
-        if workers == 1 or len(pending) == 1:
+        def _record_error(index: int, message: str) -> None:
+            nonlocal done, last_report
+            errors.append(message)
+            done += 1
+            if progress:
+                last_report = report_progress(
+                    label="C1a",
+                    done=done,
+                    total=total,
+                    start_time=start_time,
+                    last_report=last_report,
+                    force=(done == total),
+                )
+
+        if isolate_observations and (workers == 1 or len(pending) == 1):
+            configure_blas_threads(1)
+            ctx = multiprocessing.get_context("spawn")
+            payloads = [
+                (
+                    index,
+                    obs_list[index],
+                    str(obs_dirs[index]),
+                    line_frequency_hz,
+                    float(l_freq),
+                    float(h_freq),
+                    float(bad_channel_variance_z),
+                    str(reference),
+                    bool(cache_dpss),
+                )
+                for index in pending
+            ]
+            with ctx.Pool(
+                processes=1,
+                initializer=configure_blas_threads,
+                initargs=(1,),
+                maxtasksperchild=1,
+            ) as pool:
+                for payload in payloads:
+                    index = payload[0]
+                    try:
+                        _, _ok_id, err = pool.apply(_worker_c1a, (payload,))
+                    except Exception as exc:  # noqa: BLE001
+                        _record_error(
+                            index,
+                            f"{obs_list[index].observation_id}: worker_died: "
+                            f"{type(exc).__name__}: {exc}",
+                        )
+                        continue
+                    if err is None:
+                        _mark_ok(index)
+                    else:
+                        _record_error(index, err)
+        elif workers == 1 or len(pending) == 1:
             configure_blas_threads(1)
             for index in pending:
                 try:
@@ -1051,20 +1442,13 @@ def run_confirmatory_multitaper(
                     )
                     _mark_ok(index)
                 except Exception as exc:  # noqa: BLE001
-                    errors.append(
+                    _record_error(
+                        index,
                         f"{obs_list[index].observation_id}: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"{type(exc).__name__}: {exc}",
                     )
-                    done += 1
-                    if progress:
-                        last_report = report_progress(
-                            label="C1a",
-                            done=done,
-                            total=total,
-                            start_time=start_time,
-                            last_report=last_report,
-                            force=(done == total),
-                        )
+                finally:
+                    gc.collect()
         else:
             payloads = [
                 (
@@ -1154,6 +1538,7 @@ __all__ = [
     "compute_multitaper_power",
     "extract_multitaper_file",
     "extract_multitaper_from_raw",
+    "preprocess_eeg_memmap",
     "run_confirmatory_multitaper",
     "write_multitaper_outputs",
 ]

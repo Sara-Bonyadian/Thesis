@@ -62,11 +62,13 @@ def estimate_c1a_mem_per_worker_gb(
     default_gb: float = 2.5,
     max_gb: float = 16.0,
 ) -> float:
-    """Estimate peak RAM per C1a worker from on-disk EEG size.
+    """Estimate *unsafe in-memory* peak RAM per C1a worker from on-disk EEG size.
 
-    BrainVision/EEGLAB payloads are often int16 on disk but loaded as float64
-    (≈4×), and ``preprocess_eeg`` copies the Raw (another ≈2× transient peak).
-    Use an 8× multiplier of the largest payload, floored at ``default_gb``.
+    Historical in-memory path: preload as float64 plus ``Raw.copy()`` in
+    ``preprocess_eeg``. IEEE_FLOAT_32 BrainVision is ~2× on load and another ~2×
+    on copy (≈4× disk). int16 is ~4× then ~2× (≈8× disk). Report the conservative
+    8× figure so worker caps stay serial on 16 GB hosts. The memmap C1a path
+    keeps RSS far below this estimate.
     """
     max_bytes = 0
     for raw_path in eeg_paths or ():
@@ -98,6 +100,11 @@ def resolve_c1a_n_jobs(
         if mem_per_worker_gb is not None
         else estimate_c1a_mem_per_worker_gb(eeg_paths)
     )
+    max_payload = max((eeg_payload_bytes(path) for path in (eeg_paths or ())), default=0)
+    # Multi-GB recordings cannot share a 16 GB host even with the memmap path
+    # (page cache + one-channel FIR/FFT). Force serial above 1 GB on disk.
+    if max_payload >= 1024**3:
+        workers = 1
     total = total_ram_bytes()
     if total is not None and estimated > 0:
         usable = max(0.0, float(ram_fraction) * float(total))
